@@ -57,20 +57,11 @@ const DYNAMIC_PROMPTS = {
     `说一句开心的欢迎话，体现想念感和久别重逢。`,
 };
 
-// 解析当前生效的提供商：优先新的多提供商配置；
-// 未配置时回退旧的 llmApiKey/llmModel（DeepSeek 时代配置），保证老配置不失效。
+// 解析当前生效的提供商：统一走 providers 层。
+// 旧的明文 llmApiKey/llmModel 配置由 providers.getChatProvider() 内部一次性迁移为
+// 加密的 legacy-deepseek 提供商，因此这里不再直接读明文键，老配置依旧不失效。
 function resolveProvider() {
-  const active = providers.getChatProvider();
-  if (active) return active;
-  const legacyKey = typeof getSys === "function" && getSys("llmApiKey");
-  if (!legacyKey) return null;
-  return {
-    id: "legacy-deepseek",
-    type: "openai",
-    baseUrl: LEGACY_BASE_URL,
-    apiKey: legacyKey,
-    model: (typeof getSys === "function" && getSys("llmModel")) || DEFAULT_MODEL,
-  };
+  return providers.getChatProvider();
 }
 
 // 走统一提供商层发起单轮对话，并解析 {tolk,submitText} JSON 契约
@@ -119,21 +110,19 @@ class LLMService {
   }
 
   // 适配新提供商层：传入 apiKey 时构造临时提供商做连通性测试（旧设置页用法），
+  // 地址/模型沿用当前生效提供商（不再读旧的明文 llmBaseUrl/llmModel 键）；
   // 不传时测试当前生效的提供商。返回 Promise<boolean>。
   test(apiKey, petInfo) {
+    const active = resolveProvider();
     const providerCfg = apiKey
       ? {
           id: "test",
-          type: "openai",
-          baseUrl:
-            (typeof getSys === "function" && getSys("llmBaseUrl")) ||
-            LEGACY_BASE_URL,
+          type: active?.type || "openai",
+          baseUrl: active?.baseUrl || LEGACY_BASE_URL,
           apiKey,
-          model:
-            (typeof getSys === "function" && getSys("llmModel")) ||
-            DEFAULT_MODEL,
+          model: active?.model || DEFAULT_MODEL,
         }
-      : resolveProvider();
+      : active;
     if (!providerCfg) return Promise.resolve(false);
     return providers
       .testProvider(providerCfg)

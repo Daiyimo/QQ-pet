@@ -6,6 +6,15 @@ const https = _require("https");
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const ENC_PREFIX = "enc:"; // apiKey 落盘时加密 base64 的前缀标记，无前缀视为明文（兼容旧数据）
+const ENCRYPT_FAILED = "encfail:"; // 加密不可用时的失败信号；只在内存中流转，落盘前必须被拦截
+
+// —— 旧版（DeepSeek 时代）明文配置键：仅迁移逻辑使用，其他模块不要再直接读 ——
+const LEGACY_API_KEY_KEY = "llmApiKey";
+const LEGACY_MODEL_KEY = "llmModel";
+const LEGACY_BASE_URL_KEY = "llmBaseUrl";
+const LEGACY_PROVIDER_ID = "legacy-deepseek";
+const LEGACY_BASE_URL = "https://api.deepseek.com/v1";
+const LEGACY_DEFAULT_MODEL = "deepseek-chat";
 
 // —— sys 配置惰性访问 ——
 function sysGet(key) {
@@ -17,8 +26,12 @@ function sysSet(key, value) {
   if (typeof setSys === "function") setSys({ name: key, value });
 }
 
-// safeStorage 惰性获取（普通 node 下没有 electron）
+// safeStorage 惰性获取（普通 node 下没有 electron）；
+// _safeStorageStub 是单元测试注入点，生产运行时恒为 null
+let _safeStorageStub = null;
+
 function getSafeStorage() {
+  if (_safeStorageStub) return _safeStorageStub;
   try {
     return _require("electron").safeStorage || null;
   } catch (e) {
@@ -26,32 +39,75 @@ function getSafeStorage() {
   }
 }
 
-// apiKey 落盘：safeStorage.encryptString → base64（加 enc: 前缀）；
-// safeStorage 不可用时退回明文并告警。已带 enc: 前缀的不重复加密。
-function encryptApiKey(plain) {
-  if (!plain) return "";
-  if (String(plain).startsWith(ENC_PREFIX)) return plain;
-  const ss = getSafeStorage();
-  if (ss && ss.isEncryptionAvailable && ss.isEncryptionAvailable()) {
-    return ENC_PREFIX + ss.encryptString(String(plain)).toString("base64");
-  }
-  console.warn("[llm/providers] safeStorage 不可用，API Key 将以明文落盘");
-  return String(plain);
-}
-
-// 读取时解密；无法解密（换机/用户变更）返回空串，避免把密文当 key 发出去
-function decryptApiKey(stored) {
-  if (!stored) return "";
-  if (!String(stored).startsWith(ENC_PREFIX)) return String(stored);
+// 加密可用性判断：safeStorage 存在且系统凭据服务就绪
+function isEncryptionAvailable() {
   const ss = getSafeStorage();
   try {
-    if (ss && ss.isEncryptionAvailable && ss.isEncryptionAvailable()) {
-      return ss.decryptString(
-        Buffer.from(String(stored).slice(ENC_PREFIX.length), "base64")
-      );
-    }
-  } catch (e) {}
-  return "";
+    return !!(ss && ss.isEncryptionAvailable && ss.isEncryptionAvailable());
+  } catch (e) {
+    console.error("[llm/providers] 查询 safeStorage 可用性失败", e);
+    return false;
+  }
+}
+
+// apiKey 落盘：safeStorage.encryptString → base64（加 enc: 前缀）；
+// safeStorage 不可用时**绝不退回明文**，返回 ENCRYPT_FAILED 失败信号并记错误日志。
+// 已带 enc: 前缀的不重复加密。
+function encryptApiKey(plain) {
+  if (!plain) return "";
+  const raw = String(plain);
+  if (raw.startsWith(ENC_PREFIX)) return raw;
+  if (!isEncryptionAvailable()) {
+    console.error(
+      "[llm/providers] safeStorage 不可用，拒绝把 API Key 明文落盘",
+      new Error("safeStorage unavailable")
+    );
+    return ENCRYPT_FAILED;
+  }
+  try {
+    return ENC_PREFIX + getSafeStorage().encryptString(raw).toString("base64");
+  } catch (e) {
+    console.error("[llm/providers] API Key 加密失败，拒绝明文落盘", e);
+    return ENCRYPT_FAILED;
+  }
+}
+
+// 加密失败信号判定：调用方据此提示用户「填了 key 但没能保存」
+function isEncryptFailed(value) {
+  return value === ENCRYPT_FAILED;
+}
+
+// 读取时解密；无法解密（换机/用户变更）返回空串，避免把密文当 key 发出去。
+// 所有降级分支都必须留下错误日志，否则问题不可观测。
+function decryptApiKey(stored) {
+  if (!stored) return "";
+  const raw = String(stored);
+  if (raw === ENCRYPT_FAILED) {
+    console.error(
+      "[llm/providers] 读到加密失败标记，说明 API Key 从未成功保存，请在设置页重新填写",
+      new Error("api key was never persisted")
+    );
+    return "";
+  }
+  if (!raw.startsWith(ENC_PREFIX)) return raw; // 尚未迁移的旧明文，保持可用
+  if (!isEncryptionAvailable()) {
+    console.error(
+      "[llm/providers] safeStorage 不可用，已保存的 API Key 无法解密，按空 Key 降级",
+      new Error("safeStorage unavailable")
+    );
+    return "";
+  }
+  try {
+    return getSafeStorage().decryptString(
+      Buffer.from(raw.slice(ENC_PREFIX.length), "base64")
+    );
+  } catch (e) {
+    console.error(
+      "[llm/providers] API Key 解密失败（可能换机或系统凭据变更），按空 Key 降级",
+      e
+    );
+    return "";
+  }
 }
 
 // 图片归一化：接受 PNG/JPEG 的 Buffer 或 base64 字符串（可带 data URL 头），
@@ -296,6 +352,61 @@ async function testProvider(providerCfg) {
   }
 }
 
+// —— 旧版明文 API Key 一次性迁移 ——
+// 判定明文：sys.llmApiKey 非空且既不是 enc: 密文也不是失败信号。
+// 迁移：加密后写入 sys.llmProviders 的 legacy-deepseek 条目（已存在则覆盖），
+// 未指定生效提供商时顺带指向它，最后清空明文键。
+// 幂等：明文键清空后再次调用直接返回 no-legacy；加密不可用时**不清明文**，留待下次启动重试。
+function migrateLegacyApiKey() {
+  const legacy = sysGet(LEGACY_API_KEY_KEY);
+  const plain = legacy == null ? "" : String(legacy);
+  if (!plain) return { migrated: false, reason: "no-legacy" };
+  if (plain.startsWith(ENC_PREFIX) || plain === ENCRYPT_FAILED) {
+    // 不是明文，无需迁移；顺手清掉这个已废弃的键
+    sysSet(LEGACY_API_KEY_KEY, "");
+    return { migrated: false, reason: "not-plaintext" };
+  }
+  const encrypted = encryptApiKey(plain);
+  if (isEncryptFailed(encrypted)) {
+    console.error(
+      "[llm/providers] 旧版明文 API Key 迁移失败：safeStorage 不可用，明文暂时保留，下次启动重试",
+      new Error("safeStorage unavailable")
+    );
+    return { migrated: false, reason: "encrypt-unavailable" };
+  }
+  const raw = sysGet("llmProviders");
+  const list = Array.isArray(raw) ? raw.slice() : [];
+  const entry = {
+    id: LEGACY_PROVIDER_ID,
+    type: "openai",
+    baseUrl: sysGet(LEGACY_BASE_URL_KEY) || LEGACY_BASE_URL,
+    apiKey: encrypted,
+    model: sysGet(LEGACY_MODEL_KEY) || LEGACY_DEFAULT_MODEL,
+  };
+  const idx = list.findIndex((p) => p && p.id === LEGACY_PROVIDER_ID);
+  if (idx >= 0) list[idx] = entry;
+  else list.push(entry);
+  sysSet("llmProviders", list);
+  if (!sysGet("llmActiveProvider")) {
+    sysSet("llmActiveProvider", LEGACY_PROVIDER_ID);
+  }
+  sysSet(LEGACY_API_KEY_KEY, ""); // 清除明文（pet.js 的 getSys 对空串返回 undefined）
+  console.log(
+    "[llm/providers] 已把旧版明文 API Key 迁移到加密存储，并清除明文键 " +
+      LEGACY_API_KEY_KEY
+  );
+  return { migrated: true, reason: "ok", providerId: LEGACY_PROVIDER_ID };
+}
+
+// 进程内只尝试一次，避免每次取 key 都重复迁移/重复告警
+let _legacyMigrateTried = false;
+
+function ensureLegacyMigrated() {
+  if (_legacyMigrateTried) return;
+  _legacyMigrateTried = true;
+  migrateLegacyApiKey();
+}
+
 // —— 提供商配置读取（sys: llmProviders / llmActiveProvider / visionProvider）——
 function getProvider(providerId) {
   const list = sysGet("llmProviders");
@@ -311,27 +422,49 @@ function getProvider(providerId) {
   };
 }
 
+// 统一取 key 入口：其他模块一律走这里，不要再直接读旧的明文键
 function getChatProvider() {
+  ensureLegacyMigrated();
   return getProvider(sysGet("llmActiveProvider"));
+}
+
+// 是否已配置可用的对话提供商（含可解密的 key）——供各处的 LLM 门禁判断
+function hasChatProvider() {
+  const cfg = getChatProvider();
+  return !!(cfg && cfg.apiKey);
 }
 
 // 感知专用视觉提供商；未单独配置时回退到对话提供商
 function getVisionProvider() {
+  ensureLegacyMigrated();
   const vid = sysGet("visionProvider");
   return vid ? getProvider(vid) : getChatProvider();
 }
 
-// 设置页保存入口：apiKey 加密后落盘
+// 设置页保存入口：apiKey 加密后落盘。
+// 任一 key 加密失败即整体放弃写入并返回 { ok:false, error }，调用方必须把失败告知用户。
 function saveProviders(providersArray) {
-  const stored = (Array.isArray(providersArray) ? providersArray : []).map((p) => ({
-    id: p.id,
-    type: p.type || "openai",
-    baseUrl: p.baseUrl || "",
-    apiKey: encryptApiKey(p.apiKey || ""),
-    model: p.model || "",
-  }));
+  const list = Array.isArray(providersArray) ? providersArray : [];
+  const stored = [];
+  for (const p of list) {
+    const apiKey = encryptApiKey(p.apiKey || "");
+    if (isEncryptFailed(apiKey)) {
+      const error = `提供商「${
+        p.id || "未知"
+      }」的 API Key 无法加密保存（系统凭据服务不可用），已放弃写入以避免明文落盘`;
+      console.error("[llm/providers] " + error, new Error("encrypt failed"));
+      return { ok: false, error, providers: null };
+    }
+    stored.push({
+      id: p.id,
+      type: p.type || "openai",
+      baseUrl: p.baseUrl || "",
+      apiKey,
+      model: p.model || "",
+    });
+  }
   sysSet("llmProviders", stored);
-  return stored;
+  return { ok: true, error: null, providers: stored };
 }
 
 module.exports = {
@@ -339,8 +472,20 @@ module.exports = {
   testProvider,
   getProvider,
   getChatProvider,
+  hasChatProvider,
   getVisionProvider,
   saveProviders,
   encryptApiKey,
   decryptApiKey,
+  isEncryptFailed,
+  migrateLegacyApiKey,
+  ENC_PREFIX,
+  ENCRYPT_FAILED,
+  // —— 单元测试注入点（仅测试调用，生产代码不要用）——
+  __setSafeStorageStub(ss) {
+    _safeStorageStub = ss || null;
+  },
+  __resetLegacyMigrateFlag() {
+    _legacyMigrateTried = false;
+  },
 };

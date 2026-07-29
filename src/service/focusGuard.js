@@ -1,5 +1,6 @@
 const _require = eval("require");
 const { powerMonitor } = _require("electron");
+const providers = _require("./llm/providers.js");
 
 const TICK_INTERVAL_MS = 30 * 1000;
 const ACTIVE_THRESHOLD_SEC = 60;
@@ -142,12 +143,12 @@ class FocusGuard {
   _fireReminder(type, ctx) {
     this._markReminded(type);
 
-    // 尊重"启用 AI 对话"总开关（llmEnabled，默认关）；开启后，
-    // 旧 DeepSeek 配置（llmApiKey）或云端服务商（llmActiveProvider）任一已配置即可用 LLM
+    // 尊重"启用 AI 对话"总开关（llmEnabled，默认关）；开启后需已配置可用的云端服务商。
+    // 旧的明文 llmApiKey 由 providers 层一次性迁移为加密提供商，这里不再直接读明文键。
     const useLLM =
       typeof llmService !== "undefined" &&
       getSys("llmEnabled") &&
-      (getSys("llmApiKey") || getSys("llmActiveProvider"));
+      providers.hasChatProvider();
 
     const showFallback = () => {
       const txt = FALLBACK_TEXT[type] || "主人~";

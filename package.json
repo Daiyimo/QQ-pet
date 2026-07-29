@@ -1,8 +1,8 @@
 {
   "name": "qq-local",
-  "version": "0.1.0",
+  "version": "1.2.6",
   "description": "QQ宠物·云端版 - Windows 桌宠，AI 能力全部走云端多服务商 LLM",
-  "license": "SEE LICENSE IN ../LICENSE",
+  "license": "MIT",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -22,7 +22,7 @@
     "node-xlsx": "^0.23.0",
     "nodejs-websocket": "^1.7.2"
   },
-  "author": "xuemian168",
+  "author": "Daiyimo",
   "repository": "https://github.com/xuemian168/qqpet_automation",
   "devDependencies": {
     "electron": "^28.0.0",

@@ -38,18 +38,36 @@ test("GB2312 解码 + Config.xml 解析出六个分组", () => {
   assert.ok(r.groups.motion.some((a) => a.trigger === "hitLeft"), "motion 组缺少 hitLeft trigger");
 });
 
-test("概率加权：高权重项显著多于低权重项，probability=0 永不命中", () => {
+test("概率加权：随机值落在各权重区间时选中对应项，probability=0 永不命中", () => {
+  // 原实现用真 Math.random 做 2000 次采样并断言「低权重项至少命中一次」，
+  // 但 low 的单次命中概率仅 1/1000，全不中的概率为 0.999^2000 ≈ 13.5% —— 约每 7 次跑
+  // 就会假失败。改为注入确定性随机源，直接覆盖权重区间边界，断言比统计写法更强。
   const xml = `<Config><Package name="main"><Package name="play">
     <Action probability="0" path="zero.swf">零</Action>
     <Action probability="1" path="low.swf">低</Action>
     <Action probability="999" path="high.swf">高</Action>
   </Package></Package></Config>`;
-  const r = new NewSkinRouter({ skin: "t", basePath: "b", xmlText: xml, exists: () => true });
-  const count = { "zero.swf": 0, "low.swf": 0, "high.swf": 0 };
-  for (let i = 0; i < 2000; i++) count[path.basename(r.pickSwf("play"))]++;
-  assert.strictEqual(count["zero.swf"], 0, "probability=0 被命中");
-  assert.ok(count["high.swf"] > count["low.swf"] * 10, `加权失效: ${JSON.stringify(count)}`);
-  assert.ok(count["low.swf"] > 0, "低权重项从未命中");
+
+  // probability=0 的项在选取前即被过滤，剩余 total=1000：
+  // rng()*1000 落在 (0,1] 选 low，落在 (1,1000] 选 high
+  const pickWith = (value) => {
+    const r = new NewSkinRouter({
+      skin: "t", basePath: "b", xmlText: xml,
+      exists: () => true, rng: () => value,
+    });
+    return path.basename(r.pickSwf("play"));
+  };
+
+  for (const v of [0, 0.0005, 0.001]) {
+    assert.strictEqual(pickWith(v), "low.swf", `rng=${v} 应落在低权重区间`);
+  }
+  for (const v of [0.0011, 0.002, 0.5, 0.9999, 1]) {
+    assert.strictEqual(pickWith(v), "high.swf", `rng=${v} 应落在高权重区间`);
+  }
+  // probability=0 的项在任何随机值下都不可被选中
+  for (let i = 0; i <= 100; i++) {
+    assert.notStrictEqual(pickWith(i / 100), "zero.swf", `rng=${i / 100} 命中了 probability=0 的项`);
+  }
 });
 
 test("缺失文件过滤：不存在的 SWF 不会被选中", () => {

@@ -59,10 +59,12 @@
      * @param {string} opts.xmlText   GB2312 解码后的 config.xml 全文
      * @param {Function} opts.exists  (relPath)=>boolean 文件存在性判断（可选，缺省不过滤）
      */
-    constructor({ skin, basePath, xmlText, exists } = {}) {
+    constructor({ skin, basePath, xmlText, exists, rng } = {}) {
       this.skin = skin || "";
       this.basePath = (basePath || "").replace(/\/+$/, "");
       this.exists = typeof exists === "function" ? exists : () => true;
+      // 随机源可注入，便于测试确定性地覆盖各权重区间（生产走 Math.random）
+      this.rng = typeof rng === "function" ? rng : Math.random;
       this.groups = { stand: [], motion: [], play: [], walk: [], turn: [], lead: [] };
       if (xmlText) this.parse(xmlText);
     }
@@ -121,7 +123,7 @@
       });
       if (!list.length) return null;
       const total = list.reduce((s, a) => s + a.probability, 0);
-      let r = Math.random() * total;
+      let r = this.rng() * total;
       for (const a of list) {
         r -= a.probability;
         if (r <= 0) return this.relPath(group, a.path);

@@ -1,0 +1,217 @@
+<Config>				
+	<MainAction probability="50" duration="20"/>			
+	<Package name="main" probability="50" model="Package_Root">			
+		<Package name="stand" probability="50" model="Package_Node">		
+			<Package name="normal" probability="50" model="Package_Normal">	
+			    <Action probability="20" mood="null"  path="001.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="002.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="003.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="004.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="005.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="006.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="007.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="008.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="009.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="010.swf" name="在壳里跳"/>
+			    <Action probability="20" mood="null"  path="011.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="012.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="013.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="014.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="015.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="016.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="017.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="018.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="019.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="020.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="021.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="022.swf" name="在壳里跳"/>
+			    <Action probability="20" mood="null"  path="023.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="024.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="025.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="026.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="027.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="028.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="029.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="030.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="031.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="032.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="033.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="034.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="035.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="036.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="037.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="038.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="039.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="040.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="041.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="042.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="043.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="044.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="045.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="046.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="047.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="048.swf" name="在壳里跳"/>
+				<Action probability="0" mood="null"  path="049.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="050.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="051.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="052.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="053.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="054.swf" name="在壳里跳"/>
+			    <Action probability="20" mood="null"  path="055.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="056.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="057.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="058.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="059.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="060.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="061.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="062.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="063.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="064.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="065.swf" name="在壳里跳"/>		
+				<Action probability="20" mood="null"  path="066.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="067.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="068.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="069.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="070.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="071.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="072.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="073.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="074.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="075.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="076.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="077.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="078.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="079.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="080.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="081.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="082.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="083.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="084.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="085.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="086.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="087.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="088.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="089.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="090.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="091.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="092.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="093.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="094.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="095.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="096.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="097.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="098.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="099.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="100.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="101.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="102.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="103.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="104.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="105.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="106.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="107.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="108.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="109.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="110.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="111.swf" name="在壳里跳"/>	
+                <Action probability="20" mood="null"  path="112.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="113.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="114.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="116.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="117.swf" name="在壳里跳"/>	
+				<Action probability="20" mood="null"  path="118.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="119.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="120.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="121.swf" name="在壳里跳"/>
+				<Action probability="20" mood="null"  path="122.swf" name="在壳里跳"/>
+			</Package>	
+			<Package name="motion" probability="0" model="Package_Motion">	
+			    <Action probability="30" mood="null" trigger="mouseDown" path="001.swf" point="belly">注释</Action>	
+			    <Action probability="30" mood="null" trigger="mouseDown" path="002.swf" point="head">注释</Action>	
+				<Action probability="30" mood="null" trigger="mouseDown" path="003.swf" point="scarves">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="004.swf" point="rfoot">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="005.swf" point="rhand">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="006.swf" point="rhand">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="007.swf" point="reye">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="008.swf" point="mouth">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="009.swf" point="lfoot">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="010.swf" point="leye">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="011.swf" point="belly">注释</Action>
+			    <Action probability="30" mood="null" trigger="mouseDown" path="012.swf" point="head">注释</Action>	
+				<Action probability="30" mood="null" trigger="mouseDown" path="013.swf" point="scarves">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="014.swf" point="rfoot">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="015.swf" point="reye">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="016.swf" point="mouth">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="017.swf" point="lfoot">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="018.swf" point="leye">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="019.swf" point="lhand">注释</Action>
+			    <Action probability="30" mood="null" trigger="mouseDown" path="020.swf" point="leye">注释</Action>	
+				<Action probability="30" mood="null" trigger="mouseDown" path="021.swf" point="belly">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="022.swf" point="head">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="023.swf" point="scarves">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="024.swf" point="rfoot">注释</Action>
+				<Action probability="30" mood="null" trigger="mouseDown" path="025.swf" point="lfoot">注释</Action>
+				<Action probability="30" mood="null" trigger="drag" path="drag1101213.swf" point="all">注释</Action>
+				<Action probability="30" mood="null" trigger="drag" path="drag2101213.swf" point="all">注释</Action>
+				<Action probability="30" mood="null" trigger="drag" path="drag3101213.swf" point="all">注释</Action>
+				<Action probability="30" mood="null" trigger="hitRight" path="hide_right130906.swf" point="screen">注释</Action>
+				<Action probability="30" mood="null" trigger="hitLeft"  path="hide_left130906.swf" point="screen">注释</Action>
+			</Package>	
+		</Package>		
+		<Package name="play" probability="25" model="Package_Play">		
+		    <Action probability="30" path="001.swf">标准站立</Action>		
+			<Action probability="30" path="002.swf">标准站立</Action>	
+			<Action probability="30" path="003.swf">标准站立</Action>	
+			<Action probability="30" path="004.swf">标准站立</Action>	
+			<Action probability="30" path="005.swf">标准站立</Action>	
+			<Action probability="30" path="006.swf">标准站立</Action>	
+			<Action probability="30" path="007.swf">标准站立</Action>	
+			<Action probability="30" path="008.swf">标准站立</Action>	
+			<Action probability="30" path="009.swf">标准站立</Action>	
+			<Action probability="30" path="010.swf">标准站立</Action>	
+			<Action probability="30" path="011.swf">标准站立</Action>	
+			<Action probability="30" path="012.swf">标准站立</Action>	
+			<Action probability="30" path="013.swf">标准站立</Action>	
+			<Action probability="30" path="014.swf">标准站立</Action>	
+			<Action probability="30" path="015.swf">标准站立</Action>	
+			<Action probability="30" path="016.swf">标准站立</Action>	
+			<Action probability="30" path="017.swf">标准站立</Action>	
+			<Action probability="30" path="018.swf">标准站立</Action>	
+			<Action probability="30" path="019.swf">标准站立</Action>	
+			<Action probability="30" path="020.swf">标准站立</Action>	
+			<Action probability="30" path="021.swf">标准站立</Action>	
+			<Action probability="30" path="022.swf">标准站立</Action>	
+			<Action probability="30" path="023.swf">标准站立</Action>	
+			<Action probability="30" path="024.swf">标准站立</Action>	
+			<Action probability="30" path="025.swf">标准站立</Action>	
+			<Action probability="30" path="026.swf">标准站立</Action>	
+			<Action probability="30" path="027.swf">标准站立</Action>	
+			<Action probability="30" path="028.swf">标准站立</Action>	
+			<Action probability="30" path="029.swf">标准站立</Action>	
+			<Action probability="30" path="030.swf">标准站立</Action>	
+			<Action probability="30" path="031.swf">标准站立</Action>	
+			<Action probability="30" path="032.swf">标准站立</Action>	
+		</Package>		
+		<Package name="walk" probability="25" walkwight="90" walkheight="75" maxupdownspeed ="4" leftrightspeed="4" model="Package_Walk">		
+			<Action probability="30" mood="null" trigger="left" stop="left_stop" play="lplay" path="walk_left.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="left" stop="left_stop" play="lplay" path="walk_left2.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="right" stop="right_stop" play="rplay" path="walk_right.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="right" stop="right_stop" play="rplay" path="walk_right2.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="left_stop" path="left_stop.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="right_stop" path="right_stop.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="lplay" path="lplay.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="rplay" path="rplay.swf">注释</Action>	
+		</Package>		
+		<Package name="turn" probability="0" model="Package_Turn">		
+			<Action probability="30" mood="null" trigger="1" path="ctot.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="2" path="ctod.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="4" path="ctoj.swf">注释</Action>	
+			<Action probability="30" mood="null" trigger="5" path="ctoe.swf">注释</Action>	
+		</Package>		
+		<Package name="lead" probability="100" poorthreshold="200" operatereffecttime="3600" model="Package_Lead">		
+			<Action probability="30" name="hungry" path="hungry20110805.swf">饥饿引导</Action>	
+			<Action probability="30" name="dirty" path="dirty20110805.swf">脏引导</Action>	
+			<Action probability="30" name="poor" path="poor20110826.swf">穷引导</Action>	
+		</Package>		
+	</Package>			
+</Config>				

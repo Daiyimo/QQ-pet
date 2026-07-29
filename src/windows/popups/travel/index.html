@@ -1,0 +1,44 @@
+<div id="appMain" class="notSelect">
+  <div class="travelWrap">
+    <div class="travelHead">
+      <span class="travelTitle">环游中国</span>
+      <span class="travelClose" title="关闭" @click="closeWindow">×</span>
+    </div>
+
+    <!-- 当前状态区 -->
+    <div class="travelState" v-if="status.traveling">
+      <div class="stateLine">
+        正在<span class="statePlace">{{ status.province ? status.province.name : '' }}</span>旅游中…
+      </div>
+      <div class="stateLine countdown">剩余 {{ remainText }}</div>
+      <div class="travelBtn cancel" @click="cancelTravel">提前召回</div>
+    </div>
+    <div class="travelState" v-else>
+      <div class="stateLine tip" v-if="tipText">{{ tipText }}</div>
+      <div class="stateLine" v-else>宠物在家，随时可以出发旅游~</div>
+      <div class="travelBtn start" @click="startTravel">开始旅游</div>
+    </div>
+
+    <!-- 收集进度 -->
+    <div class="travelProgress">
+      已收集 {{ status.collected.length }} / {{ status.total }}
+    </div>
+
+    <!-- 省份格子收集墙：已收集高亮+星标，未收集灰色 -->
+    <div class="travelGrid">
+      <div
+        v-for="p in provinces"
+        :key="p.id"
+        :class="['cell', isCollected(p.id) ? 'got' : 'none']"
+      >
+        <img
+          v-if="isCollected(p.id)"
+          class="star"
+          src="../assets/travel/star.png"
+          alt=""
+        />
+        <span class="cellName">{{ p.name }}</span>
+      </div>
+    </div>
+  </div>
+</div>

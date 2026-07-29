@@ -1,0 +1,209 @@
+#appMain {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  background-color: transparent !important;
+  font-size: 13px;
+}
+
+#app {
+  background-color: transparent !important;
+  height: 100% !important;
+  width: 100% !important;
+  margin: 0 !important;
+  box-shadow: unset !important;
+  -webkit-app-region: no-drag !important;
+}
+
+/* 透明窗口自己的圆角底色容器（配色沿用 stateInfo/aiChat 的渐变与 #042b4b 文字色） */
+.signWrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  overflow: hidden;
+  background: linear-gradient(
+    to top,
+    rgba(237, 247, 255, 0.95),
+    rgba(253, 255, 255, 0.95)
+  );
+  color: #042b4b;
+  font-weight: 500;
+}
+
+/* 头部可拖动 */
+.signHead {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px dotted rgba(0, 0, 0, 0.5);
+  user-select: none;
+}
+.signTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.signIcon {
+  width: 18px;
+  height: 18px;
+}
+.signClose {
+  -webkit-app-region: no-drag;
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 16px;
+}
+.signClose:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+.signClose:active {
+  position: relative;
+  top: 1px;
+}
+
+/* 本周 7 天格子 */
+.weekRow {
+  display: flex;
+  justify-content: space-between;
+  padding: 14px 12px 4px;
+}
+.dayCell {
+  width: 38px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.dayLabel {
+  font-size: 11px;
+  color: #7b7b7b;
+}
+.dayBox {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(4, 43, 75, 0.2);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.dayNum {
+  font-size: 13px;
+  font-weight: 600;
+}
+.giftImg {
+  width: 20px;
+  height: 20px;
+}
+.dayState {
+  font-size: 11px;
+  color: #7b7b7b;
+}
+
+/* 已签：金底高亮 */
+.dayCell.signed .dayBox {
+  background: #ffe9a8;
+  border-color: #e8b62c;
+}
+.dayCell.signed .dayState {
+  color: #b87f00;
+  font-weight: 600;
+}
+
+/* 今天可签：蓝框强调 */
+.dayCell.today .dayBox {
+  border: 2px solid #4662d9;
+}
+.dayCell.today .dayNum {
+  color: #4662d9;
+}
+.dayCell.today .dayState {
+  color: #4662d9;
+  font-weight: 600;
+}
+
+/* 未到：整体淡置 */
+.dayCell.future {
+  opacity: 0.45;
+}
+
+/* 未签（过去漏签）：灰化 */
+.dayCell.missed .dayBox {
+  background: rgba(0, 0, 0, 0.06);
+}
+.dayCell.missed .dayNum {
+  color: #a0a0a0;
+}
+
+/* 连续 / 累计统计行 */
+.statRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 0 2px;
+  font-size: 13px;
+}
+.statRow b {
+  color: #e8730c;
+  font-size: 16px;
+  padding: 0 2px;
+}
+.statSplit {
+  width: 1px;
+  height: 14px;
+  background: rgba(4, 43, 75, 0.25);
+}
+
+/* 奖励说明 */
+.rewardTip {
+  margin: 8px 16px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 233, 168, 0.45);
+  border: 1px dashed rgba(232, 182, 44, 0.7);
+  font-size: 12px;
+  line-height: 1.7;
+  color: #7b5c00;
+  text-align: center;
+}
+
+/* 签到按钮 */
+.signBtn {
+  margin: auto 16px 14px;
+  height: 34px;
+  line-height: 34px;
+  text-align: center;
+  border-radius: 17px;
+  background: #4662d9;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.signBtn:hover {
+  filter: brightness(1.1);
+}
+.signBtn:active {
+  position: relative;
+  top: 1px;
+}
+.signBtn.disabled {
+  background: #a9b3c9;
+  cursor: default;
+  pointer-events: none;
+}

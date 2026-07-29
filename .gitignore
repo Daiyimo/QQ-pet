@@ -1,0 +1,9 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+memory/
+courses/
+test/tmp/
+test/ruffleSmoke/shots/

@@ -1,0 +1,50 @@
+<div id="appMain" class="notSelect">
+  <div class="signWrap">
+    <div class="signHead">
+      <span class="signTitle">
+        <img class="signIcon" src="../assets/signIn/qd.png" alt="" />
+        每日签到
+      </span>
+      <span class="signClose" title="关闭" @click="closeWindow">×</span>
+    </div>
+
+    <!-- 本周 7 天格子：signed 已签 / today 今天可签 / future 未到 / missed 未签 -->
+    <div class="weekRow">
+      <div
+        v-for="(day, index) in week"
+        :key="index"
+        :class="['dayCell', day.state]"
+      >
+        <div class="dayLabel">周{{ day.label }}</div>
+        <div class="dayBox">
+          <img
+            v-if="day.signed"
+            class="giftImg"
+            src="../assets/signIn/gift.svg"
+            alt=""
+          />
+          <span v-else class="dayNum">{{ day.dayNum }}</span>
+        </div>
+        <div class="dayState">{{ stateText(day) }}</div>
+      </div>
+    </div>
+
+    <div class="statRow">
+      <span>已连续签到 <b>{{ streak }}</b> 天</span>
+      <span class="statSplit"></span>
+      <span>累计签到 <b>{{ total }}</b> 天</span>
+    </div>
+
+    <div class="rewardTip">
+      <div>每日签到：元宝 +20、成长值 +5</div>
+      <div>连续第 7 天额外：元宝 +100</div>
+    </div>
+
+    <div
+      :class="['signBtn', { disabled: signedToday }]"
+      @click="doSign"
+    >
+      {{ signedToday ? "已签到" : "立即签到" }}
+    </div>
+  </div>
+</div>

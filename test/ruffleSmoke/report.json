@@ -1,0 +1,308 @@
+[
+  {
+    "id": "n1_stand_normal_004",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200003/main/stand/normal/004.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 51,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 526
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n1_stand_normal_004_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n1_stand_normal_004_b.png"
+    ],
+    "pixels": {
+      "stddev": 37.85,
+      "mean": 103.27,
+      "meanAlpha": 255,
+      "changedRatio": "6.27%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n2_motion_hide_left",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200003/main/stand/motion/hide_left130906.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 82,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 719
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n2_motion_hide_left_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n2_motion_hide_left_b.png"
+    ],
+    "pixels": {
+      "stddev": 39.44,
+      "mean": 104.67,
+      "meanAlpha": 255,
+      "changedRatio": "18.19%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n3_motion_hide_right",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200003/main/stand/motion/hide_right130906.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 82,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 707
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n3_motion_hide_right_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n3_motion_hide_right_b.png"
+    ],
+    "pixels": {
+      "stddev": 39.12,
+      "mean": 104.26,
+      "meanAlpha": 255,
+      "changedRatio": "18.74%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n4_motion_drag1",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200003/main/stand/motion/drag1101213.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 1,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 65
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n4_motion_drag1_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n4_motion_drag1_b.png"
+    ],
+    "pixels": {
+      "stddev": 38.75,
+      "mean": 106.36,
+      "meanAlpha": 255,
+      "changedRatio": "14.14%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n5_turn_ctoe",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200003/main/turn/ctoe.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 28,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 189
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n5_turn_ctoe_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n5_turn_ctoe_b.png"
+    ],
+    "pixels": {
+      "stddev": 39.09,
+      "mean": 104.55,
+      "meanAlpha": 255,
+      "changedRatio": "12.7%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n6_lead_poor",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200003/main/lead/poor20110826.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 221,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 2513
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n6_lead_poor_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n6_lead_poor_b.png"
+    ],
+    "pixels": {
+      "stddev": 38.47,
+      "mean": 105.2,
+      "meanAlpha": 255,
+      "changedRatio": "11.34%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n7_b4_stand_002",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200004/main/stand/normal/002.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 39,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 233
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n7_b4_stand_002_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n7_b4_stand_002_b.png"
+    ],
+    "pixels": {
+      "stddev": 30.09,
+      "mean": 98.16,
+      "meanAlpha": 255,
+      "changedRatio": "7.34%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n8_b4_play_011",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200004/main/play/011.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 790,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 4020
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n8_b4_play_011_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n8_b4_play_011_b.png"
+    ],
+    "pixels": {
+      "stddev": 31.11,
+      "mean": 97.21,
+      "meanAlpha": 255,
+      "changedRatio": "8.09%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  {
+    "id": "n9_b4_drag3",
+    "file": "E:/project/qq_local/src/assets/ActionNew/10200004/main/stand/motion/drag3101213.swf",
+    "expect": "AS3",
+    "swfHeader": {
+      "sig": "CWS",
+      "version": 9,
+      "width": 140,
+      "height": 140,
+      "frameRate": 12,
+      "frameCount": 1,
+      "doABC": true,
+      "hasAS12Action": false,
+      "tagCount": 98
+    },
+    "load": {
+      "ok": true,
+      "metadata": null,
+      "state": null,
+      "isPlaying": true
+    },
+    "shots": [
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n9_b4_drag3_a.png",
+      "E:\\project\\qq_local\\test\\ruffleSmoke\\shots\\n9_b4_drag3_b.png"
+    ],
+    "pixels": {
+      "stddev": 38.16,
+      "mean": 105.73,
+      "meanAlpha": 255,
+      "changedRatio": "15.62%"
+    },
+    "rendered": true,
+    "moving": true
+  }
+]

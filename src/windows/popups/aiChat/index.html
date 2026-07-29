@@ -1,0 +1,42 @@
+<div id="appMain" class="notSelect">
+  <div class="chatWrap">
+    <div class="chatHead">
+      <span class="chatTitle">和企鹅聊天</span>
+      <span class="chatClose" title="关闭" @click="closeWindow">×</span>
+    </div>
+    <div class="msgList" ref="msgList">
+      <div v-if="!messages.length" class="emptyTip">
+        有什么想对我说的吗？
+      </div>
+      <div
+        v-for="(item, index) in messages"
+        :key="index"
+        :class="['msgRow', item.role]"
+      >
+        <div class="bubble">{{ item.text }}</div>
+      </div>
+      <div v-if="thinking" class="msgRow pet">
+        <div class="bubble thinking">思考中…</div>
+      </div>
+    </div>
+    <div class="chatOpt">
+      <label class="optItem">
+        <input type="checkbox" v-model="withScreen" />
+        附带屏幕
+      </label>
+      <span class="optBtn" @click="clearChat">清空对话</span>
+    </div>
+    <div class="inputRow">
+      <input
+        class="chatInput"
+        v-model="input"
+        :disabled="thinking"
+        placeholder="说点什么…"
+        @keyup.enter="send"
+      />
+      <span class="sendBtn" :class="{ disabled: thinking }" @click="send">
+        发送
+      </span>
+    </div>
+  </div>
+</div>

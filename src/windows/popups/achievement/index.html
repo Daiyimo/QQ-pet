@@ -1,0 +1,35 @@
+<div id="appMain" class="notSelect">
+  <div class="achWrap">
+    <div class="achHead">
+      <span class="achTitle">成就徽章墙</span>
+      <span class="achCount">{{ unlockedCount }} / {{ list.length }}</span>
+      <span class="achClose" title="关闭" @click="closeWindow">×</span>
+    </div>
+    <div class="achList">
+      <div v-if="!list.length" class="emptyTip">成就加载中…</div>
+      <div
+        v-for="item in list"
+        :key="item.id"
+        :class="['achRow', item.unlocked ? 'unlocked' : 'locked']"
+      >
+        <div class="badgeBox">
+          <img
+            v-if="isSvg(item)"
+            class="badgeIcon"
+            :src="iconSrc(item)"
+            alt=""
+          />
+          <span v-else class="badgeIcon emoji">{{ item.icon }}</span>
+        </div>
+        <div class="achInfo">
+          <div class="achName">{{ item.name }}</div>
+          <div class="achDesc" v-if="item.unlocked">
+            {{ fmtDate(item.unlockedAt) }} 达成
+          </div>
+          <div class="achDesc" v-else>{{ item.desc }}</div>
+        </div>
+        <div class="achState">{{ item.unlocked ? "已达成" : "未达成" }}</div>
+      </div>
+    </div>
+  </div>
+</div>

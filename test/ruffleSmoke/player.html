@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>ruffle-smoke</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            overflow: hidden;
+        }
+
+        #container {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+    <script>
+        // 与 src/windows/app.html 保持一致的 Ruffle 全局配置
+        window.RufflePlayer = window.RufflePlayer || {};
+        window.RufflePlayer.config = {
+            autoplay: "on",
+            unmuteOverlay: "hidden",
+            warnOnUnsupportedContent: false,
+            polyfills: false,
+            letterbox: "off",
+            wmode: "transparent"
+        };
+    </script>
+    <!-- 项目内置 Ruffle（publicPath 由 ruffle.js 依据 currentScript.src 自动推导） -->
+    <script src="../../src/windows/js/ruffle/ruffle.js"></script>
+</head>
+
+<body>
+    <div id="container"></div>
+    <script>
+        let player = null;
+
+        // 供主进程 executeJavaScript 调用；始终 resolve，错误放进返回值
+        window.loadSwf = function (url) {
+            return new Promise((resolve) => {
+                try {
+                    if (player && player.parentNode) player.parentNode.removeChild(player);
+                    const ruffle = window.RufflePlayer.newest();
+                    player = ruffle.createPlayer();
+                    player.style.width = "100%";
+                    player.style.height = "100%";
+                    document.getElementById("container").appendChild(player);
+                    player.load({
+                        url: url,
+                        autoplay: "on",
+                        wmode: "transparent",
+                        letterbox: "off",
+                        unmuteOverlay: "hidden",
+                        warnOnUnsupportedContent: false,
+                        allowScriptAccess: true
+                    }).then(() => {
+                        let meta = null;
+                        try { meta = player.metadata || null; } catch (e) { }
+                        resolve({
+                            ok: true,
+                            metadata: meta ? JSON.parse(JSON.stringify(meta)) : null,
+                            state: (function () { try { return player.state || null; } catch (e) { return null; } })(),
+                            isPlaying: (function () { try { return !!player.isPlaying; } catch (e) { return null; } })()
+                        });
+                    }).catch((err) => {
+                        resolve({ ok: false, error: String(err) });
+                    });
+                } catch (e) {
+                    resolve({ ok: false, error: String(e) });
+                }
+            });
+        };
+
+        window.unloadSwf = function () {
+            try {
+                if (player && player.parentNode) player.parentNode.removeChild(player);
+                player = null;
+            } catch (e) { }
+        };
+    </script>
+</body>
+
+</html>

@@ -50,6 +50,9 @@
         };
     </script>
     <script src="./js/ruffle/ruffle.js"></script>
+    <!-- Ruffle 播放桥：给 swfPet.js 提供帧状态（Ruffle 没有 Flash 的 CurrentFrame/TotalFrames 等 API）。
+         必须早于 window.js 注入的 ./util/pet/swfPet.js 执行，故放在 head 里。 -->
+    <script src="./util/pet/ruffleBridge.js"></script>
 </head>
 
 <body>

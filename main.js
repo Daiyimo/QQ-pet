@@ -10,7 +10,16 @@ console.warn = safeFn(_origWarn);
 process.stdout?.on?.("error", () => {});
 process.stderr?.on?.("error", () => {});
 process.on("uncaughtException", (err) => {
-  if (err.code === "EPIPE" || err.message?.includes("EPIPE")) return;
+  // EPIPE 是管道断开（父进程/终端关闭），属预期噪音，静默即可
+  if (err?.code === "EPIPE" || err?.message?.includes("EPIPE")) return;
+  // 其余全部是意料外异常，必须带完整堆栈落日志，否则故障不可诊断
+  // 注意：此处刻意不 app.exit() — 桌宠是长驻进程，单个未捕获异常不应导致用户宠物消失。
+  // 代价是进程可能处于未定义状态，因此堆栈日志是唯一的排查线索。
+  console.error("[FATAL] 未捕获异常:", err?.stack || err);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  // 9 个 service 与全部 LLM 调用都是异步的，这里静默等于让密钥失效/配额耗尽/感知失败全部无声
+  console.error("[FATAL] 未处理的 Promise 拒绝:", reason?.stack || reason, "promise:", promise);
 });
 
 const { app } = require("electron");
@@ -39,7 +48,10 @@ try {
     }
     if (a) break;
   }
-} catch (e) {}
+} catch (e) {
+  // 工具模式参数解析失败不应阻断启动，降级为「非工具模式」正常启动桌宠
+  console.warn("[启动] 解析工具模式命令行参数失败，按普通模式启动:", e?.stack || e);
+}
 
 if (process?.env?.NODE_TOOL) {
   initData.NODE_TOOL = process.env.NODE_TOOL;
@@ -52,7 +64,6 @@ if (initData?.NODE_TOOL && typeof initData?.NODE_TOOL === "string") {
 const createWindow = async () => {
   require("./src/ini/init.js");
   process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
-  process.on("unhandledRejection", function (e, t) {});
   app.setAppUserModelId("pet");
 
   if (gotTheLock) {
@@ -74,6 +85,4 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 app.whenReady().then(() => {
   createWindow();
-  // TEMP-DRAGTEST: 测试后移除
-  try { require("./dragtest/inject.js")(); } catch (e) {}
 });

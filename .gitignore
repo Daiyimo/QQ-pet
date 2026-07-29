@@ -3,7 +3,9 @@ dist/
 out/
 *.log
 .DS_Store
-memory/
-courses/
+# 运行时数据目录：Electron 下位于 userData，无 Electron 时退到 cwd。
+# 必须带 / 前缀只匹配仓库根，否则会误伤源码目录 src/service/memory 与 src/service/courses。
+/memory/
+/courses/
 test/tmp/
 test/ruffleSmoke/shots/

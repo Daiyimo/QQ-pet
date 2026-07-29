@@ -54,6 +54,16 @@
 
 ### 已知问题
 
+- **悬浮条（日常/交互/活动）不跟随宠物**，越靠屏幕边缘偏得越多
+
+  control 是 1100×505 的透明窗口，可见按钮条只占其中 170×50 且由 CSS 固定在窗口内。原实现按**整个透明窗口**的边界做钳制，宠物靠边时窗口越界被推回屏幕内，窗口里的按钮条跟着一起被推离宠物（实测 2560×1440 下贴右边缘偏 468px）。新增 `src/windows/util/controlBarClamp.js`，改按**可见按钮条**的边界钳制 —— 只要按钮条还在工作区内就不动窗口。同样条件下偏移从 468px 降到 3px。
+
+- **每次启动都有一次静默的渲染层脚本注入失败**
+
+  `window.js` 两处 `executeJavaScript` 都没有 `.catch`，Promise 拒绝逃逸；基础脚本注入的外层 `catch` 还是空的（窗口白屏时无任何线索）。补上错误处理后定位到真凶：main 窗口的 `jsFiles` 里包含 `../service/websocket.js`，它是 `module.exports={}` 的死代码，作为 CommonJS 模块在 `contextIsolation:true` 的渲染层必然抛错。已移除该注入项（渲染层引用它 0 次）。
+
+### 已知问题
+
 - **贴边动画不停在指定帧**：Ruffle 未暴露任何跳帧能力（无 `GotoFrame` 等价 API），`hideleft` / `hideright` 会整片播放而非停在 61/66/39 帧。需改素材或等 Ruffle 支持。
 - **本地窗口仍保留 `webSecurity: false`**：后花园与钓鱼小游戏依赖跨源 iframe 的 `contentWindow` 直写（往远端 window 挂 `getPetInfoFromMain` / `saveInfoData` 等回调），强行收紧会直接废掉这两个功能。远程 URL 入口已隔离，彻底修复需先把那两处改为 `postMessage`。
 - **`Alt+Q` 截图快捷键在 Windows 上无功能**：调用的是 macOS 的 `screencapture` 命令，且回调 `this` 丢失、成败判断反了。当前仅占用快捷键。

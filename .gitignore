@@ -3,6 +3,13 @@ dist/
 out/
 *.log
 .DS_Store
+# 凭证：API Key / Token 一律不进仓库（.env.example 是不含真值的模板，故放行）
+.env
+.env.*
+!.env.example
+# 存档隔离产物：损坏的配置文件被 ini/store.js 改名保留，可能含加密后的 API Key
+*.corrupt-*.json
+config-qq-local*.json
 # 打包产物：portable exe 约 270MB，超过 GitHub 100MB 单文件限制，发布走 Releases 附件，不进仓库
 /*.exe
 # 运行时数据目录：Electron 下位于 userData，无 Electron 时退到 cwd。

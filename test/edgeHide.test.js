@@ -1,6 +1,7 @@
 /**
  * edgeHide 状态机纯逻辑冒烟测试（不依赖 electron，直接 node 运行）
- * 运行：node test/edgeHide.smoke.js
+ * 运行：node --test test/edgeHide.test.js（或 npm test 全量；改名前叫 edgeHide.smoke.js，
+ * 因文件名不匹配 node --test 的 *.test.js glob 而长期从未被执行）
  */
 const assert = require("assert");
 const { EdgeHide } = require("../src/windows/main/edgeHide.js");

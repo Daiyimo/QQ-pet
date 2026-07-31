@@ -250,9 +250,16 @@ const app = {
       if(d.type === "background" && Array.isArray(d.result)) {
         d.result.forEach(it => { this.bgNameMap[it.keyName] = it.name; });
       }
-      /* 只有页大小与本窗 2x3 网格一致的回包才可入缓存/上屏，
-         否则预拉取的 20/页数据会污染装扮页（挤爆网格 + total 算成 1 页锁死翻页） */
-      if(!isUsableBagPayload(d, d.current, BAG_PAGE_SIZE) && !d.error) return;
+      /* 这里只挡一种东西：**页大小与本窗 2x3 网格不符的合法回包**，
+         也就是上面 bgNameMap 预拉取的 20/页数据——放它进来会污染装扮页
+         （20 件挤爆 2x3 网格 + total 按 20/页算成 1 页导致翻页被锁死）。
+
+         畸形回包必须放行：getConsumablesPage 失败时返回
+         {opt, msg:"获取失败", state:"err"}，既没有 error 也没有 result，
+         若在此早退就会把"清 loading + 显示空态"的降级路径变成永久转圈。
+         pageSize 缺失（非有限数）时同样放行，绝不让这道守卫自己制造挂死。 */
+      if(!d.error && Array.isArray(d.result)
+         && Number.isFinite(+d.pageSize) && +d.pageSize !== BAG_PAGE_SIZE) return;
       if(!d.error) this.bagCache[key] = d;
       if(key !== this.bagCacheKey) return;
       this.bagLoading = false;

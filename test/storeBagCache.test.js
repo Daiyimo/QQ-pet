@@ -17,7 +17,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const SRC = path.join(__dirname, "../src/windows/popups/store/index.js");
+/* 被测源码路径。可用 QQ_STORE_SRC 覆盖，专为"变异测试/回滚验证"准备：
+   把 store/index.js 的缓存逻辑回滚到修复前写进临时文件，再
+   `QQ_STORE_SRC=<临时文件> node --test test/storeBagCache.test.js`，
+   即可验证这些用例真的会失败——无需改动仓库里的 src/。 */
+const SRC = process.env.QQ_STORE_SRC
+  || path.join(__dirname, "../src/windows/popups/store/index.js");
 
 /**
  * 在沙箱里加载 store/index.js。
@@ -38,6 +43,14 @@ function loadStoreModule() {
 /**
  * 用真实的 data()/computed/methods 组装一个可直接调用方法的实例替身。
  * computed 装成 getter，methods 绑到同一对象上，语义与 Vue 选项 API 一致。
+ *
+ * ⚠️ 这是**手工重实现的 Vue 选项 API 子集**，只支持 data / computed / methods：
+ *   - 不支持 watch，不支持响应式（无依赖追踪、无 nextTick、无更新时序）；
+ *   - 也不做 props / provide / 生命周期顺序。
+ * 目前被测的都是纯 methods 与 mounted 里注册的纯回调，所以够用。
+ * 一旦 store/index.js 开始依赖 watch 或响应式更新顺序，这个替身会**静默偏离**真实 Vue
+ * （测试照绿但线上行为不同）——那时请换成真 Vue（引入 vue.global.js 或装 vue 依赖），
+ * 不要继续往这个替身里加功能。
  */
 function makeVm(appOptions, overrides = {}) {
   const inst = appOptions.data();
@@ -255,7 +268,49 @@ test("store_m_bag 的错误回包仍能显示错误且不污染缓存", () => {
   assert.equal(inst.bagCache.bagZB_background, undefined, "错误回包不得入缓存");
 });
 
-test("装扮页在预拉取之后仍能翻到第 2 页（原 bug 的端到端复现）", () => {
+test("store_m_bag 收到 getConsumablesPage 的畸形失败回包时清掉 loading 走空态，不永久转圈", () => {
+  // getConsumablesPage 失败形态：{opt, msg:"获取失败", state:"err"}
+  // 既没有 error 也没有 result/pageSize，页大小守卫必须放行，
+  // 否则会把"清 loading + 空态"的降级路径变成转圈永不停。
+  const { exposed, sandbox } = loadStoreModule();
+  const { handlers } = stubApi(sandbox);
+  const inst = makeVm(exposed.appOptions, {
+    activeBagMall: "bagZB",
+    activeBagTab: "background",
+  });
+
+  exposed.appOptions.mounted.call(inst);
+  assert.equal(inst.bagLoading, true, "mounted 里的 loadBagPage 应先进入加载态");
+
+  handlers.store_m_bag({}, { opt: { type: "background" }, type: "background", msg: "获取失败", state: "err" });
+
+  assert.equal(inst.bagLoading, false, "畸形回包必须清掉 loading，不能永久转圈");
+  assert.equal(inst.bagItems.length, 0, "应退化为空列表（模板据此显示空态文案）");
+  assert.equal(inst.bagTotal, 0, "页数归零");
+});
+
+test("store_m_bag 收到缺 pageSize 的合法回包时不被守卫误挡（守卫自身不制造挂死）", () => {
+  const { exposed, sandbox } = loadStoreModule();
+  const { handlers } = stubApi(sandbox);
+  const inst = makeVm(exposed.appOptions, {
+    activeBagMall: "bagZB",
+    activeBagTab: "background",
+  });
+
+  exposed.appOptions.mounted.call(inst);
+  handlers.store_m_bag({}, {
+    type: "background",
+    result: [{ keyName: "_b1", name: "背景1", type: "background", num: 1 }],
+    total: 2,
+    current: 1,
+    // 故意不带 pageSize
+  });
+
+  assert.equal(inst.bagLoading, false, "缺 pageSize 不应导致挂死");
+  assert.equal(inst.bagItems.length, 1, "应正常上屏");
+});
+
+test("预拉取回包先到时：中间态既不上屏也不入缓存，正常回包到达后仍能翻到第 2 页", () => {
   const { exposed, sandbox } = loadStoreModule();
   const { requests, handlers } = stubApi(sandbox);
   const inst = makeVm(exposed.appOptions, {
@@ -264,19 +319,39 @@ test("装扮页在预拉取之后仍能翻到第 2 页（原 bug 的端到端复
   });
 
   exposed.appOptions.mounted.call(inst);
-  // 1) 预拉取的 20/页回包先到
+
+  // 1) bgNameMap 预拉取的 20/页回包先到。
+  //    必须断言**中间态**：只看最终状态是抓不到 bug 的——随后到达的 6/页回包
+  //    会把 bagTotal 覆盖成正确值，修复前的实现最终状态也是对的。
+  //    真实故障是这一刻缓存被污染、20 件被铺进 2x3 网格。
   handlers.store_m_bag({}, prefetchPayload(20));
+
+  assert.equal(
+    inst.bagCache.bagZB_background,
+    undefined,
+    "中间态：20/页回包不得写进 bagCache（否则用户点「装扮」时会命中污染缓存）",
+  );
+  assert.equal(inst.bagItems.length, 0, "中间态：20 件不得铺进 2x3 网格");
+  assert.equal(inst.bagTotal, 0, "中间态：不得把按 20/页算出的 total=1 写进页数");
+  assert.equal(inst.bagLoading, true, "中间态：仍在等真正的 6/页首页，加载态不应被清掉");
+  assert.equal(
+    Object.keys(inst.bgNameMap).length,
+    20,
+    "中间态：预拉取的唯一用途（背景名录）必须已生效",
+  );
+
   // 2) 随后 6/页的真实首页回包到达
   handlers.store_m_bag({}, normalPage(1, 4));
   assert.equal(inst.bagTotal, 4, "页数应为 4，而非被 20/页回包算成 1");
   assert.equal(inst.bagItems.length, 6, "首页应正好 6 件");
+  assert.equal(inst.bagLoading, false);
 
   // 3) 点「下一页」不应再被 page > bagTotal 拒掉
   requests.length = 0;
   inst.bagGoto(2);
 
   const reqs = bagRequests(requests);
-  assert.equal(reqs.length, 1, "翻页必须能发出请求（原 bug 下这里是 0）");
+  assert.equal(reqs.length, 1, "翻页必须能发出请求");
   assert.equal(reqs[0].current, 2);
   assert.equal(reqs[0].pageSize, 6);
 });

@@ -36,22 +36,38 @@ function isAllowedNavUrl(url) {
 }
 
 /**
- * 把不可信数值归一化为「可写入存档的正数」。
- * 规则：非有限数 → 拒绝；负数 → 钳到 0；0 视为「不写入」（与历史真值语义一致，
- * 避免渲染层每次都带 0 把既有值清掉）。
+ * 把不可信数值归一化为「可写入存档的非负整数」。
+ *
+ * 规则：
+ * - 非 number/string 类型 → 拒绝。注意 `Number([])===0`、`Number([5])===5`，
+ *   不做类型判断的话数组会被当成合法数值。
+ * - 空字符串 / 纯空白 / null / undefined → 拒绝（reason:"empty"）。
+ *   钓鱼渲染层的 canusecnt/harvestfish 是 `getCookie(...)` 原样透传，cookie 缺失时是 ""，
+ *   而 `Number("")===0`，不拦住就会把「读不到」当成「归零」。
+ * - 非有限数（NaN/Infinity）→ 拒绝。
+ * - 负数 → 钳到 0，但**不写入**（reason:"negative"）：负值只可能来自渲染层 bug 或篡改，
+ *   把钳后的 0 写进去会直接清空玩家数值，拒绝写入才是安全方向。
+ * - 0 → 是否写入由 allowZero 决定（见 normalizeFishingSave 的逐字段策略）。
+ *
  * @param {unknown} raw
+ * @param {{allowZero?:boolean}} [options]
  * @returns {{apply:boolean, value:number, reason?:string, clamped?:boolean}}
  */
-function normalizePositiveNumber(raw) {
-  const n = typeof raw === "number" ? raw : Number(raw);
+function normalizePositiveNumber(raw, options = {}) {
+  const allowZero = options.allowZero === true;
+  if (raw === null || raw === undefined) return { apply: false, value: 0, reason: "empty" };
+  if (typeof raw !== "number" && typeof raw !== "string") {
+    return { apply: false, value: 0, reason: "bad-type" };
+  }
+  if (typeof raw === "string" && raw.trim() === "") {
+    return { apply: false, value: 0, reason: "empty" };
+  }
+  const n = Number(raw);
   if (!Number.isFinite(n)) return { apply: false, value: 0, reason: "not-finite" };
   let value = Math.trunc(n);
+  if (value < 0) return { apply: false, value: 0, reason: "negative", clamped: true };
+  if (value === 0) return { apply: allowZero, value: 0, reason: allowZero ? undefined : "zero" };
   let clamped = false;
-  if (value < 0) {
-    value = 0;
-    clamped = true;
-  }
-  if (value === 0) return { apply: false, value: 0, reason: "zero", clamped };
   if (value > Number.MAX_SAFE_INTEGER) {
     value = Number.MAX_SAFE_INTEGER;
     clamped = true;
@@ -75,14 +91,35 @@ function normalizeFishes(raw) {
 }
 
 /**
+ * 钓鱼存档的数值字段策略。
+ * allowZero=true：渲染层显式传 0 必须落盘。canusecnt 用完会被减到 0
+ * （indexOnLine.js 的 `setCookie("canusecnt",0,true)`），丢弃 0 会让存档里留着旧的 1，
+ * 关窗重开后主进程又把 1 种回 cookie → 白送一次粉钻钓鱼次数。harvestfish 归零同理。
+ *
+ * yb 也是 allowZero=true。曾一度按「渲染层 `yb:+getCookie("yb")` 会把空 cookie 变成
+ * 数字 0，与真实归零不可区分」而保守设为 false，但那个 `+` 不在 IPC 路径上 —— 它属于
+ * `ResultData`，出口是 `player.PETEventOnReceived(...)`，送给 Flash/Ruffle 游戏本体。
+ * 真正的落盘路径是 `setCookie(k, v, true)` → `saveOpt[k] = v + ""`（恒为字符串）
+ * → `saveInfoData` → fishing/main.js 的 saveDatas，所以主进程收到的是 `"0"`，
+ * 与空值可区分；且 yb 只由算术结果写入，cookie 缺失时的失败态是 `"NaN"`
+ * （由下面的 not-finite 分支拦掉，不会被当成 0）。
+ */
+const FISHING_NUMERIC_FIELDS = [
+  { key: "harvestfish", target: "fishing", allowZero: true },
+  { key: "canusecnt", target: "fishing", allowZero: true },
+  { key: "yb", target: "info", allowZero: true },
+];
+
+/**
  * 归一化钓鱼窗 saveDatas 的入参，产出可直接交给 setPetInfo 的 patch。
  * @param {unknown} data 渲染层传来的 data（可能是 undefined / 非对象）
- * @returns {{patch:object, rejected:string[], hasChange:boolean, fishes:(Array|null)}}
+ * @returns {{patch:object, rejected:string[], skipped:string[], hasChange:boolean, fishes:(Array|null)}}
  */
 function normalizeFishingSave(data) {
-  const d = data && typeof data === "object" ? data : {};
+  const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
   const patch = {};
   const rejected = [];
+  const skipped = [];
   let fishes = null;
 
   if (d.fishes !== undefined && d.fishes !== null) {
@@ -96,27 +133,21 @@ function normalizeFishingSave(data) {
     }
   }
 
-  for (const key of ["harvestfish", "canusecnt"]) {
-    if (d[key] === undefined || d[key] === null) continue;
-    const r = normalizePositiveNumber(d[key]);
+  for (const field of FISHING_NUMERIC_FIELDS) {
+    if (d[field.key] === undefined || d[field.key] === null) continue;
+    const r = normalizePositiveNumber(d[field.key], { allowZero: field.allowZero });
     if (r.apply) {
-      patch.fishing = patch.fishing || {};
-      patch.fishing[key] = r.value;
-    } else if (r.reason !== "zero") {
-      rejected.push(key + ":" + r.reason);
+      patch[field.target] = patch[field.target] || {};
+      patch[field.target][field.key] = r.value;
+    } else if (r.reason === "zero") {
+      // yb 的 0 是按策略跳过，不是异常，单列出来避免污染 rejected 日志
+      skipped.push(field.key + ":zero");
+    } else {
+      rejected.push(field.key + ":" + r.reason);
     }
   }
 
-  if (d.yb !== undefined && d.yb !== null) {
-    const r = normalizePositiveNumber(d.yb);
-    if (r.apply) {
-      patch.info = { yb: r.value };
-    } else if (r.reason !== "zero") {
-      rejected.push("yb:" + r.reason);
-    }
-  }
-
-  return { patch, rejected, hasChange: Object.keys(patch).length > 0, fishes };
+  return { patch, rejected, skipped, hasChange: Object.keys(patch).length > 0, fishes };
 }
 
 /** 渲染层是否要求回传最新宠物数据 */
@@ -164,6 +195,7 @@ module.exports = {
   ALLOWED_NAV_PROTOCOLS,
   MAX_FISHES,
   GIFT_USE_TYPES,
+  FISHING_NUMERIC_FIELDS,
   isAllowedNavUrl,
   normalizePositiveNumber,
   normalizeFishes,

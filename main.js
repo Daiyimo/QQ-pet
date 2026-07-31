@@ -33,32 +33,21 @@ global.$test = false;
 global.initData = {};
 
 let useTool = null;
-let tool = ["floatStyle"];
 
 try {
-  let e = process.argv;
-  for (let t in tool) {
-    let a = false;
-    for (let o in e) {
-      if (e[o].indexOf(tool[t]) !== -1) {
-        initData.NODE_TOOL = tool[t];
-        a = true;
-        break;
-      }
-    }
-    if (a) break;
+  // 命令行与环境变量两条路径统一过同一白名单：环境变量此前未做校验，
+  // 任意值都会被拼进下面的 require（不存在则启动崩溃，可控则加载任意本地 js）。
+  const { resolveToolName } = require("./src/ini/toolResolver.js");
+  const toolName = resolveToolName(process.argv, process?.env?.NODE_TOOL);
+  if (toolName) {
+    initData.NODE_TOOL = toolName;
+    useTool = require("./src/windows/tool/" + toolName + "/main.js");
   }
 } catch (e) {
-  // 工具模式参数解析失败不应阻断启动，降级为「非工具模式」正常启动桌宠
-  console.warn("[启动] 解析工具模式命令行参数失败，按普通模式启动:", e?.stack || e);
-}
-
-if (process?.env?.NODE_TOOL) {
-  initData.NODE_TOOL = process.env.NODE_TOOL;
-}
-
-if (initData?.NODE_TOOL && typeof initData?.NODE_TOOL === "string") {
-  useTool = require("./src/windows/tool/" + initData.NODE_TOOL + "/main.js");
+  // 工具模式解析/加载失败不应阻断启动，降级为「非工具模式」正常启动桌宠
+  useTool = null;
+  initData.NODE_TOOL = undefined;
+  console.warn("[启动] 工具窗模式加载失败，按普通桌宠模式启动:", e?.stack || e);
 }
 
 const createWindow = async () => {

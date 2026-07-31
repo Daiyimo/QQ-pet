@@ -15,7 +15,7 @@ const {
 } = _require("./sceneStabilizer");
 const { BarrageEmitter, textsAreSimilar } = _require("./barrageRanker");
 const { chat, getVisionProvider } = _require("../llm/providers");
-const { tryExtractJsonObject } = _require("../llm/jsonParse");
+const { tryExtractJsonObject, isPlainObject } = _require("../llm/jsonParse");
 const { UNIFIED_PERCEPTION_PROMPT } = _require("../llm/prompts");
 
 const HEARTBEAT_MS = 5 * 60 * 1000;
@@ -66,36 +66,40 @@ function cleanDuplexMessage(message, { requireProactiveValue = true } = {}) {
 }
 
 // —— 感知响应解析（移植 service.py _parse_perception + _recover_truncated_perception）——
-// 常规 JSON 抽取走 llm/jsonParse.js 的共用实现（与 llm.js 同一套标准）；
-// 完全解析不出来时再走本文件特有的"截断恢复"（只捞 scene/confidence/scene_evidence）。
+// 常规 JSON 抽取完全交给 llm/jsonParse.js（与 llm.js 同一套标准）：剥围栏、定位首个 "{"、
+// 尾部回退都在那里做，本文件不再重复切片。
+// 抽取不出来时才走本文件特有的"截断恢复"：被 max_tokens 掐断的响应 JSON 不闭合，
+// 但正则仍能捞回 scene/confidence/scene_evidence 三项，足够驱动场景状态机。
+// 关于错误文案：原先"完全没有 {"与"有 { 但解不出"是两条不同文案，现合并为一条并附上
+// 原文片段。理由是这两条只经 perception-failed 事件外传（目前无监听者），区分它们不带来
+// 任何动作差异，而排查时真正需要的是"模型到底返回了什么"。
 function parsePerceptionJson(text) {
   const source = String(text || "");
-  const start = source.indexOf("{");
-  if (start < 0) throw new Error("perception response contains no JSON object");
-  const body = source.slice(start);
-  let value = tryExtractJsonObject(body);
+  let value = tryExtractJsonObject(source);
   if (!value) {
     // 截断恢复：只取 scene/confidence/scene_evidence，其余字段留空
-    const sceneMatch = body.match(/"scene"\s*:\s*"(game|course|other)"/);
-    const confidenceMatch = body.match(
+    const sceneMatch = source.match(/"scene"\s*:\s*"(game|course|other)"/);
+    const confidenceMatch = source.match(
       /"confidence"\s*:\s*(-?(?:\d+(?:\.\d*)?|\.\d+))/
     );
-    if (!sceneMatch || !confidenceMatch) {
-      throw new Error("perception response is not valid JSON");
+    if (sceneMatch && confidenceMatch) {
+      const evidence = {};
+      for (const key of EVIDENCE_KEYS) {
+        const m = source.match(new RegExp(`"${key}"\\s*:\\s*(true|false)`));
+        if (m) evidence[key] = m[1] === "true";
+      }
+      value = {
+        scene: sceneMatch[1],
+        confidence: parseFloat(confidenceMatch[1]),
+        scene_evidence: evidence,
+      };
     }
-    const evidence = {};
-    for (const key of EVIDENCE_KEYS) {
-      const m = body.match(new RegExp(`"${key}"\\s*:\\s*(true|false)`));
-      if (m) evidence[key] = m[1] === "true";
-    }
-    value = {
-      scene: sceneMatch[1],
-      confidence: parseFloat(confidenceMatch[1]),
-      scene_evidence: evidence,
-    };
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("perception response is not an object");
+  if (!isPlainObject(value)) {
+    throw new Error(
+      "perception response is not valid JSON: " +
+        source.replace(/\s+/g, " ").slice(0, 200)
+    );
   }
   return value;
 }

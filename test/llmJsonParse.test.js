@@ -8,8 +8,17 @@ const assert = require("node:assert");
 const {
   tryExtractJsonObject,
   extractJsonObject,
+  isPlainObject,
 } = require("../src/service/llm/jsonParse.js");
 const { parsePerceptionJson } = require("../src/service/perception/loop.js");
+
+test("isPlainObject 只认纯对象（感知解析的失败判定依赖它）", () => {
+  assert.strictEqual(isPlainObject({ a: 1 }), true);
+  assert.strictEqual(isPlainObject(null), false);
+  assert.strictEqual(isPlainObject([1, 2]), false);
+  assert.strictEqual(isPlainObject("{}"), false);
+  assert.strictEqual(isPlainObject(undefined), false);
+});
 
 test("JSON 前带解释文字时仍能解析出对象", () => {
   const text = '好的，我来生成台词：\n{"tolk":"主人抱抱","submitText":"好"}';
@@ -73,11 +82,21 @@ test("感知解析同样能吃掉前置解释文字与围栏", () => {
   assert.strictEqual(parsed.observation, "桌面上打开了文件资源管理器");
 });
 
-test("完全没有 JSON 的感知响应仍抛出原有错误", () => {
-  assert.throws(
-    () => parsePerceptionJson("我看不清屏幕内容"),
-    /perception response contains no JSON object/
-  );
+test("完全没有 JSON 的感知响应抛错，且错误信息带上模型原文片段", () => {
+  // 原先"无 {"与"有 { 但解不出"是两条文案，现合并为一条并附原文——
+  // 这两条只经 perception-failed 事件外传，区分它们不带来动作差异，
+  // 而"模型到底返回了什么"才是排查时真正需要的信息。
+  assert.throws(() => parsePerceptionJson("我看不清屏幕内容"), (e) => {
+    assert.match(e.message, /perception response is not valid JSON/);
+    assert.match(e.message, /我看不清屏幕内容/);
+    return true;
+  });
+  // 有 "{" 但既解析不出也无法截断恢复：同一条文案 + 原文片段
+  assert.throws(() => parsePerceptionJson('前言 { 这不是 JSON 也没有 scene 字段'), (e) => {
+    assert.match(e.message, /perception response is not valid JSON/);
+    assert.match(e.message, /这不是 JSON/);
+    return true;
+  });
 });
 
 // —— 端到端：台词生成路径（llm.js）——

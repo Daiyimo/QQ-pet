@@ -84,14 +84,23 @@ test("响应分块切在多字节字符中间时不产生乱码", async () => {
 });
 
 test("响应体超过上限时中断请求并报错，不无限吃内存", async () => {
-  const chunk = "x".repeat(256 * 1024);
-  let writes = 0;
+  // 锁住导出的上限常量：改动它会让本测试提醒（也让这个导出真的有消费者）
+  assert.strictEqual(
+    providers.MAX_RESPONSE_BYTES,
+    2 * 1024 * 1024,
+    "响应体上限应为 2 MiB"
+  );
+  const cap = providers.MAX_RESPONSE_BYTES;
+  const chunkSize = 256 * 1024;
+  const chunk = "x".repeat(chunkSize);
+  const budget = cap * 8; // 服务端最多愿意吐 8 倍上限
+  let written = 0;
   const server = await startServer((req, res) => {
     res.setHeader("content-type", "application/json");
     const pump = () => {
-      // 一直吐数据（模拟配置错误/被劫持的端点）；客户端断开后 write 返回 false 或抛错即停
-      while (writes < 64) {
-        writes += 1;
+      // 一直吐数据（模拟配置错误/被劫持的端点）；客户端断开后停下
+      while (written < budget) {
+        written += chunkSize;
         if (!res.write(chunk)) {
           res.once("drain", pump);
           return;
@@ -109,12 +118,11 @@ test("响应体超过上限时中断请求并报错，不无限吃内存", async
         messages: [{ role: "user", content: "你好" }],
         timeoutMs: 15000,
       }),
-      /超过 \d+ 字节上限/
+      new RegExp(`超过 ${cap} 字节上限`)
     );
-    // 上限 2MiB，256KiB/块 → 收到的数据量不应接近服务端愿意吐的 16MiB
     assert.ok(
-      writes * chunk.length < 16 * 1024 * 1024,
-      `应在读满上限后立即中断，实际服务端已写出 ${writes} 块`
+      written < budget,
+      `应在读满上限后立即中断，实际服务端把 ${budget} 字节预算全写完了`
     );
   } finally {
     await closeServer(server);

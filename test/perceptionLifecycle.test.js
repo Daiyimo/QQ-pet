@@ -67,7 +67,7 @@ test("stop() 后在途的感知结果不再派发：不 emit pet-hide、不上�
   assert.strictEqual(loop.timer, null, "stop() 后不应残留 timer");
 });
 
-test("stop()+start() 不叠加定时链：切换后截屏频率不超过单链基线", async () => {
+test("stop()+start() 不叠加定时链：窗口内只有最新运行周期的 tick 在跑", async () => {
   const CHAT_MS = 120; // 模拟"截屏+大模型"远慢于 interval 的真实情况
   const INTERVAL = 40;
   const WINDOW = 600;
@@ -91,7 +91,17 @@ test("stop()+start() 不叠加定时链：切换后截屏频率不超过单链�
         });
       },
     });
-    return { loop, counter };
+    // 只读观测：start() 把本轮运行周期号（epoch）作为入参传给 _tick，
+    // 这里把每次 tick 的 epoch 记下来，用于判定"是否有被作废的旧链还在跑"。
+    // 纯测试侧包装（不改生产代码、不改运行时行为）：旧实现下旧链会带着过期 epoch
+    // 继续调用 _tick，于是同一观测窗口内会出现两个不同 epoch。
+    const tickEpochs = [];
+    const originalTick = loop._tick.bind(loop);
+    loop._tick = (epoch) => {
+      tickEpochs.push(epoch);
+      return originalTick(epoch);
+    };
+    return { loop, counter, tickEpochs };
   }
 
   // A. 基线：只 start 一次，测量 WINDOW 内的截屏次数
@@ -113,20 +123,42 @@ test("stop()+start() 不叠加定时链：切换后截屏频率不超过单链�
     await sleep(5);
   }
   b.loop.start();
+  const liveEpoch = b.loop._epoch; // 最后一次 start() 建立的运行周期（stop() 会再自增，故先存下来）
   await sleep(300); // 留足时间让被作废的在途 tick 走完它的 finally
+  const tickMark = b.tickEpochs.length;
   const toggledStart = b.counter.captures;
   await sleep(WINDOW);
   const toggled = b.counter.captures - toggledStart;
-  b.loop.stop();
+  const epochsInWindow = b.tickEpochs.slice(tickMark);
 
-  // 修复前实测：基线 3 次/秒 → 切换后 17 次/秒（约 5~6 倍）。
-  // 这里留 2 倍余量吸收定时器抖动，仍能稳定抓住"叠加定时链"的回归。
+  // 主防线（确定性，不依赖时序比值）：观测窗口内跑过的 tick 必须全部属于最新运行周期。
+  // 旧实现下"停止期间在途的 tick"会在重开后又排一条 timer，那条旧链带着过期 epoch
+  // 继续 tick，这里就会看到两个 epoch。
+  assert.ok(
+    epochsInWindow.length > 0,
+    "观测窗口内应至少跑过一次 tick，否则断言无意义"
+  );
+  assert.ok(
+    epochsInWindow.every((e) => typeof e === "number"),
+    "tick 应携带运行周期号（epoch 机制若被移除，这条会先红）"
+  );
+  assert.deepStrictEqual(
+    [...new Set(epochsInWindow)],
+    [liveEpoch],
+    `窗口内出现了多个运行周期的 tick（${[...new Set(epochsInWindow)].join(",")}）——` +
+      "说明被作废的旧定时链仍在运行，即定时链叠加"
+  );
+
+  // 辅助证据（时序比值）：修复前实测基线 4 次/600ms → 切换后 17 次/600ms（约 4~5 倍）。
+  // 留 2 倍余量吸收定时器抖动；它不再是唯一防线，只用于兜住"epoch 判定被绕过"的意外情形。
   assert.ok(
     toggled <= baseline * 2,
     `切换后截屏次数（${toggled}）不应显著超过基线（${baseline}）——定时链疑似叠加`
   );
 
-  // 结构性断言：只应有一条链，即"停止期间在途的 tick"不再排下一次
+  b.loop.stop();
+
+  // 收尾结构性断言：stop() 后不留 timer、不再截屏
   assert.strictEqual(b.loop.timer, null, "stop() 后不应残留 timer");
   const afterStop = b.counter.captures;
   await sleep(200);

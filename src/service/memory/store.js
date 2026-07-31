@@ -25,7 +25,13 @@ function defaultMemoryRoot() {
   try {
     const app = require("electron").app;
     if (app && app.getPath) return path.join(app.getPath("userData"), "memory");
-  } catch (e) {}
+  } catch (e) {
+    // 无 Electron（单测/纯 node）属预期分支，退回 cwd 继续跑
+    console.warn(
+      "[memory/store] 未取到 Electron userData，记忆根目录退回 cwd/memory:",
+      e && e.message ? e.message : e
+    );
+  }
   return path.join(process.cwd(), "memory");
 }
 
@@ -72,7 +78,13 @@ function atomicWriteBuffer(filePath, buffer) {
   } catch (e) {
     try {
       fs.unlinkSync(tmp);
-    } catch (e2) {}
+    } catch (e2) {
+      // 清理失败只影响残留一个 .tmp 文件，原始写入错误照常抛给调用方
+      console.warn(
+        `[memory/store] 原子写失败后清理临时文件 ${path.basename(tmp)} 失败:`,
+        e2 && e2.message ? e2.message : e2
+      );
+    }
     throw e;
   }
 }

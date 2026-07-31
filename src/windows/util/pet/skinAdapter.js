@@ -29,7 +29,10 @@
     let xmlText = null;
     try {
       xmlText = api.newSkinReadConfig(skin);
-    } catch (e) {}
+    } catch (e) {
+      // 新皮肤 Config.xml 读不到（缺文件/桥异常）属可降级情况：下一行回退老皮肤逻辑
+      console.warn("[skinAdapter] 读取新皮肤 Config.xml 失败，回退老皮肤逻辑:", skin, e?.stack || e);
+    }
     if (!xmlText) return origInit.call(this, t);
 
     const basePath = (t.baseRouter || "").replace(/assets\/Action$/, "assets/ActionNew/" + skin);

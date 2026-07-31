@@ -44,7 +44,13 @@ function desktopPath() {
   try {
     const { app } = _require("electron");
     if (app && typeof app.getPath === "function") return app.getPath("desktop");
-  } catch (e) {}
+  } catch (e) {
+    // 无 Electron（单测/纯 node）属预期分支，退回 ~/Desktop 继续跑
+    console.warn(
+      "[courses] 未取到 Electron 桌面路径，导出目录退回 ~/Desktop:",
+      e && e.message ? e.message : e
+    );
+  }
   return path.join(os.homedir(), "Desktop");
 }
 

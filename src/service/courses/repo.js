@@ -43,7 +43,13 @@ function atomicWrite(filePath, data) {
   } catch (e) {
     try {
       fs.unlinkSync(tmp);
-    } catch (_) {}
+    } catch (_) {
+      // 清理失败只影响残留一个 .tmp 文件，原始写入错误照常抛给调用方
+      console.warn(
+        `[courses/repo] 原子写失败后清理临时文件 ${path.basename(tmp)} 失败:`,
+        _ && _.message ? _.message : _
+      );
+    }
     throw e;
   }
 }
@@ -59,7 +65,13 @@ function defaultRoot() {
     if (app && typeof app.getPath === "function") {
       return path.join(app.getPath("userData"), "courses", "sessions");
     }
-  } catch (e) {}
+  } catch (e) {
+    // 无 Electron（单测/纯 node）属预期分支，退回 cwd 继续跑
+    console.warn(
+      "[courses/repo] 未取到 Electron userData，会话根目录退回 cwd/courses/sessions:",
+      e && e.message ? e.message : e
+    );
+  }
   return path.join(process.cwd(), "courses", "sessions");
 }
 
@@ -187,6 +199,14 @@ class CourseRepo {
     try {
       return fs.readFileSync(this._transcriptPath(id), "utf8");
     } catch (e) {
+      // 转写文件不存在是正常态（会话刚建、或全程没识别到文字），返回空串即可；
+      // 其余（EACCES / EIO / EBUSY…）是意外异常，静默会让"课程总结内容为空"完全无法定位。
+      if (e && e.code !== "ENOENT") {
+        console.error(
+          `[courses/repo] 读取转写失败（会话 ${id}），按空转写降级:`,
+          e.stack || e
+        );
+      }
       return "";
     }
   }

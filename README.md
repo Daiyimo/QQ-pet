@@ -141,6 +141,8 @@ npm run build:win:portable   # 仅免安装版
 
 存档是明文 JSON（API Key 除外，加密存储）。想备份宠物就复制 `config-qq-local.json`。
 
+若这个文件被异常断电 / 磁盘故障写坏，启动时不会清空它：程序会把它改名为 `config-qq-local.corrupt-<时间戳>.json` 保留原始内容，再以空存档启动（日志里有对应的错误记录）。想抢救数据就手工修复该备份的 JSON 后改回原名。
+
 ### 会被发往云端的内容
 
 开启对应功能后，以下内容会发给你配置的 LLM 服务商：
@@ -153,7 +155,7 @@ npm run build:win:portable   # 仅免安装版
 
 关掉「剪切板内容发送给 AI」后，剪贴板播报仍可用，只是不出网。
 
-磁盘占用有上界：记忆事件文件轮转上限约 12 MiB，课程保留最近 20 个会话、单会话帧总量上限 24 MiB。桌面导出目录不会被自动删除。
+磁盘占用有上界：记忆事件文件轮转上限约 12 MiB；课程保留最近 20 个会话，单会话帧总量上限 24 MiB、转写文本上限 2 MiB，因此课程本地副本的整体上界约 20 × 26 MiB ≈ 520 MiB。桌面导出目录不会被自动删除。
 
 ---
 
@@ -163,7 +165,9 @@ npm run build:win:portable   # 仅免安装版
 npm test        # node --test test/*.test.js
 ```
 
-当前 287 个测试，全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商）隔离外部依赖。
+当前 305 个测试（本轮修复后实测；`test/edgeHide.test.js` 是独立冒烟脚本，`node --test` 把它整体计为 1 个）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express`）隔离外部依赖。
+
+`test/ruffleSmoke/` 是需要 Electron 与真实素材的手动冒烟脚本（`node test/ruffleSmoke/run.js` 等），**刻意不被 `npm test` 的 glob 收录**，改 Ruffle 相关代码时手动跑。
 
 ### 代码地形图（改代码前必读）
 
@@ -171,7 +175,7 @@ npm test        # node --test test/*.test.js
 
 | 区域 | 形态 | 说明 |
 |---|---|---|
-| `src/service/**`、`src/windows/util/{pathGuard,controlBarClamp}.js`、`src/windows/util/pet/{ruffleBridge,newSkinRouter,skinAdapter}.js`、`src/windows/main/edgeHide.js`、`src/ini/dataWatcher.js` | 多行源码 + 中文注释 + 测试覆盖 | **放心改** |
+| `src/service/**`、`src/windows/util/{pathGuard,controlBarClamp}.js`、`src/windows/util/pet/{ruffleBridge,newSkinRouter,skinAdapter}.js`、`src/windows/main/edgeHide.js`、`src/ini/{dataWatcher,root}.js` | 多行源码 + 中文注释 + 测试覆盖 | **放心改** |
 | `src/ini/` 多数文件、`src/windows/` 多数文件 | **webpack 压缩单行产物**，仓库内无对应源码与 sourcemap | **只能定点字符串替换** |
 
 压缩区的文件 `wc -l` 为 0，所有行号都是 `:1`。改动这些文件时：

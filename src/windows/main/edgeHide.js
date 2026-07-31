@@ -29,6 +29,7 @@ class EdgeHide {
   constructor() {
     this.state = null;       // null | "left" | "right"
     this.dragging = false;   // 主进程记录的按住状态（mousedown/mouseup 维护）
+    this.movedWhileDown = false; // 本次按住期间窗口是否真的位移过（区分"单击"与"拖动松手"）
     this.animating = false;  // 滑动动画进行中（期间不响应进出收边）
     this.armTime = 0;        // 悬停弹出的生效时间戳
     this.win = null;         // 主窗口（BrowserWindow）
@@ -82,7 +83,9 @@ class EdgeHide {
   _play(name) {
     try {
       this.playActive && this.playActive(name);
-    } catch (e) {}
+    } catch (e) {
+      console.warn("[edgeHide] 播放动作失败:", name, e?.stack || e);
+    }
   }
 
   /** 取消进行中的滑动与待接的 normal */
@@ -97,16 +100,30 @@ class EdgeHide {
    */
   onPress() {
     this.dragging = true;
+    this.movedWhileDown = false;
   }
 
   /**
    * 渲染层 mouseup（"which" 且 data 中带 isDown 字段）时调用：
    * 松手位置在屏幕左/右边缘 → 进入收边态
+   *
+   * @param {boolean} [isDown] 渲染层 mouseup 载荷里 isDown 的**值**（move.js 传 {isDown}）。
+   *   - 省略（undefined）：保持既有行为，任何 mouseup 都按"拖动松手"判定贴边。
+   *     调用方 src/windows/main/main.js 目前就是不传值的，故默认路径向后兼容。
+   *   - true ：确实在宠物本体上按下过左键；此时还要求本次按住期间窗口真的位移过，
+   *     否则只是"在边缘处摸一下宠物"，不应触发收边。
+   *   - false：右键松手、或按下动作没落在宠物上（move.js 的 isDown 仍为 false），不触发收边。
    */
-  onRelease() {
+  onRelease(isDown) {
+    const moved = this.movedWhileDown;
     this.dragging = false;
+    this.movedWhileDown = false;
     if (this.state || this.animating) return; // 已收边或动画中不重复进入
     if (!this._winAlive()) return;            // 窗口隐藏（游戏场景等）不进收边
+    if (isDown !== undefined) {
+      if (isDown !== true) return; // 右键/非宠物本体上的松手
+      if (!moved) return;          // 纯单击，没拖动过
+    }
     const b = this._bounds();
     if (!b) return;
     const [screenW] = this.getScreenSize();
@@ -128,10 +145,16 @@ class EdgeHide {
    * doMovePosition 收到拖动位移（next 分支）时调用：
    * 收边态下用户按住小条拖动 → 立即退出收边态，本次及后续位移恢复原有 clamp 逻辑。
    * 不拦截，返回后 doMovePosition 继续正常处理。
+   *
+   * 同时记录"本次按住期间是否真的位移过"，供 onRelease 区分单击与拖动松手。
+   * 只在 dragging 期间记录：窗口初始定位（mounted 里的 lastX/lastY 补偿）也会走
+   * next 分支且位移非零，但那不在按住区间内，不能算作拖动。
    */
   onDragMove(e) {
+    const hasDelta = !!(e && e.next && (e.next[0] || e.next[1]));
+    if (this.dragging && hasDelta) this.movedWhileDown = true;
     if (!this.state) return;
-    if (e && e.next && (e.next[0] || e.next[1])) {
+    if (hasDelta) {
       this.exitHide({ instant: true, quiet: true });
     }
   }
@@ -201,7 +224,10 @@ class EdgeHide {
       const x = Math.round(startX + ((targetX - startX) * step) / SLIDE_STEPS);
       try {
         this.doMovePosition({ toPosition: [x, y] });
-      } catch (e) {}
+      } catch (e) {
+        // 位移失败会让贴边滑动停在中途，必须留堆栈，否则现场无任何线索
+        console.warn("[edgeHide] 贴边滑动位移失败:", { x, y, step }, e?.stack || e);
+      }
       if (step < SLIDE_STEPS) {
         this._slideTimer = setTimeout(tick, SLIDE_INTERVAL);
       } else {

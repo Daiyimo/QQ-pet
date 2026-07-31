@@ -72,7 +72,9 @@ class mainClass {
         // 窗口工厂会让非白名单窗口跟随桌宠透明度，成就窗强制不透明
         try {
           win && win.setOpacity && win.setOpacity(1);
-        } catch (e) {}
+        } catch (e) {
+          console.warn("[achievement] 设置窗口不透明失败:", e?.stack || e);
+        }
         this.init();
       })
       .catch((err) => {
@@ -94,7 +96,9 @@ class mainClass {
       if (vm && !vm.isDestroyed() && vm.webContents) {
         vm.webContents.send("achievement_m_load_h", { ok: true, list });
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn("[achievement] 下发成就列表失败:", e?.stack || e);
+    }
   }
 
   doHide() {

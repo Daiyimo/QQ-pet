@@ -79,7 +79,9 @@ class mainClass {
         // 窗口工厂会让非白名单窗口跟随桌宠透明度（可低至 0.1），签到窗强制不透明
         try {
           win && win.setOpacity && win.setOpacity(1);
-        } catch (e) {}
+        } catch (e) {
+          console.warn("[signIn] 设置窗口不透明失败:", e?.stack || e);
+        }
         this.init();
       })
       .catch((err) => {
@@ -97,7 +99,9 @@ class mainClass {
       if (vm && !vm.isDestroyed() && vm.webContents) {
         vm.webContents.send("signIn_m_load_h", signInService.getStatus());
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn("[signIn] 下发签到状态失败:", e?.stack || e);
+    }
   }
 
   // 回发签到结果 + 最新状态（成功时的气泡庆祝已在逻辑层触发）
@@ -109,7 +113,9 @@ class mainClass {
           status: signInService.getStatus(),
         });
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn("[signIn] 回发签到结果失败:", e?.stack || e);
+    }
   }
 
   doClose() {

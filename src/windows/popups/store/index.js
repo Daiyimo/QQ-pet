@@ -65,6 +65,22 @@ const BAG_TYPE_MALL = {
   background: "bagZB"
 };
 
+/* 左栏储物柜网格恒为官方 selfGood 2x3 = 每页 6 件（见 index.html 的 leftSelfGoodsBk）。
+   页大小必须是常量：mounted 里为了填 bgNameMap 会额外拉一大页（pageSize 20），
+   那种回包的 result/total 是按 20/页算的，绝不能当成本窗的一页数据缓存或展示，
+   否则装扮页会把 20 个背景挤进 2x3 网格、且 total 被算成 1 页导致翻页点不动。 */
+const BAG_PAGE_SIZE = 6;
+
+/* 背包回包/缓存条目是否可直接当作「第 page 页」渲染。
+   纯函数，无 this 依赖，便于单测（test/storeBagCache.test.js）。
+   pageSize 与本窗网格不一致的回包（如 bgNameMap 预拉取的 20/页）一律判为不可用。 */
+function isUsableBagPayload(payload, page, pageSize) {
+  if (!payload || payload.error) return false;
+  if (!Array.isArray(payload.result)) return false;
+  if (+payload.pageSize !== +pageSize) return false;
+  return +payload.current === +page;
+}
+
 const app = {
   data: () => ({
     petInfo: {info:{yb:0}, maxInfo:{level:1}},
@@ -99,7 +115,7 @@ const app = {
     bagItems: [],
     bagTotal: 0,
     bagCurrent: 1,
-    bagPageSize: 6,
+    bagPageSize: BAG_PAGE_SIZE,
     bagLoading: false,
     bagError: "",
     /* 头部展示区点选中的背包物品 */
@@ -229,11 +245,15 @@ const app = {
     window.electronAPI.store_m_bag((e,d)=>{
       /* 背包页回包：type 全窗唯一，据此定位缓存 key；非当前页只入库 */
       const key = (BAG_TYPE_MALL[d.type] || this.activeBagMall) + "_" + (d.type || this.activeBagTab);
-      if(!d.error) this.bagCache[key] = d;
-      /* 背景名录：任何背景回包都合并进来，供头部"当前背景"显示名称 */
+      /* 背景名录：任何背景回包都合并进来，供头部"当前背景"显示名称。
+         这一步必须在 pageSize 校验之前——bgNameMap 预拉取（pageSize 20）的唯一用途就是它。 */
       if(d.type === "background" && Array.isArray(d.result)) {
         d.result.forEach(it => { this.bgNameMap[it.keyName] = it.name; });
       }
+      /* 只有页大小与本窗 2x3 网格一致的回包才可入缓存/上屏，
+         否则预拉取的 20/页数据会污染装扮页（挤爆网格 + total 算成 1 页锁死翻页） */
+      if(!isUsableBagPayload(d, d.current, BAG_PAGE_SIZE) && !d.error) return;
+      if(!d.error) this.bagCache[key] = d;
       if(key !== this.bagCacheKey) return;
       this.bagLoading = false;
       if(d.error){ this.bagError = d.error; return; }
@@ -241,7 +261,7 @@ const app = {
       this.bagItems = Array.isArray(d.result) ? d.result : [];
       this.bagTotal = +d.total || 0;
       this.bagCurrent = +d.current || 1;
-      this.bagPageSize = +d.pageSize || 6;
+      this.bagPageSize = BAG_PAGE_SIZE;
       /* 使用/购买刷新后同步选中物品（同类目下用完则清除选中） */
       if(this.selGood && this.selGood.type === d.type){
         this.selGood = this.bagItems.find(it => it.keyName === this.selGood.keyName) || null;
@@ -319,13 +339,14 @@ const app = {
       this.loadBagPage(page);
     },
     loadBagPage(page){
-      /* 命中缓存且同页则直接展示，否则向主进程请求背包页（getConsumablesPage） */
+      /* 命中缓存且同页、且页大小与本窗 2x3 网格一致才直接展示；
+         否则（含被预拉取的 20/页数据污染的情况）重新向主进程请求整页 */
       const hit = this.bagCache[this.bagCacheKey];
-      if(hit && +hit.current === page && Array.isArray(hit.result)){
+      if(isUsableBagPayload(hit, page, BAG_PAGE_SIZE)){
         this.bagItems = hit.result;
         this.bagTotal = +hit.total || 0;
         this.bagCurrent = page;
-        this.bagPageSize = +hit.pageSize || 6;
+        this.bagPageSize = BAG_PAGE_SIZE;
         this.bagError = "";
         return;
       }
@@ -334,7 +355,7 @@ const app = {
       window.electronAPI.store_h_listBag({
         type: this.activeBagTab,
         current: page,
-        pageSize: 6
+        pageSize: BAG_PAGE_SIZE
       });
     },
     selectGood(item){
@@ -456,6 +477,9 @@ const app = {
 };
 
 Vue.createApp(app).mount("#app");
+
+/* 单测入口（test/storeBagCache.test.js）：只暴露纯函数与选项对象，不改变运行时行为 */
+e.__storeTest = { BAG_PAGE_SIZE, isUsableBagPayload, appOptions: app };
 
 var w=window;
 for(var k in e) w[k]=e[k];

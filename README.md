@@ -165,7 +165,7 @@ npm run build:win:portable   # 仅免安装版
 npm test        # node --test test/*.test.js
 ```
 
-当前 305 个测试（本轮修复后实测；`test/edgeHide.test.js` 是独立冒烟脚本，`node --test` 把它整体计为 1 个）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express`）隔离外部依赖。
+当前 502 个测试（实测 `npm test` 的 `tests` 计数；注意 `test/edgeHide.test.js` 内部有 21 条 assert，但 `node --test` 把整个文件计为 1 个）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
 
 `test/ruffleSmoke/` 是需要 Electron 与真实素材的手动冒烟脚本（`node test/ruffleSmoke/run.js` 等），**刻意不被 `npm test` 的 glob 收录**，改 Ruffle 相关代码时手动跑。
 
@@ -175,7 +175,7 @@ npm test        # node --test test/*.test.js
 
 | 区域 | 形态 | 说明 |
 |---|---|---|
-| `src/service/**`、`src/windows/util/{pathGuard,controlBarClamp}.js`、`src/windows/util/pet/{ruffleBridge,newSkinRouter,skinAdapter}.js`、`src/windows/main/edgeHide.js`、`src/ini/{dataWatcher,root}.js` | 多行源码 + 中文注释 + 测试覆盖 | **放心改** |
+| `src/service/**`、`src/windows/util/{pathGuard,controlBarClamp,ipcInputGuard,activeRecheck}.js`、`src/windows/util/pet/{ruffleBridge,newSkinRouter,skinAdapter}.js`、`src/windows/main/edgeHide.js`、`src/ini/{dataWatcher,root,toolResolver}.js` | 多行源码 + 中文注释 + 测试覆盖 | **放心改** |
 | `src/ini/` 多数文件、`src/windows/` 多数文件 | **webpack 压缩单行产物**，仓库内无对应源码与 sourcemap | **只能定点字符串替换** |
 
 压缩区的文件 `wc -l` 为 0，所有行号都是 `:1`。改动这些文件时：
@@ -186,9 +186,27 @@ npm test        # node --test test/*.test.js
 
 `src/windows/lib/`（Vue / Ant Design / iconfont）与 `src/windows/js/ruffle/` 是第三方发行版，不要改。
 
+### 日志与异常约定（新代码按此写）
+
+一轮全量审查后定下的口径。存量代码里仍有多种写法并存，**不必专门去统一**，但新代码与顺手改到的地方按这个来，避免继续漂：
+
+```js
+// 意料外的异常 —— 必须留完整堆栈，否则故障不可诊断
+console.error("[前缀] 人话描述，含降级后的行为:", e?.stack || e);
+// 已知/可预期的业务错误（IPC 载荷解析失败、文件不存在等）—— 有降级，留 message 即可
+console.warn("[前缀] 人话描述，含降级后的行为:", e?.message || e);
+```
+
+- **前缀**用相对 `src/` 的模块路径去掉扩展名，太长时保留最后两段：`[ini/store]`、`[llm/providers]`、`[main/shortcuts]`、`[perception/loop]`。渲染层加 `/html` 区分（`[tip/html]`）。**不要用中文功能标签**（`[快捷键]` 这类无法 grep 反查文件）。
+- 统一用可选链 `e?.stack`，不要再写 `e && e.stack ? e.stack : e`。
+- **禁止空体 catch**。唯一例外是 webpack 双模加载探针（`try{module&&(module.exports=…)}catch(e){}`，探测环境有没有 `module`，不是吞业务异常）——新代码请直接写 `if (typeof module !== "undefined" && module)`，不要用 try/catch，更不要靠匹配异常文本来区分预期分支。
+- **不可信数值**（IPC 载荷、cookie、渲染层传参）走 `src/windows/util/ipcInputGuard.js`，不要手写。注意 `Number("")` 与 `Number([5])` 都不会得到 `NaN`，光判 `isFinite` 挡不住。
+- 压缩产物里既有的 `+x != +x`（只挡 `NaN`）**刻意保留**：它与 `setPetInfo` 把归零字段回写成字符串 `"0"` 的历史语义配套，换成 `Number.isFinite` 会误伤。
+- **价格口径的单一真值**是 `pet/pinkDiamondShop.js` 的 `applyPinkDiamondPrice`。跑在浏览器上下文、无法 require 主进程模块的地方（如 `fishing/indexOnLine.js`）允许写第二份实现，但**必须有跨引用断言把两者钉死** —— 可以有第二份实现，不能有第二份测试基准。
+
 ### 架构要点
 
-- **主进程**：`main.js` → `src/ini/init.js`（按固定顺序同步 require，顺序即依赖）→ `src/ini/doMain.js`（存档初始化 + 装载 service + 拉起主窗口）
+- **主进程**：`main.js` → `src/ini/init.js`（按固定顺序同步 require，顺序即依赖）→ `src/ini/doMain.js`（存档初始化 + 装载 service + 拉起主窗口）。`createWindow()` 整体包了 try/catch：init 阶段的致命异常会弹窗告知并 `app.exit(1)`，不能落到 `unhandledRejection`（那个处理器刻意只记日志不退出，对运行期异常是对的，对启动阶段会留下无窗口却占着单实例锁的僵尸进程）
 - **全局状态**：`src/ini/pet.js` 是宠物状态仓库，通过 `getPetInfo` / `setPetInfo` / `getSys` / `setSys` 等全局函数暴露；service 层以 9 个全局单例互相协作，加载顺序是隐式契约
 - **窗口**：`src/windows/window.js` 是窗口工厂，所有窗口 `loadFile(app.html)` 后由主进程读取各自的 `index.html` 片段，用 `executeJavaScript` 注入渲染
 - **Flash**：`.swf` 由 Ruffle 的 `polyfills` 自动接管 `<embed>` 标签；`ruffleBridge.js` 用 Ruffle 元数据重建虚拟时间轴，补上 Ruffle 不提供的帧回调

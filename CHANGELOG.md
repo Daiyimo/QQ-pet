@@ -6,7 +6,12 @@
 
 ## [未发布]
 
-一轮全量源码审查后的集中修复。审查分五个域并行进行（主进程/IPC、宠物数值与经济、AI 服务层、渲染层、存储与测试），共确认约 50 项缺陷，本次修完其中全部代码类缺陷。新增 182 个测试（279 → 461），全绿。
+一轮全量源码审查后的集中修复，随后又做了一轮独立 code review（正确性 / 测试质量 / 一致性三个视角）并修掉 review 发现的问题。审查分五个域并行进行（主进程/IPC、宠物数值与经济、AI 服务层、渲染层、存储与测试），共确认约 50 项缺陷 + review 追加约 20 项，本次修完其中全部代码类缺陷。测试 279 → **502**，全绿。
+
+### 破坏性变更
+
+- **移除 SWF 文件查看器工具窗（`viewSwf`）**：`NODE_TOOL=viewSwf` 入口不再可用，设置页对应菜单项已删除。它的三个 IPC 通道把渲染层传来的任意路径直接交给 `fs.rename` / `readFileSync` / `readdir`，零校验、也没用上仓库里现成的 `pathGuard`；工具本身需环境变量才可达，属半死代码，删除比加固更彻底（git 历史可找回）。
+- **`tip` 气泡不再支持 `type:"html"`**：该分支是个 `v-html` 注入点（当前无调用方，但一旦有人开始用即是 XSS）。现在发 `type:"html"` 会走转义文本渲染。
 
 ### 修复
 
@@ -65,12 +70,41 @@
 - 弹幕补免打扰门禁（弹幕不走 `openSpeak`，此前绕过总开关）。
 - 皮肤 XML 解码先嗅探 BOM 与 `encoding` 声明，UTF-8 素材不再乱码。
 - 移除 `crypto-js` / `node-xlsx` / `nodejs-websocket` 三个零调用依赖及 `openWS` 死代码。`axios` 的 advisory 单独排期。
+- `window.js` 的 `onload` 幂等化：`did-finish-load` 每次导航都会触发，而 `onload` 里做的是一次性初始化，reload 会重建 Tray、重复注册全局快捷键（此前只因重载快捷键里先手动 `destroyTray` 才没出现双托盘图标，这层依赖很脆）。
+- `floatStyle` / `model` 的主进程发送通道补 `_h` 后缀，与 preload 监听对齐。此前渲染层的 `load` 回调一直收不到，只是碰巧被注入脚本里无条件调的 `seeApp()` 兜住了。
+- 礼包领取先校验分页下标与 `useType` 白名单，"发放道具"与"标记已领取"合并为校验通过后的同一次写入（此前越界会抛异常，而道具已发放、领取状态未落盘 → 可重复领取）。
+- 右键菜单与状态面板的"停止状态"取键判空：三元链在无进行中活动时会落到键 `""`，写 `.stopNow` 抛 `TypeError`（活动刚结束的竞态窗口内点击必崩）。
+- `floatStyle` 根元素的 `id="appMain por"`（id 里带空格）使两处 `#appMain` 样式全部失配，丢失 `font-size` 与显隐 `transition`。
+- 新增"日志与异常约定"到 README 的改代码前必读：日志前缀用模块路径、`e?.stack` 统一写法、禁止空体 catch（webpack 双模探针除外）、不可信数值走 `ipcInputGuard`、价格口径的单一真值。存量多种写法并存**不做统一改写**（零功能收益的风险），只约束新代码。
+
+### 独立 code review 后追加的修复
+
+三个视角各自复核了上面那批改动，发现的问题：
+
+- **存档损坏隔离失败时会把程序变成无窗口僵尸进程 —— 比它要修的 bug 更糟**。`renameSync` 被杀软 / 备份程序 / 编辑器持有句柄挡住时（Windows 上很常见），隔离返回空、第二次 `new Store` 撞同一个损坏文件再抛，异常冒到模块顶层变成 `unhandledRejection` —— 而那个处理器刻意只记日志不退出。结果是进程活着、没有窗口没有托盘、还占着 `requestSingleInstanceLock`，用户只能去任务管理器杀且毫无提示。现改为四级降级：rename 隔离 → `copyFileSync` 备份 + 原文件覆盖 → 换 `-recovered-<ts>.json` 新文件名启动 → 全部失败才抛；每级都 `dialog.showErrorBox` 明确告知，前三级一律不再抛。同时 `main.js` 的 `createWindow()` 整体包了 try/catch，init 阶段的致命异常一律弹窗 + `app.exit(1)`，不再落到 `unhandledRejection`。
+- **`toAddGoods` 落盘失败时白拿物品**：先改内存后落盘，`setCache` 抛错时物品已在内存里，之后任意一次成功落盘就把它持久化。现在改动前做快照、失败就地回滚（必须就地还原而非整体赋值——`storeGoods` 的类目数组与 `$Store` 里的是同一对象）。
+- **元宝 / 钓鱼次数正好归零时不落盘**：`0` 曾被当成"不写入"（沿用旧的真值判断语义），于是 `canusecnt` 用完减到 0 落不了盘，关窗重开又被种回 1 → 白送一次粉钻钓鱼次数。现在显式传的 0 会写入，空字符串与 `"NaN"` 被拒。
+- **"取不到 electron.app"的判定在四处各写一遍，其中三处是静默降级**：`require("electron")` 在非 Electron 运行时**不抛错、只是 `app` 为 undefined`（实测纯 Node 下它返回的是可执行文件路径字符串），所以只靠 `try/catch` 判定会漏。三处收敛到新的 `src/service/electronPaths.js`，三条降级分支各自留日志。
+- **`pathGuard` 的 realpath 复核改为 fail-closed**：复核本身抛错时以前会把异常抛给调用方，现在记堆栈并拒绝——越权校验拿不到结论时放行等于没有校验。
+- **`dataWatcher` 的 error 处理器会关掉已被替换的新 watcher**：用的是外层变量而非闭包捕获的实例，旧 watcher 重建后补发 error 会误关新的（能自愈但会抖动）。改为身份比对，与 `perception/loop.js` 的 `this._abort === controller` 同源。
+- **mousedown 的 IPC 载荷不再塞 MouseEvent 原对象**：贴边收边依赖"载荷里没有 `isDown` 键"来区分按下/松手，而原对象跨 contextBridge 的行为（摊平成 `{}` 还是抛 `DataCloneError`）决定了这个功能是正常还是整体失效。现在只传 `{which, clientX, clientY}` 三个原语。
+- **商城背包的守卫把降级路径换成了挂死**：畸形失败回包（无 `error` 无 `result`）会在清 `bagLoading` 之前早退，转圈永不停也不报错。守卫收窄为只挡"页大小不符的合法回包"。
+- **用药失败的真实原因被文案短路吃掉**：库存失配时用户看到的是"我很健康哦~~"（宠物可能正病着）。判别式改用 `ok:false`（reviewer 建议的 `overType==="err"` 会误伤正常的"健康无需吃药"路径——`State.js` 在那条路径上也把 `overType` 兜底成了 `"err"`）。
+- 清理本轮自己制造的死代码：`getLocalIP()`（60 行，随 `openWS` 删除而失去调用点）、`Goods.saveTimes`（防抖改同步后永不执行）、`tip/main.js` 的惰性 `JSON.parse` 块。
+- `level.js` 的双模导出探针不再靠**匹配 V8 英文异常文本**区分预期分支（换引擎/换 locale 就会刷日志），改用 `typeof module !== "undefined"`。粉钻顶级返回的区间与等级对齐为自洽（`upGrowth` 1800 → 2800）；`GrowUp.js` 内嵌的那份副本同步修改——成长主循环走的是内嵌副本，两份必须一起改。
 
 ### 测试
 
-- 279 → **461** 个测试，全绿。新增覆盖此前完全空白的领域：感知的 `start()`/`stop()` 生命周期、存档损坏隔离、`dataWatcher` 全部降级分支、端口重试、`pathGuard` 的符号链接绕过。
+- 279 → **502** 个测试，全绿、0 跳过。新增覆盖此前完全空白的领域：感知的 `start()`/`stop()` 生命周期、存档损坏隔离的四级降级、`dataWatcher` 全部降级分支、端口重试、`pathGuard` 的符号链接绕过、`electronPaths` 的三条降级分支。
+- **修掉三条经实证抓不住 bug 的用例**（把被测源码回滚到修复前再跑，仍通过的即为假绿）：
+  - `stateIll.test.js` 的 `getRandom` 桩忽略区间参数，导致"病树随机区间"这半个修复完全裸奔——把实现改回 `getRandom(1,2)` 全套仍全绿。桩改为尊重区间并直接断言区间。
+  - `achievement.test.js` 一条"防回归"用例名与行为不符（两处都没写 signin），已删除。
+  - `storeBagCache.test.js` 标着"端到端复现"的用例只看最终状态，而后到的正常回包会把错误状态覆盖掉；改为断言中间态。
+- **删掉对压缩产物做源码文本断言的用例**（`toy125.test.js`），其行为已由真实行为用例覆盖；同时把它唯一独有的覆盖点（玩具与食物同走状态回调）转成真实行为断言，覆盖率不降。
+- **"定时链叠加"的防线从墙钟速率比值换成确定性断言**：断言观测窗口内出现的 tick epoch 集合恰好只有最新那一个。旧实现下报 `[7, 5]`，直接指出残留的是哪条链。
+- **`pathGuard` 的安全保证不再依赖文件系统权限**：原来三条 junction 用例在没有 symlink 权限的环境会静默跳过、套件依然全绿，等于唯一防线消失。新增 6 条平台无关用例（含反向对照组，排除"一旦注入 realpath 就一律拒绝"的假通过）。
 - `test/edgeHide.smoke.js` 改名为 `edgeHide.test.js`：`npm test` 的 glob 是 `test/*.test.js`，该文件里的状态机断言从未被执行过（断言内容未改）。
-- 修掉 `test/achievement.test.js` 里一条假绿用例——它手工注入 `info.signin`，而该前置条件在生产环境永远不成立。
+- 钓鱼 8 折与商城 8 折现在有跨引用断言钉住：口径可以有第二份实现（浏览器上下文无法 require 主进程模块），但不能有第二份测试基准。
 
 ## [1.2.6] - 2026-07-29
 

@@ -3,7 +3,7 @@
 // compactTimeline / summaryCovers 为纯函数（普通 node 可 require 单测）；
 // DailyMemoryService 走云端 LLM（providers.chat + buildDailySummaryPrompt）。
 const _require = eval("require");
-const { MemoryStore, localDayString, localTimeString } = _require("./store.js");
+const { MemoryStore, localDayString, localTimeString, isValidDay } = _require("./store.js");
 
 // —— 活动类别判定（_memory_activity_category 逐条对照移植）——
 function memoryActivityCategory(event) {
@@ -108,11 +108,20 @@ const CATEGORY_PRIORITY = {
 // _compact_memory_timeline：类别规则 → 抖动平滑 → 90 分钟桶 → 每桶 ≤4 条细节，
 // 总预算 limit 字符。events 为 [{timestamp(UTC ISO), text, metadata}]，需按时间有序。
 function compactTimeline(events, limit = 2800) {
-  const categorized = events.map((event) => ({
-    local: new Date(String(event.timestamp).replace("Z", "+00:00")),
-    event,
-    category: memoryActivityCategory(event),
-  }));
+  // timestamp 非法（Invalid Date）的事件跳过：否则 NaN 会进分桶 key 和 prompt
+  const categorized = [];
+  let skippedInvalid = 0;
+  for (const event of events) {
+    const local = new Date(String(event.timestamp).replace("Z", "+00:00"));
+    if (Number.isNaN(local.getTime())) {
+      skippedInvalid += 1;
+      continue;
+    }
+    categorized.push({ local, event, category: memoryActivityCategory(event) });
+  }
+  if (skippedInvalid) {
+    console.warn(`[memory/daily] 跳过 ${skippedInvalid} 条 timestamp 非法的事件`);
+  }
 
   // 抖动平滑：前后同类、自身是"日常操作/基本无操作"、且前后间隔 ≤10 分钟 → 归并到前类
   for (let i = 1; i < categorized.length - 1; i++) {
@@ -245,6 +254,7 @@ class DailyMemoryService {
 
   // 生成并落盘某一天的记忆 Markdown，返回 {date, event_count, generated, content}
   async generateDaily(day) {
+    if (!isValidDay(day)) throw new Error(`invalid day: ${day}`);
     const { providers, prompts } = llmDeps();
     const events = this.store.readEvents({ day });
     const now = new Date();

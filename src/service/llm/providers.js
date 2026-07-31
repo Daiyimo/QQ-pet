@@ -150,6 +150,13 @@ function postJson(urlStr, headers, payload, timeoutMs, signal) {
         new Error(`API 地址协议不支持（${u.protocol}），只支持 http/https`)
       );
     }
+    // 与 memory/imageGen.js 的 buildEndpoint 对齐：拒绝 URL 内嵌凭据，
+    // 避免 user:pass@host 被静默带进请求并可能写进日志
+    if (u.username || u.password) {
+      return reject(
+        new Error("API 地址不允许内嵌用户名密码，请在设置页检查服务商配置")
+      );
+    }
     if (signal && signal.aborted) {
       return reject(new Error("request aborted"));
     }
@@ -283,6 +290,12 @@ function convertMessagesAnthropic(messages, images) {
   return { system: systemParts.join("\n"), messages: conv };
 }
 
+// 错误体脱敏：HTTP 错误片段会进日志，可能回显 apiKey，先替换再拼接
+// （与 memory/imageGen.js 的 redact 等价，仅替换符不同）
+function redact(value, secret) {
+  return secret ? String(value).split(secret).join("***") : String(value);
+}
+
 async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
   const url = String(cfg.baseUrl || "").replace(/\/+$/, "") + "/chat/completions";
   const payload = {
@@ -299,16 +312,16 @@ async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeo
     signal
   );
   if (statusCode < 200 || statusCode >= 300) {
-    throw new Error(`openai HTTP ${statusCode}: ${String(body).slice(0, 500)}`);
+    throw new Error(`openai HTTP ${statusCode}: ${redact(body, cfg.apiKey).slice(0, 500)}`);
   }
   let parsed;
   try {
     parsed = JSON.parse(body);
   } catch (e) {
-    throw new Error(`openai 响应解析失败: ${String(body).slice(0, 200)}`);
+    throw new Error(`openai 响应解析失败: ${redact(body, cfg.apiKey).slice(0, 200)}`);
   }
   if (parsed.error) {
-    throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+    throw new Error(redact(parsed.error.message || JSON.stringify(parsed.error), cfg.apiKey));
   }
   const content = parsed.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content) {
@@ -350,16 +363,16 @@ async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, ti
     signal
   );
   if (statusCode < 200 || statusCode >= 300) {
-    throw new Error(`anthropic HTTP ${statusCode}: ${String(body).slice(0, 500)}`);
+    throw new Error(`anthropic HTTP ${statusCode}: ${redact(body, cfg.apiKey).slice(0, 500)}`);
   }
   let parsed;
   try {
     parsed = JSON.parse(body);
   } catch (e) {
-    throw new Error(`anthropic 响应解析失败: ${String(body).slice(0, 200)}`);
+    throw new Error(`anthropic 响应解析失败: ${redact(body, cfg.apiKey).slice(0, 200)}`);
   }
   if (parsed.error) {
-    throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+    throw new Error(redact(parsed.error.message || JSON.stringify(parsed.error), cfg.apiKey));
   }
   const text = (parsed.content || [])
     .filter((b) => b && b.type === "text")
@@ -455,13 +468,14 @@ function migrateLegacyApiKey() {
   return { migrated: true, reason: "ok", providerId: LEGACY_PROVIDER_ID };
 }
 
-// 进程内只尝试一次，避免每次取 key 都重复迁移/重复告警
+// 进程内只尝试一次，避免每次取 key 都重复迁移/重复告警；
+// 标志位在正常返回后才置位：migrateLegacyApiKey 抛错（如 sys 未初始化）时允许下次重试
 let _legacyMigrateTried = false;
 
 function ensureLegacyMigrated() {
   if (_legacyMigrateTried) return;
-  _legacyMigrateTried = true;
   migrateLegacyApiKey();
+  _legacyMigrateTried = true;
 }
 
 // —— 提供商配置读取（sys: llmProviders / llmActiveProvider / visionProvider）——

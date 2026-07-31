@@ -165,7 +165,7 @@ class pinkDiamondFn {
         opt.pinkDiamondExpirationDate = 0;
       } else {
         opt.pinkDiamond = true;
-        opt.growthValue = opt.growthValue || 20;
+        opt.growthValue = pinkDiamondOPt.growthValue || 20;
         //按到现在的时间
         cutTime = nowTime - pinkDiamondOPt.pinkDiamondBeginDate;
       }
@@ -176,7 +176,7 @@ class pinkDiamondFn {
           //未过期情况下 说明过了天数 把开始时间减去计算了的时间
           opt.pinkDiamondBeginDate = tool.getDayHourTime();
         }
-        opt.growth = opt.growth + dayNum * (pinkDiamondOPt.growthValue || 5);
+        opt.growth = opt.growth + dayNum * (pinkDiamondOPt.growthValue || 20);
         // console.log("dayNum", dayNum);
         // 计算等级
       }

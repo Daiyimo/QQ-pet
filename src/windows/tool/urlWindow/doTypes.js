@@ -49,10 +49,12 @@ function rebuildFullDOM() {
       // 处理A标签
       if(element.tagName === 'A') {
         const newA = newDoc.createElement('a');
-        newA.href = element.href;
+        if(!/^\s*javascript:/i.test(element.href)) newA.href = element.href;
         newA.textContent = element.textContent;
-        // 复制所有属性
+        // 复制安全属性(跳过 on* 事件属性和 javascript: 链接)
         Array.from(element.attributes).forEach(attr => {
+          if(/^on/i.test(attr.name)) return;
+          if(/^(href|src)$/i.test(attr.name) && /^\s*javascript:/i.test(attr.value)) return;
           newA.setAttribute(attr.name, attr.value);
         });
         container.appendChild(newA);
@@ -60,8 +62,10 @@ function rebuildFullDOM() {
       // 处理包含文本的其他元素
       else if(element.textContent.trim()) {
         const newEl = newDoc.createElement(element.tagName.toLowerCase());
-        // 复制所有属性
+        // 复制安全属性(跳过 on* 事件属性和 javascript: 链接)
         Array.from(element.attributes).forEach(attr => {
+          if(/^on/i.test(attr.name)) return;
+          if(/^(href|src)$/i.test(attr.name) && /^\s*javascript:/i.test(attr.value)) return;
           newEl.setAttribute(attr.name, attr.value);
         });
         // 复制文本内容

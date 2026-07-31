@@ -184,6 +184,8 @@ class TravelService {
   // ---- 收集进度持久化 ----
   _loadCollected() {
     // 优先 $Store；宠物档案 info.travel_china 作为兜底（档案模型扩展后）
+    const valid = (list) => list.filter((id) => PROVINCES.some((p) => p.id === id));
+    let storeList = null;
     try {
       const store = this._store();
       const data = store && store.getItem ? store.getItem(STORE_KEY) : null;
@@ -192,22 +194,30 @@ class TravelService {
         : data && Array.isArray(data.collected)
           ? data.collected
           : null;
-      if (list) {
-        this.collected = list.filter((id) => PROVINCES.some((p) => p.id === id));
-        return;
-      }
+      if (list) storeList = valid(list);
     } catch (e) {
       this._warn("_loadCollected 读 $Store", e);
     }
+    let infoList = null;
     try {
       const info = this._getPetInfo().info || {};
-      if (Array.isArray(info.travel_china)) {
-        this.collected = info.travel_china.filter((id) =>
-          PROVINCES.some((p) => p.id === id),
-        );
-      }
+      if (Array.isArray(info.travel_china)) infoList = valid(info.travel_china);
     } catch (e) {
       this._warn("_loadCollected 读宠物档案", e);
+    }
+    this.collected = storeList || infoList || [];
+    // 启动补偿：上次 _saveCollected 写 $Store 失败（saveDirty）时，新进度只同步进了
+    // 宠物档案，$Store 里是旧值，重启后 dirty 标志已随内存丢失。collected 只增不减，
+    // 两源不一致时取并集并重写 $Store，即完成对那次失败写入的重试。
+    if (storeList && infoList) {
+      const missing = infoList.filter((id) => !storeList.includes(id));
+      if (missing.length) {
+        console.error(
+          `[travel] 启动补偿：宠物档案比 $Store 多 ${missing.length} 条收集进度，按并集重写落盘`
+        );
+        this.collected = [...storeList, ...missing];
+        this._saveCollected();
+      }
     }
   }
   // 落盘收集进度。返回是否成功写入权威存储（$Store）——失败时**不能当成功处理**，
@@ -397,6 +407,8 @@ class TravelService {
   // 应用启动时恢复未完成的旅行（主会话在 doMain 接线时调用）。
   // 剩余时间 >0 则继续倒计时；已过期则直接 finishTravel。
   init() {
+    // 幂等：重复调用会再挂一个 finishTimer 导致重复结算
+    if (this.inited) return { resumed: false, reason: "already_inited" };
     this._loadCollected();
     this.inited = true;
     const trip = (this._getPetInfo().activeOption || {}).trip;

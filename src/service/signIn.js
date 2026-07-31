@@ -79,7 +79,7 @@ function writeState(state) {
   try {
     if (typeof setSys === "function") setSys({ name: "signin", value: state });
   } catch (e) {
-    console.log("signIn writeState error", e);
+    console.error("[signIn] writeState 落盘失败:", (e && e.stack) || e);
   }
 }
 

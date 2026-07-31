@@ -122,8 +122,12 @@ test("Goods.js：buy 接入 PD 门槛与 8 折（pinkDiamondShop 一行接入）
 test("control/main.js：粉钻扣费走梯度价格，不再有 200 硬编码", () => {
   const src = readSource("src/windows/popups/control/main.js");
   assert.ok(
-    src.includes('pdPrice=_require("../../util/pet/pinkDiamondShop.js").pinkDiamondPrice(getPetInfoOne("","otherOptions"));if(n-pdPrice<0)'),
+    src.includes('pdPrice=_require("../../util/pet/pinkDiamondShop.js").pinkDiamondPrice(getPetInfoOne("","otherOptions"));'),
     "fz 扣费应以 pinkDiamondPrice 梯度计算"
+  );
+  assert.ok(
+    src.includes('if(!Number.isFinite(+i.val.day)||+i.val.day<=0||+i.val.day>3650||!Number.isFinite(+i.val.growth)||+i.val.growth<=0||+i.val.growth>1e3)return void console.warn("[control] 粉钻续费参数非法，已忽略:",i.val);if(n-pdPrice<0)'),
+    "fz 续费应先校验渲染层传入的 day/growth 数值，再进入余额判断"
   );
   assert.ok(src.includes("info:{yb:n-pdPrice}"), "扣费应为 yb:n-pdPrice");
   assert.ok(src.includes("还差￥${pdPrice-n}元宝"), "余额不足提示应回显梯度差价");

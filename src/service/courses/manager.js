@@ -214,18 +214,35 @@ class CourseManager extends EventEmitter {
       this._lastInteractionAt = 0;
     }
 
-    let state = this.repo.getState(id);
-    // 已完成的会话直接返回（幂等，避免重复导出）
-    if (state.status === "complete") return state;
-    // 录制中的会话先生成终稿总结（finalizing/failed 重试时跳过，沿用已有 summary）
-    if (state.status === "recording") {
-      await this._generateFinalSummary(id);
+    let state;
+    try {
       state = this.repo.getState(id);
-    }
+      // 已完成的会话直接返回（幂等，避免重复导出）
+      if (state.status === "complete") return state;
+      // 录制中的会话先生成终稿总结（finalizing/failed 重试时跳过，沿用已有 summary）
+      if (state.status === "recording") {
+        await this._generateFinalSummary(id);
+        state = this.repo.getState(id);
+      }
 
-    state.status = "finalizing";
-    state.error = null;
-    this.repo.saveState(id, state);
+      state.status = "finalizing";
+      state.error = null;
+      this.repo.saveState(id, state);
+    } catch (e) {
+      // state.json 损坏/磁盘错误：不能变成调用方的 unhandledRejection，
+      // 记日志并尽力把会话置为 failed（置失败本身也可能因磁盘问题再抛，兜底返回 null）
+      console.error("[courses] 结束会话失败:", e?.message || e);
+      try {
+        const failed = this.repo.getState(id);
+        failed.status = "failed";
+        failed.error = `${e.name || "Error"}: ${e.message || e}`;
+        this.repo.saveState(id, failed);
+        this.emit("session-failed", failed);
+      } catch (e2) {
+        console.error("[courses] 标记会话 failed 失败:", e2?.message || e2);
+      }
+      return null;
+    }
     try {
       const outputPath = this._exportMarkdown(id);
       state = this.repo.getState(id);

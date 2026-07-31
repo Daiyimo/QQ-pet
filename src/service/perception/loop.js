@@ -386,9 +386,8 @@ class PerceptionLoop extends EventEmitter {
         this.emitter.cancel();
       }
     } else if (scene === "course") {
-      // 课程结果暂存，供课程模块消费（关键帧由 courseManager 节流后发
-      // "keyframe-capture" 事件，loop 不再自行触发截屏）
-      this.lastCourseResult = result;
+      // 课程模块经 "course-perception" 事件消费结果（关键帧由 courseManager
+      // 节流后发 "keyframe-capture" 事件，loop 不再自行触发截屏）
       this.emit("course-perception", result);
     } else {
       this._maybeSpeakAssistant(result.assistant_message);

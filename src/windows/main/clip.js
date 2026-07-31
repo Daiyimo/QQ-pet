@@ -54,6 +54,14 @@ module.exports = function (options) {
 
     // 2. Check image change
     if (options.onImageChange) {
+      // 便宜预检：剪贴板不含图片格式且缓存也为空时，跳过昂贵的 readImage
+      const formats = clipboard.readFormats();
+      const hasImage = formats.some((f) => {
+        const lower = f.toLowerCase();
+        return lower.includes("image") || lower.includes("bitmap") || lower.includes("dib") || lower === "png";
+      });
+      if (!hasImage && lastImage.isEmpty()) return;
+
       const currentImage = clipboard.readImage();
       const currentEmpty = currentImage.isEmpty();
       const cachedEmpty = lastImage.isEmpty();

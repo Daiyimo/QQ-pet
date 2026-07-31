@@ -5,6 +5,24 @@ const _require = eval("require");
 // 试 5 个端口足够；再多只会拖长用户点按到窗口出现的等待。
 const LISTEN_MAX_ATTEMPTS = 5;
 
+// 本机静态服务只暴露实际被访问的子目录（修复前整个 src/ 被挂载，虽只绑
+// 127.0.0.1，本机任意进程仍可读到源码与存档相关文件）。当前仅三处走该服务：
+// - windows/popups/fishing  池塘钓鱼 indexOnLine.html 及其 swf / pet / legacy_124 资源
+// - windows/popups/backRoom 密室逃脱 indexOnLine.html 及其 swf / cmd*.xml 资源
+// - windows/js/ruffle       两个页面以 ../../js/ruffle/ruffle.js 引入的 Ruffle 运行时（含 wasm）
+// 注意：windows/main/indexOnline.html 的远程加载分支在 main.js 中是死代码
+// （bd 恒为 true，走本地 jsFiles），若将来启用需补挂 windows/main 与 assets。
+const STATIC_SUBDIRS = [
+  "windows/popups/fishing",
+  "windows/popups/backRoom",
+  "windows/js/ruffle",
+];
+const mountStatic = (app, fileName, express, path) => {
+  for (const sub of STATIC_SUBDIRS) {
+    app.use("/" + fileName + "/" + sub, express.static(path.join(__dirname, "../../src", sub)));
+  }
+};
+
 /**
  * 带 error 处理与端口自增重试的 listen。
  *
@@ -61,8 +79,7 @@ const createMain = (fn, post, ip, fileName, none) => {
     res.send("this is the Homepage");
   });
   // fileName = 'u'
-  let pattt = path.join(__dirname, "../../src");
-  app.use("/" + fileName, express.static(pattt));
+  mountStatic(app, fileName, express, path);
   // 离线本地版：只绑定 127.0.0.1，不对局域网暴露 src/ 静态目录
   listenWithRetry(
     app,
@@ -235,8 +252,7 @@ global.openLocalHost = (fn) => {
   });
   let fileName = upDownArr(shuffleArr(fileNames)).join("");
   // fileName = 'u'
-  let pattt = path.join(__dirname, "../../src");
-  app.use("/" + fileName, express.static(pattt));
+  mountStatic(app, fileName, express, path);
   let post = "33385";
   // 离线本地版：只绑定 127.0.0.1
   listenWithRetry(

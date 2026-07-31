@@ -347,7 +347,7 @@ class MemoryStore {
   // 日程信息图落盘：daily-images/<day>/<filename> + 同名 .json 元数据（均原子写）
   writeDailyImage(day, filename, content, metadata) {
     if (!isValidDay(day)) throw new Error(`invalid day: ${day}`);
-    if (!/^[A-Za-z0-9_.-]+$/.test(filename)) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(filename) || filename.includes("..")) {
       throw new Error("invalid daily image filename");
     }
     const imagePath = path.join(this.dailyImagesRoot, day, filename);

@@ -106,6 +106,30 @@
 - `test/edgeHide.smoke.js` 改名为 `edgeHide.test.js`：`npm test` 的 glob 是 `test/*.test.js`，该文件里的状态机断言从未被执行过（断言内容未改）。
 - 钓鱼 8 折与商城 8 折现在有跨引用断言钉住：口径可以有第二份实现（浏览器上下文无法 require 主进程模块），但不能有第二份测试基准。
 
+### 第二轮深度审查（安全加固 + 健壮性，P0/P1/P2 全清）
+
+四个域（主进程安全 / service 层 / 宠物核心逻辑 / UI 渲染层）并行深审后修复，又经原审查代理逐条复核、补修漏网项。测试维持 **502** 全绿。
+
+**安全**
+
+- **钓鱼/密室窗口 iframe 子框架开启 Node 集成（P0，RCE 面）**：`nodeIntegrationInSubFrames:true` 叠加 HTTP 协议子框架，SWF 经 Ruffle `getURL` 把框架导航到远程页面即可在带 Node 的环境执行。该标志是纯遗产（iframe 通信走 cookie+DOM，已验证零 `require`/`ipcRenderer` 引用），已删除。
+- **礼包领取信任渲染层 payload**：发放物品取自 IPC 自带的 `type_Key` 且不复检领取状态，重发 IPC 可无限刷任意物品。现改为服务端列表内的 `type_Key` 发放，并正向判定 `isTake===1` 才放行。
+- **设置项写入无白名单**：`setup` 的 `setSys` 通用路径可写任意 sys 键并持久化。现按设置页实际声明的 15 个键收敛（radio/slider/select/input 四条路径全覆盖）。
+- **LLM 错误信息脱敏补齐**：HTTP 错误体、响应解析失败体、`parsed.error.message` 共 6 条路径统一过 `redact`，API Key 不再可能落日志；`postJson` 拒绝 URL 内嵌凭据（对齐 `imageGen`）。
+- **本地静态服务收窄**：express 从整 `src/` 目录收窄到实际使用的 3 个子目录（fishing/backRoom/ruffle），真实 HTTP 冒烟验证该 200 的 200、源码路径 404。
+- 删除 `disable-site-isolation-trials`（PepFlash 遗留，Ruffle 不需要）与 `ELECTRON_DISABLE_SECURITY_WARNINGS`；`urlWindow` 补 `will-navigate` 白名单、opacity 钳制 [0,1]；`doTypes.js` 重建 DOM 剔除 `on*` 属性与 `javascript:` 链接；floatStyle 鼠标跟随字符改 `textContent` + 主进程截断（原可持久化任意 HTML）；backRoom 遗留 `cmd.js` 的 `window.open` 加 http/https 白名单；`openUrl` 辅助窗补显式收紧 webPreferences；`window.js` 的 HTML 注入改 `JSON.stringify`（此前 HTML 含反引号/`${` 即全窗口白屏甚至被求值）。
+- 粉钻续费参数（天数/成长值）主进程校验；infoCard 宠物名/主人名主进程截断 + 过滤控制字符；`writeDailyImage` 文件名拒绝 `..`。
+
+**健壮性**
+
+- **动画切换竞争期动作被永久丢弃**：`swfPet.changeSwf` 重试时把 option 本体当 `{option,backFn}` 解构，每次切换都重放一次失败。一行包装修复。
+- **9 个遗留窗口 `doClose`/`doHide` 不判空**：`onclose` 置 null 后与渲染层 close IPC 竞态，二次触发在主进程抛 `TypeError`。统一补判空（含 control 的 `isDestroyed` 守卫、tip 的 `setPosition`）。
+- **手动「结束课程记录」无反馈**：`finishSession` 前半段裸抛 → 主进程 unhandledRejection；补双层 try/catch 兜底，失败时气泡告知用户。
+- **旧明文 API Key 可能永不迁移**：`_legacyMigrateTried` 在尝试之前置位，sys 未初始化时迁移抛出后进程内不再重试。标志位移到迁移成功之后。
+- **移动 IPC 载荷全链路校验**：`doMovePosition` 此前零校验（高频 mousemove 通道），非数组/非有限数 payload 可在 ipcMain 处理器内抛异常。
+- 数值与边界：y 轴钳制不再错用宽度、`app.exit([!0])` 退出码修正、多显示器尺寸改边界并集并监听显示器变化、粉钻每日结算 `growthValue` 恒被改写为 20 的兜底错误修复（level.js 与 GrowUp.js 内嵌副本同步）、`travel.js` init 幂等 + 启动时补偿重写丢失的收集进度、退出期 `setSys/setCache` 恢复落盘（免打扰状态重启后不再复活）。
+- 清理：`word.js` 死文件、`getBuyGoodsOrder`/`lastCourseResult` 死代码、macOS `screencapture` 残留、剪贴板轮询加 `readFormats` 预检、快捷键注册失败告警、非法 timestamp 事件不再产出 `NaN` 进 prompt、`generateDaily` 入口校验 day。
+
 ## [1.2.6] - 2026-07-29
 
 首个以 1.2.6 命名的版本。本次集中修复安全、隐私与稳定性问题（P0 级），不含新功能。

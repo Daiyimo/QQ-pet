@@ -53,7 +53,6 @@ try {
 const createWindow = async () => {
   try {
     require("./src/ini/init.js");
-    process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     app.setAppUserModelId("pet");
 
     if (gotTheLock) {
@@ -92,8 +91,6 @@ const createWindow = async () => {
   }
 };
 
-// macOS: 不加载 PepFlash DLL（使用 Ruffle WASM 替代）
-app.commandLine.appendSwitch("disable-site-isolation-trials");
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 app.whenReady().then(() => {

@@ -51,6 +51,7 @@ function closeMiddle(){
 }
 function openIE(url){
 	if($ISWEB){
+		if(!/^https?:/i.test(url)){console.warn('[backRoom] refuse non-http(s) url:',url);return;}
 		var _win = window.open(url);
 		if(_win == null || _win.closed){
           alert('您的浏览器启用弹出窗口过滤功能！\n\n请暂时先关闭此功能！');

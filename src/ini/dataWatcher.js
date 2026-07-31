@@ -156,10 +156,22 @@ function startDataWatcher(deps = {}) {
     }
 
     if (watcher && typeof watcher.on === "function") {
-      watcher.on("error", (e) => {
+      // 闭包捕获本次创建的实例：旧 watcher 被替换后仍可能补发 error（Node 的 FSWatcher
+      // 在句柄失效时可能多次触发），若处理器操作外层的 `watcher` 变量，就会把刚重建好的
+      // **新** watcher 关掉并再排一次重建 —— 能自愈但会无谓抖动。
+      // 与 src/service/perception/loop.js 用 `this._abort === controller` 比对身份同理。
+      const self = watcher;
+      self.on("error", (e) => {
+        if (watcher !== self) {
+          console.warn(
+            "[ini/dataWatcher] 忽略已被替换的旧监听器补发的错误（当前监听器不受影响）:",
+            e && e.message ? e.message : e
+          );
+          return;
+        }
         logError("存档监听运行期报错，将重建:", e);
         try {
-          watcher && watcher.close();
+          self.close();
         } catch (e2) {
           logError("关闭出错的存档监听器失败:", e2);
         }

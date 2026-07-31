@@ -265,6 +265,45 @@ test("watcher 运行期报错：记日志 + 关闭旧 watcher + 退避重建，�
   handle.stop();
 });
 
+test("[回归] 旧 watcher 在重建后补发 error：不得关掉新 watcher、不得再排一次重建", () => {
+  const { fs, state } = makeFs({ read: () => "" });
+  const timers = makeTimers();
+  let handle;
+  captureConsole(() => {
+    handle = startDataWatcher({ fs, app: makeApp(), ...timers });
+    state.watchers[0].emitError(new Error("first failure"));
+    timers.runLast(); // 重建 → state.watchers[1]
+  });
+  assert.equal(state.watchCalls.length, 2);
+  assert.equal(handle.status().watching, true);
+  const scheduledBefore = timers.scheduled.length;
+
+  // 旧实例迟到的 error（FSWatcher 句柄失效时可能多次触发）
+  const logs = captureConsole(() => {
+    state.watchers[0].emitError(new Error("late duplicate failure"));
+  });
+
+  assert.equal(state.watchers[1].closed, false, "新 watcher 绝不能被旧实例的 error 关掉");
+  assert.equal(handle.status().watching, true, "监听状态不应被旧实例影响");
+  assert.equal(timers.scheduled.length, scheduledBefore, "不应再排一次多余的重建（会造成抖动）");
+  assert.ok(
+    logs.error.every((m) => !m.includes("存档监听运行期报错")),
+    "旧实例的迟到错误不应再走一遍重建日志"
+  );
+  assert.ok(
+    logs.warn.some((m) => m.includes("忽略已被替换的旧监听器")),
+    "忽略也要留一行 warn，便于排查句柄反复失效"
+  );
+
+  // 新 watcher 自己报错时仍然正常自愈
+  captureConsole(() => {
+    state.watchers[1].emitError(new Error("new watcher failure"));
+  });
+  assert.equal(state.watchers[1].closed, true, "当前 watcher 自己报错时必须被关闭");
+  assert.equal(timers.scheduled.length, scheduledBefore + 1, "当前 watcher 报错应排新的重建");
+  handle.stop();
+});
+
 test("退避序列递增并在用尽后维持最后一档（避免 flapping 时每秒重建）", () => {
   const bad = Object.assign(new Error("EPERM"), { code: "EPERM" });
   // 连续 6 次创建失败

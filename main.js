@@ -51,20 +51,44 @@ try {
 }
 
 const createWindow = async () => {
-  require("./src/ini/init.js");
-  process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
-  app.setAppUserModelId("pet");
+  try {
+    require("./src/ini/init.js");
+    process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
+    app.setAppUserModelId("pet");
 
-  if (gotTheLock) {
-    if (useTool) {
-      useTool.cleate("only");
+    if (gotTheLock) {
+      if (useTool) {
+        useTool.cleate("only");
+      } else {
+        require("./src/ini/doMain.js");
+        const { startDataWatcher } = require("./src/ini/dataWatcher.js");
+        startDataWatcher();
+      }
     } else {
-      require("./src/ini/doMain.js");
-      const { startDataWatcher } = require("./src/ini/dataWatcher.js");
-      startDataWatcher();
+      app.exit(true);
     }
-  } else {
-    app.exit(true);
+  } catch (e) {
+    // 启动阶段的致命异常必须结束进程，不能落到上面的 unhandledRejection。
+    // 那个处理器刻意「只记日志不退出」——对运行期的孤立异常是对的（桌宠是长驻进程，
+    // 不该因为一次异常就让用户的宠物消失），但对 init 阶段是错的：此时既没有窗口
+    // 也没有托盘，进程却活着并占用 requestSingleInstanceLock，用户再点图标也起不来，
+    // 只能去任务管理器杀，且毫无提示。所以这里显式告知 + 退出。
+    console.error("[FATAL] 启动失败，进程将退出:", e?.stack || e);
+    try {
+      const { dialog } = require("electron");
+      dialog.showErrorBox(
+        "QQ宠物启动失败",
+        "初始化时发生无法恢复的错误，程序将退出。\n\n" +
+          "常见原因：存档目录 %APPDATA%\\qq-local 不可写、磁盘空间不足、" +
+          "或该目录被安全软件占用。\n\n" +
+          "错误信息：" +
+          (e?.message || String(e))
+      );
+    } catch (e2) {
+      // 弹窗本身失败（dialog 不可用等）不该掩盖原始错误，记下后照样退出
+      console.error("[FATAL] 展示启动失败弹窗时又出错:", e2?.stack || e2);
+    }
+    app.exit(1);
   }
 };
 

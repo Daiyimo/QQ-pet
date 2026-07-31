@@ -6,6 +6,7 @@ const _require = eval("require");
 const fs = _require("fs");
 const path = _require("path");
 const crypto = _require("crypto");
+const { getElectronPath } = _require("../electronPaths.js");
 
 // —— 磁盘增长边界常量（会话目录 / 关键帧 / 转写都是只增不减的写入，必须有上界）——
 // 本地保留的会话总数上限。依据：每天最多几节课，20 个会话约覆盖 2~3 周；
@@ -58,21 +59,12 @@ function atomicJson(filePath, value) {
   atomicWrite(filePath, JSON.stringify(value, null, 2) + "\n");
 }
 
-// 会话根目录：Electron 下 userData/courses/sessions；无 Electron 退 cwd（单测用）
+// 会话根目录：Electron 下 userData/courses/sessions；无 Electron 退 cwd（单测用）。
+// 可用性判定与降级日志统一走 electronPaths（原内联实现漏了"require 成功但 app 为
+// undefined"这条静默降级，见该模块注释）。
 function defaultRoot() {
-  try {
-    const { app } = _require("electron");
-    if (app && typeof app.getPath === "function") {
-      return path.join(app.getPath("userData"), "courses", "sessions");
-    }
-  } catch (e) {
-    // 无 Electron（单测/纯 node）属预期分支，退回 cwd 继续跑
-    console.warn(
-      "[courses/repo] 未取到 Electron userData，会话根目录退回 cwd/courses/sessions:",
-      e && e.message ? e.message : e
-    );
-  }
-  return path.join(process.cwd(), "courses", "sessions");
+  const base = getElectronPath("userData", process.cwd(), "courses/repo");
+  return path.join(base, "courses", "sessions");
 }
 
 class CourseRepo {

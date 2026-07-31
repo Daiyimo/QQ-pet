@@ -92,14 +92,31 @@ function makeFakeStoreClass(behaviour = {}) {
   return FakeStore;
 }
 
-/** 注入 electron-store / electron 后加载 store.js，返回 global.$Store */
-function loadStore(userData, FakeStore) {
+/**
+ * 注入 electron-store / electron（含 dialog）/ fs 后加载 store.js，返回 global.$Store。
+ * @param {string} userData 假的 userData 目录
+ * @param {Function} FakeStore electron-store 替身
+ * @param {object} [opts]
+ * @param {object} [opts.fs] 覆盖真实 fs 的部分方法（模拟 renameSync EPERM 等）
+ * @param {string[]} [opts.dialogs] 收集 dialog.showErrorBox 的正文
+ */
+function loadStore(userData, FakeStore, opts = {}) {
   delete require.cache[STORE_PATH];
   delete global.$Store;
   const orig = Module.prototype.require;
+  const fsProxy = opts.fs ? { ...fs, ...opts.fs } : null;
+  const fakeElectron = {
+    app: { getPath: () => userData },
+    dialog: {
+      showErrorBox: (title, content) => {
+        if (opts.dialogs) opts.dialogs.push(String(content));
+      },
+    },
+  };
   Module.prototype.require = function (id) {
     if (id === "electron-store") return FakeStore;
-    if (id === "electron") return { app: { getPath: () => userData } };
+    if (id === "electron") return fakeElectron;
+    if (id === "fs" && fsProxy) return fsProxy;
     return orig.apply(this, arguments);
   };
   try {
@@ -134,9 +151,10 @@ test("存档 JSON 损坏时：隔离为 corrupt-<时间戳>.json 并保留原内
     const broken = '{"pet":{"info":{"name":"我","yb":123}}';
     fs.writeFileSync(path.join(dir, CONFIG_NAME), broken);
     const FakeStore = makeFakeStoreClass({ userData: dir });
+    const dialogs = [];
 
     const logs = captureConsole(() => {
-      const store = loadStore(dir, FakeStore);
+      const store = loadStore(dir, FakeStore, { dialogs });
       assert.ok(store, "损坏存档不得让启动链路崩溃");
       // 重建后的存储可正常读写
       store.setItem("pet", { info: { name: "新" } });
@@ -156,12 +174,149 @@ test("存档 JSON 损坏时：隔离为 corrupt-<时间戳>.json 并保留原内
       logs.error.some((m) => m.includes("配置存储初始化失败") && m.includes("SyntaxError")),
       "必须记录带堆栈的初始化失败日志（不能静默）"
     );
-    assert.ok(
-      logs.error.some((m) => m.includes("已用空配置重建存储") && m.includes("corrupt-")),
-      "必须告知用户损坏文件被隔离到哪里"
-    );
+    // 用户必须被明确告知（只打日志等于毫不知情）
+    assert.equal(dialogs.length, 1, "必须弹一次 showErrorBox 告知用户");
+    assert.ok(dialogs[0].includes("存档疑似损坏"), dialogs[0]);
+    assert.ok(dialogs[0].includes(backups[0]), "告知文案里要给出隔离文件的路径");
+    assert.ok(dialogs[0].includes("空存档启动"), "要说明本次以空存档启动");
     // 构造被调用两次：第一次抛错，隔离后第二次成功
     assert.equal(FakeStore.calls.length, 2);
+  });
+});
+
+test("[Critical 回归] rename 被占用（EPERM）：改用复制备份+覆盖，仍以原文件名成功启动", () => {
+  withTempUserData((dir) => {
+    const broken = '{"pet":{"info":{"yb":5}}';
+    fs.writeFileSync(path.join(dir, CONFIG_NAME), broken);
+    const FakeStore = makeFakeStoreClass({ userData: dir });
+    const dialogs = [];
+    let store;
+    const logs = captureConsole(() => {
+      // 杀软/备份程序持有句柄的典型表现
+      store = loadStore(dir, FakeStore, {
+        dialogs,
+        fs: {
+          renameSync: () => {
+            throw Object.assign(new Error("EPERM: operation not permitted, rename"), {
+              code: "EPERM",
+            });
+          },
+        },
+      });
+    });
+
+    assert.ok(store, "renameSync 失败绝不能抛到模块顶层（会变成无窗口僵尸进程）");
+    store.setItem("pet", { info: { yb: 1 } });
+    assert.deepEqual(store.getItem("pet"), { info: { yb: 1 } }, "返回的 store 必须真的可用");
+
+    const backups = corruptFiles(dir);
+    assert.equal(backups.length, 1, "应通过 copyFileSync 留下备份");
+    assert.equal(fs.readFileSync(path.join(dir, backups[0]), "utf8"), broken, "备份内容须完整");
+    assert.equal(
+      fs.readFileSync(path.join(dir, CONFIG_NAME), "utf8").trim().startsWith("{"),
+      true,
+      "原文件应被覆盖成合法 JSON，使重建可以成功"
+    );
+    assert.ok(
+      logs.error.some((m) => m.includes("重命名隔离失败") && m.includes("EPERM")),
+      "rename 失败必须留带堆栈的日志"
+    );
+    assert.equal(dialogs.length, 1, "必须告知用户");
+    assert.ok(dialogs[0].includes(backups[0]));
+  });
+});
+
+test("[Critical 回归] rename 与 copy 都失败：改用 -recovered-<ts> 新文件名启动，绝不抛异常", () => {
+  withTempUserData((dir) => {
+    fs.writeFileSync(path.join(dir, CONFIG_NAME), "{bad");
+    // 只有原文件名会抛（内容非法）；新文件名不存在 → 构造成功
+    const FakeStore = makeFakeStoreClass({ userData: dir });
+    const dialogs = [];
+    let store;
+    const logs = captureConsole(() => {
+      store = loadStore(dir, FakeStore, {
+        dialogs,
+        fs: {
+          renameSync: () => {
+            throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+          },
+          copyFileSync: () => {
+            throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+          },
+        },
+      });
+    });
+
+    assert.ok(store, "原文件完全动不了时也必须让程序起来（这条是本次 Critical 的核心）");
+    store.setItem("pet", { info: { yb: 2 } });
+    assert.deepEqual(store.getItem("pet"), { info: { yb: 2 } });
+
+    // 用的是新文件名
+    const usedName = FakeStore.calls[FakeStore.calls.length - 1].name;
+    assert.match(usedName, /^config-qq-local-recovered-\d+$/, `实际用了 ${usedName}`);
+    assert.equal(store.recoveredName, usedName, "应记录本次使用的降级文件名");
+    // 旧文件一字未动
+    assert.equal(fs.readFileSync(path.join(dir, CONFIG_NAME), "utf8"), "{bad", "旧文件必须原样保留");
+    assert.deepEqual(corruptFiles(dir), [], "备份失败时不应留下半个 corrupt 文件");
+
+    assert.ok(logs.error.some((m) => m.includes("复制备份损坏文件也失败") && m.includes("EBUSY")));
+    assert.ok(logs.error.some((m) => m.includes("改用新文件名启动")));
+    assert.equal(dialogs.length, 1, "必须告知用户改用了新存档文件");
+    assert.ok(dialogs[0].includes(usedName), "告知文案要写出新存档文件名");
+    assert.ok(dialogs[0].includes("旧文件完整保留"));
+  });
+});
+
+test("[Critical 回归] 连新文件名都建不起来：先 showErrorBox 再抛，不做无声僵尸", () => {
+  withTempUserData((dir) => {
+    fs.writeFileSync(path.join(dir, CONFIG_NAME), "{bad");
+    // userData 整体不可写：任何 name 都失败
+    const FakeStore = makeFakeStoreClass({ userData: dir, alwaysThrow: true });
+    const dialogs = [];
+    const logs = captureConsole(() => {
+      assert.throws(() => loadStore(dir, FakeStore, { dialogs }), /Unexpected token/);
+    });
+    assert.ok(logs.error.some((m) => m.includes("配置存储初始化失败")));
+    assert.ok(
+      logs.error.some((m) => m.includes("改用新文件名重建配置存储也失败") && m.includes("SyntaxError")),
+      "最终失败必须单独记一条带堆栈的日志"
+    );
+    assert.equal(dialogs.length, 1, "抛之前必须先让用户看到原因");
+    assert.ok(dialogs[0].includes("无法创建宠物存档文件"), dialogs[0]);
+    assert.ok(dialogs[0].includes("权限"), "要给出可操作的排查方向");
+    // 尝试过 3 次构造：原名、原名重试、新名
+    assert.equal(FakeStore.calls.length, 3);
+  });
+});
+
+test("dialog 不可用（无 electron / 无 showErrorBox）时：降级为日志且不抛", () => {
+  withTempUserData((dir) => {
+    fs.writeFileSync(path.join(dir, CONFIG_NAME), "{bad");
+    const FakeStore = makeFakeStoreClass({ userData: dir });
+    delete require.cache[STORE_PATH];
+    delete global.$Store;
+    const orig = Module.prototype.require;
+    Module.prototype.require = function (id) {
+      if (id === "electron-store") return FakeStore;
+      // app 有、dialog 没有：模拟 dialog 不可用
+      if (id === "electron") return { app: { getPath: () => dir } };
+      return orig.apply(this, arguments);
+    };
+    let store;
+    const logs = captureConsole(() => {
+      try {
+        require(STORE_PATH);
+        store = global.$Store;
+      } finally {
+        Module.prototype.require = orig;
+        delete require.cache[STORE_PATH];
+      }
+    });
+    assert.ok(store, "dialog 缺失不能影响启动");
+    assert.ok(
+      logs.error.some((m) => m.includes("存档异常告知用户") && m.includes("存档疑似损坏")),
+      "弹不出窗时至少要把完整文案写进日志"
+    );
   });
 });
 
@@ -176,22 +331,6 @@ test("存档正常时：不产生隔离文件，数据原样可读", () => {
     });
     assert.deepEqual(corruptFiles(dir), [], "正常存档绝不能被隔离/改名");
     assert.deepEqual(logs.error, [], "正常路径不应有错误日志");
-  });
-});
-
-test("隔离后仍然构造失败时：抛出并留下两条带堆栈的错误日志，不静默吞", () => {
-  withTempUserData((dir) => {
-    fs.writeFileSync(path.join(dir, CONFIG_NAME), "{bad");
-    const FakeStore = makeFakeStoreClass({ userData: dir, alwaysThrow: true });
-    const logs = captureConsole(() => {
-      assert.throws(() => loadStore(dir, FakeStore), /Unexpected token/);
-      // 断言在 captureConsole 之外统一做
-    });
-    assert.ok(logs.error.some((m) => m.includes("配置存储初始化失败")));
-    assert.ok(
-      logs.error.some((m) => m.includes("重建配置存储仍失败") && m.includes("SyntaxError")),
-      "二次失败必须单独记一条带堆栈的日志"
-    );
   });
 });
 

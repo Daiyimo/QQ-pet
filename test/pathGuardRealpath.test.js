@@ -55,6 +55,110 @@ function captureConsole(fn) {
   return errors;
 }
 
+// —— 平台无关的兜底防线（不碰真实文件系统，绝不会被 skip）——
+//
+// 为什么必须有这一组：下面那三条真实 junction 用例依赖"能否创建链接"的 FS 权限
+// （非管理员的某些 Windows 配置 / CI 容器 / 非 Windows 平台都可能建不出来），
+// 建不出来就只能 t.skip —— 而套件依然全绿，于是"junction 越权读任意文件"这条
+// 安全保证在该环境里一条防线都不剩。注入假 realpath 把该保证与 FS 权限解耦：
+// 只要 realpath 的结果越出 root，resolveInsideDir 就必须返回 null。
+const FAKE_ROOT = path.join(path.sep === "\\" ? "C:\\" : "/", "app", "assets", "ActionNew");
+
+test("[平台无关] realpath 把 target 解析到 root 之外 → 必须拒绝", () => {
+  const outside = path.join(path.sep === "\\" ? "C:\\" : "/", "Windows", "win.ini");
+  const calls = [];
+  const fakeRealpath = (p) => {
+    calls.push(p);
+    // root 原样返回；target 解析为 root 之外（等价于 evil 是指向外部的 junction）
+    return p === FAKE_ROOT ? FAKE_ROOT : outside;
+  };
+  const errors = captureConsole(() => {
+    assert.equal(
+      resolveInsideDir(FAKE_ROOT, ["evil", "secret.txt"], { realpath: fakeRealpath }),
+      null,
+      "realpath 结果越界时必须拒绝（这条是 junction 越权读文件的唯一平台无关防线）"
+    );
+  });
+  assert.equal(calls.length, 2, "root 与 target 都必须过一遍 realpath");
+  assert.equal(calls[0], FAKE_ROOT);
+  assert.equal(calls[1], path.join(FAKE_ROOT, "evil", "secret.txt"));
+  assert.ok(
+    errors.some((m) => m.includes("符号链接/junction 解析后越出白名单根目录")),
+    "拒绝必须留日志"
+  );
+});
+
+test("[平台无关] realpath 把 root 解析到别处（root 被链接劫持）→ 必须拒绝", () => {
+  const elsewhere = path.join(path.sep === "\\" ? "C:\\" : "/", "somewhere-else");
+  const fakeRealpath = (p) => (p === FAKE_ROOT ? elsewhere : p);
+  captureConsole(() => {
+    assert.equal(
+      resolveInsideDir(FAKE_ROOT, ["10200003", "config.xml"], { realpath: fakeRealpath }),
+      null
+    );
+  });
+});
+
+test("[平台无关] 兄弟前缀混淆在 realpath 层同样被挡（ActionNewEvil）", () => {
+  const fakeRealpath = (p) => (p === FAKE_ROOT ? FAKE_ROOT : FAKE_ROOT + "Evil" + path.sep + "x.swf");
+  captureConsole(() => {
+    assert.equal(resolveInsideDir(FAKE_ROOT, ["x.swf"], { realpath: fakeRealpath }), null);
+  });
+});
+
+test("[平台无关] realpath 结果仍在 root 内 → 放行，且返回词法路径而非 realpath 结果", () => {
+  // 反向对照：证明上面几条的 null 是"越界判定"的结果，而不是注入 realpath 就一律拒绝
+  const realish = path.join(path.sep === "\\" ? "C:\\" : "/", "real", "ActionNew");
+  const fakeRealpath = (p) => p.replace(FAKE_ROOT, realish);
+  const expected = path.join(FAKE_ROOT, "10200003", "main", "stand", "001.swf");
+  const errors = captureConsole(() => {
+    assert.equal(
+      resolveInsideDir(FAKE_ROOT, ["10200003", "main/stand/001.swf"], { realpath: fakeRealpath }),
+      expected,
+      "界内必须放行，且返回的是未解析链接的词法路径（调用方拿它去 fs 读取）"
+    );
+  });
+  assert.deepEqual(errors, [], "放行路径不应有拒绝日志");
+});
+
+test("[平台无关] realpath 抛错或返回非字符串 → fail-closed 拒绝，不得放行", () => {
+  const throwing = () => {
+    throw Object.assign(new Error("EACCES: permission denied, realpath"), { code: "EACCES" });
+  };
+  const errors = captureConsole(() => {
+    assert.equal(
+      resolveInsideDir(FAKE_ROOT, ["10200003"], { realpath: throwing }),
+      null,
+      "复核拿不到结论时必须拒绝（fail-open 等于没有校验）"
+    );
+  });
+  assert.ok(
+    errors.some((m) => m.includes("realpath 复核过程异常") && m.includes("at ")),
+    "异常必须带完整堆栈落日志"
+  );
+
+  for (const bad of [undefined, null, 123, {}, ""]) {
+    captureConsole(() => {
+      assert.equal(
+        resolveInsideDir(FAKE_ROOT, ["10200003"], { realpath: () => bad }),
+        null,
+        `realpath 返回 ${JSON.stringify(bad)} 时必须拒绝`
+      );
+    });
+  }
+});
+
+test("[平台无关] 生产默认不受注入影响：不传 realpath 时走真实实现", () => {
+  // 真实 realpath 下，仓库内真实存在的皮肤目录必须放行（防止注入点把默认行为改坏）
+  const realRoot = path.resolve(__dirname, "../src/assets/ActionNew");
+  assert.equal(
+    resolveInsideDir(realRoot, ["10200003"]),
+    path.join(realRoot, "10200003"),
+    "默认路径必须仍用真实 fs.realpathSync.native 且放行界内路径"
+  );
+  assert.equal(resolveInsideDir(realRoot, ["..", "Action"]), null, "默认路径仍必须挡住越界");
+});
+
 test("目录 junction 指向 root 之外：必须拒绝（修复前会放行）", (t) => {
   withTempTree(({ root, outside }) => {
     const link = path.join(root, "evil");

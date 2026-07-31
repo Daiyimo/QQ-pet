@@ -9,6 +9,7 @@ const os = _require("os");
 const { EventEmitter } = _require("events");
 
 const { CourseRepo, atomicWrite } = _require("./repo.js");
+const { getElectronPath } = _require("../electronPaths.js");
 const transcript = _require("./transcript.js");
 const providers = _require("../llm/providers.js");
 const prompts = _require("../llm/prompts.js");
@@ -39,19 +40,11 @@ function utcStamp() {
   );
 }
 
-// 桌面路径：Electron app.getPath("desktop")，无 Electron 退 ~/Desktop（单测用）
+// 桌面路径：Electron app.getPath("desktop")，无 Electron 退 ~/Desktop（单测用）。
+// 可用性判定与降级日志统一走 electronPaths（原内联实现漏了"require 成功但 app 为
+// undefined"这条静默降级，见该模块注释）。
 function desktopPath() {
-  try {
-    const { app } = _require("electron");
-    if (app && typeof app.getPath === "function") return app.getPath("desktop");
-  } catch (e) {
-    // 无 Electron（单测/纯 node）属预期分支，退回 ~/Desktop 继续跑
-    console.warn(
-      "[courses] 未取到 Electron 桌面路径，导出目录退回 ~/Desktop:",
-      e && e.message ? e.message : e
-    );
-  }
-  return path.join(os.homedir(), "Desktop");
+  return getElectronPath("desktop", path.join(os.homedir(), "Desktop"), "courses");
 }
 
 function speakBubble(text) {

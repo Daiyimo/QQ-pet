@@ -7,6 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { getElectronPath } = require("../electronPaths.js");
 
 // —— 磁盘增长边界：事件日志轮转（追加式 JSONL 无上界会长期吃满磁盘）——
 // 现役 events.jsonl 的字节上限。依据：入库门槛（confidence≥0.6 + 同场景 120s 节流
@@ -20,19 +21,11 @@ const EVENTS_ROTATE_KEEP = 2;
 // JSONL 行分隔符字节（按字节切行，避免多字节字符在增量读边界被截断）
 const NEWLINE_BYTE = 0x0a;
 
-// 记忆根目录：Electron 下取 userData/memory；普通 node（单测）退到 cwd/memory
+// 记忆根目录：Electron 下取 userData/memory；普通 node（单测）退到 cwd/memory。
+// 可用性判定与降级日志统一走 electronPaths（原内联实现漏了"require 成功但 app 为
+// undefined"这条静默降级，见该模块注释）。
 function defaultMemoryRoot() {
-  try {
-    const app = require("electron").app;
-    if (app && app.getPath) return path.join(app.getPath("userData"), "memory");
-  } catch (e) {
-    // 无 Electron（单测/纯 node）属预期分支，退回 cwd 继续跑
-    console.warn(
-      "[memory/store] 未取到 Electron userData，记忆根目录退回 cwd/memory:",
-      e && e.message ? e.message : e
-    );
-  }
-  return path.join(process.cwd(), "memory");
+  return path.join(getElectronPath("userData", process.cwd(), "memory/store"), "memory");
 }
 
 // —— 时间工具（UTC ISO 落盘，本地时区划分"天"）——

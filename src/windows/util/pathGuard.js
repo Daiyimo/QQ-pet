@@ -101,8 +101,17 @@ function isInsideDir(rootDir, targetPath, options = {}) {
  *          ② realpath 复核（挡符号链接 / NTFS junction 指向 root 之外）。
  * @param {string} rootDir 白名单根目录
  * @param {string[]} segments 不可信路径片段（皮肤名 / Config.xml 中的相对文件名等）
- * @param {{caseInsensitive?:boolean, followSymlinks?:boolean}} [options]
- *        followSymlinks 默认 true；仅在需要纯词法判断（如自测）时显式关掉。
+ * @param {{caseInsensitive?:boolean, followSymlinks?:boolean, realpath?:Function}} [options]
+ *        - followSymlinks 默认 true；仅在需要纯词法判断（如自测）时显式关掉。
+ *        - realpath **仅供单元测试注入**：默认恒为真实的 realpathBestEffort
+ *          （内部走 fs.realpathSync.native），生产调用方一律不传。
+ *          存在这个入口的唯一原因：junction/符号链接的越权用例依赖"能否创建链接"的
+ *          文件系统权限（非管理员的某些 Windows 配置、CI 容器、非 Windows 平台都可能
+ *          建不出来），那类用例只能 skip；一旦 skip，这条安全保证在该环境里就完全没有
+ *          防线。注入一个假 realpath 可以把"realpath 结果越界必须拒绝"这条断言与
+ *          文件系统权限解耦，成为平台无关的兜底防线。
+ *          注意：调用方传入的 options 绝不能来自不可信输入（preload 的 resolveSkinAsset
+ *          不传任何 options），否则等于允许攻击者关掉链接复核。
  * @returns {string|null} 绝对路径（未解析链接的词法路径），或 null 表示拒绝
  */
 function resolveInsideDir(rootDir, segments, options = {}) {
@@ -115,9 +124,23 @@ function resolveInsideDir(rootDir, segments, options = {}) {
   const target = path.resolve(rootDir, ...parts);
   if (!isInsideDir(rootDir, target, options)) return null;
   if (options.followSymlinks === false) return target;
+  const realpath = typeof options.realpath === "function" ? options.realpath : realpathBestEffort;
   // 链接复核：root 与 target 都解析真实路径后必须仍满足包含关系
-  const realRoot = realpathBestEffort(rootDir);
-  const realTarget = realpathBestEffort(target);
+  let realRoot;
+  let realTarget;
+  try {
+    realRoot = realpath(rootDir);
+    realTarget = realpath(target);
+  } catch (e) {
+    // 复核本身失败时按"拒绝"处理（fail-closed）：越权校验拿不到结论就不能放行
+    console.error(
+      "[pathGuard] 拒绝：realpath 复核过程异常，按越权处理:",
+      JSON.stringify({ root: rootDir, target }),
+      e && e.stack ? e.stack : e
+    );
+    return null;
+  }
+  // realRoot / realTarget 非法（假 realpath 返回非字符串等）时 isInsideDir 亦返回 false → 拒绝
   if (!isInsideDir(realRoot, realTarget, options)) {
     console.error(
       "[pathGuard] 拒绝：路径经符号链接/junction 解析后越出白名单根目录",

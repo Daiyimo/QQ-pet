@@ -84,69 +84,11 @@ const createMain = (fn, post, ip, fileName, none) => {
   );
 };
 
-function getLocalIP(fn) {
-  const os = _require("os");
-  const osType = os.type(); //系统类型
-  const netInfo = os.networkInterfaces(); //网络信息
-  let ip = [];
-  let str = `请选择启动ip`;
-  if (osType === "Windows_NT") {
-    let i = 0;
-    for (let dev in netInfo) {
-      //win7的网络信息中显示为本地连接，win10显示为以太网
-      // if (dev === '本地连接' || dev === '以太网') {
-      for (let j = 0; j < netInfo[dev].length; j++) {
-        if (netInfo[dev][j].family === "IPv4") {
-          // ip = netInfo[dev][j].address;
-          ip.push(netInfo[dev][j].address);
-          str += `
-第${i++}个IP：${netInfo[dev][j].address}`;
-        }
-      }
-      // }
-    }
-  } else if (osType === "Linux") {
-    ip = netInfo.eth0[0].address;
-  } else if (osType === "Darwin") {
-    // macOS: 遍历所有网络接口获取 IPv4 地址
-    for (let dev in netInfo) {
-      for (let j = 0; j < netInfo[dev].length; j++) {
-        if (netInfo[dev][j].family === "IPv4" && !netInfo[dev][j].internal) {
-          ip.push(netInfo[dev][j].address);
-        }
-      }
-    }
-    if (ip.length === 0) {
-      ip.push("127.0.0.1");
-    }
-  } else {
-    // 其他操作系统
-  }
-  // let chouseIpFn = () => {
-  // 	const readline = _require('readline').createInterface({
-  // 		input: process.stdin,
-  // 		output: process.stdout,
-  // 	});
-  // 	readline.question(`${str}
-  // 	`, name => {
-  // 		let chouseIp = ip[name]
-  // 		if (chouseIp) {
-  // 			console.log('已选择： ' + chouseIp)
-  // 			fn && fn(chouseIp)
-  // 			readline.close();
-  // 		} else {
-  // 			console.log('请选择正确选项')
-  // 			readline.close();
-  // 			chouseIpFn()
-  // 		}
-  // 	});
-  // }
-  // chouseIpFn()
-  return ip;
-}
-
-// openWS（nodejs-websocket 本机 ws 服务）已删除：全仓无任何调用点，属死代码，
-// 依赖 nodejs-websocket 也随之从 package.json 移除。
+// 本文件已删除的死代码（git 历史可查）：
+// - openWS：nodejs-websocket 本机 ws 服务，全仓无调用点；依赖也随之从 package.json 移除。
+// - getLocalIP：唯一的两个调用点是 createMain / openLocalHost 里未被使用的
+//   `let aotuIp = getLocalIP()`，随本轮监听重构一并删除后即成死代码（59 行，含一段
+//   注释掉的 readline 选 IP 交互）。本地版只绑 127.0.0.1，不需要枚举网卡。
 // 用 typeof 判定替代原来的 `try{...}catch(error){}`：module 缺失是可预期分支，
 // 不该用裸 catch 表达（裸 catch 会顺手吞掉真正的赋值异常）。
 if (typeof module !== "undefined" && module) {

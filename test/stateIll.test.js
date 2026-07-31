@@ -8,6 +8,7 @@ const path = require("node:path");
 let petInfo;
 let writes;
 let randomQueue = [];
+let randomCalls = [];
 
 global.getPetInfo = () => JSON.parse(JSON.stringify(petInfo));
 global.setPetInfo = (d) => {
@@ -17,8 +18,16 @@ global.setPetInfo = (d) => {
   }
 };
 global.isNumber = (e) => (+e == +e && +e) || 0;
-// getRandom 可编排：病树随机二选一要能确定性覆盖两个分支
-global.getRandom = (a, b) => (randomQueue.length ? randomQueue.shift() : a);
+// getRandom 桩：**尊重区间**。编排值当成「区间内的偏移」而不是直接返回值 ——
+// 若直接 `return queue.shift()`，实现取 getRandom(1,2) 还是 getRandom(0,1) 对结果
+// 毫无影响，用例就退化成在验证桩自己（病树随机区间会完全裸奔）。
+// 同时记录调用参数，供用例直接钉住区间。
+global.getRandom = (a, b) => {
+  randomCalls.push([a, b]);
+  if (b === undefined) return a; // 单参语义是 [0,a]，本测试未用到
+  const offset = randomQueue.length ? randomQueue.shift() : 0;
+  return Math.min(Math.max(a + offset, a), b);
+};
 global.getRatio = () => true; // 让 illsPower 计数稳定推进
 global.$test = false;
 
@@ -45,10 +54,12 @@ function makeState(over) {
   petInfo = basePetInfo(over);
   writes = [];
   randomQueue = [];
+  randomCalls = [];
   const events = [];
   const s = new State({ callBackState: (e) => events.push(e) });
   writes = [];
   events.length = 0;
+  randomCalls = []; // 丢弃构造期（firstDetermineHealth）的调用记录
   return { s, events };
 }
 
@@ -71,15 +82,25 @@ test("吃太饱触发的是「肚子胀」病树而不是空对象", () => {
 
 test("脏/饿触发的病树覆盖「咳嗽」与「感冒」两棵（含旧实现不可达的咳嗽）", () => {
   const names = new Set();
-  for (const pick of [0, 1]) {
+  const intervals = [];
+  for (const offset of [0, 1]) {
     const { s } = makeState({ info: { clean: 100 } });
-    randomQueue = [pick];
+    randomQueue = [offset]; // 区间内偏移，桩会钳到 [a,b]
     forceIll(s, "dirty");
     const w = writes.find((x) => x.activeOption && x.activeOption.ill);
-    assert.ok(w, `pick=${pick} 应生成疾病`);
+    assert.ok(w, `offset=${offset} 应生成疾病`);
     names.add(w.activeOption.ill.name);
+    intervals.push(randomCalls[randomCalls.length - 1]);
   }
-  assert.deepEqual([...names].sort(), ["咳嗽", "感冒"], "旧实现 getRandom(1,2) 让「咳嗽」永不可达");
+  assert.deepEqual(
+    [...names].sort(),
+    ["咳嗽", "感冒"],
+    "旧实现 getRandom(1,2) 取到的是 s[1]/s[2]（感冒/肚子胀），「咳嗽」永不可达"
+  );
+  // 直接钉住随机区间：两次调用都必须是 [0,1]
+  for (const iv of intervals) {
+    assert.deepEqual(iv, [0, 1], "病树随机必须在 [0,1] 上取，[1,2] 会让 s[0]「咳嗽」不可达");
+  }
 });
 
 test("生病时保留已装备的背景", () => {
@@ -195,6 +216,40 @@ test("maxInfo.mood 缺失时回落到 1000 上限", () => {
   s.useConsumables({ type: "toy", name: "皮球", mood: 300 });
   const w = writes.find((x) => x.info && x.info.mood !== undefined);
   assert.equal(w.info.mood, 1000);
+});
+
+// 接管原 toy125.test.js 里那条「toy 使用后应与 food/commodity 同走状态回调」的
+// 源码文本快照断言，改成真实行为断言（压缩产物重新打包不会误红）。
+// 说明：构造函数的 callBackState 包装层按 e.type 去重（oldEvent），所以每次调用前
+// 手动把 oldEvent 清空，才能观察到这一次的回调。
+test("使用玩具后与食物一样触发状态回调", () => {
+  const { s, events } = makeState({ info: { hunger: 3000, clean: 3000, mood: 100 } });
+  s.oldEvent = null;
+  s.useConsumables({ type: "toy", name: "皮球", mood: 100 });
+  const ev = events.find((e) => e.val && e.val.type === "toy");
+  assert.ok(ev, "toy 必须走 food/commodity 同一条状态回调");
+  assert.equal(ev.type, "normal", "饥饿/清洁都健康时应回调 normal");
+});
+
+test("使用食物同样触发状态回调（对照）", () => {
+  const { s, events } = makeState({ info: { hunger: 3000, clean: 3000 } });
+  s.oldEvent = null;
+  s.useConsumables({ type: "food", name: "苹果", starve: 10 });
+  const ev = events.find((e) => e.val && e.val.type === "food");
+  assert.ok(ev);
+  assert.equal(ev.type, "normal");
+});
+
+test("非消耗类（background）使用后不触发该状态回调（反向对照）", () => {
+  // 证明上面两条不是「任何类型都会回调」的空断言
+  const { s, events } = makeState({ info: { hunger: 3000, clean: 3000 } });
+  s.oldEvent = null;
+  s.useConsumables({ type: "background", name: "某背景" });
+  assert.equal(
+    events.filter((e) => e.val && e.val.type === "background").length,
+    0,
+    "background 不在 food/commodity/toy 白名单里，不应走这条回调"
+  );
 });
 
 // ------------------------------------------------ 死亡后不可喂食（原有行为不回退）

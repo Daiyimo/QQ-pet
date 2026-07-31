@@ -191,6 +191,85 @@ test("内嵌等级表：普通成长值换算正确", () => {
   assert.equal(writes.filter((x) => x.maxInfo).pop().maxInfo.level, 2);
 });
 
+// ---- 内嵌粉钻等级表（成长主循环走的就是这份，standalone 那份见 levelCap.test.js）----
+
+test("内嵌粉钻表：成长值 >=2800 时顶级 7 可达（不是停在 6）", () => {
+  const DAY_MS = 864e5;
+  const w = runDailyRollover({
+    otherOptions: {
+      pinkDiamond: true,
+      pinkDiamondLevel: 6,
+      growth: 3000, // 已过 2800 阈值
+      growthValue: 20,
+      pinkDiamondBeginDate: Date.now() - 2 * DAY_MS,
+      pinkDiamondExpirationDate: Date.now() + 5 * DAY_MS,
+    },
+  });
+  const payload = w.find((x) => x.otherOptions);
+  assert.ok(payload, "跨天分支应写入 otherOptions");
+  assert.equal(
+    payload.otherOptions.pinkDiamondLevel,
+    7,
+    "内嵌副本旧实现循环到 k<=7 时比较 levels[7]=undefined，7 级不可达"
+  );
+});
+
+test("内嵌粉钻表：顶级的 growthValue_next 为 2800，不被 ||100 兜底吃掉", () => {
+  const DAY_MS = 864e5;
+  const w = runDailyRollover({
+    otherOptions: {
+      pinkDiamond: true,
+      pinkDiamondLevel: 7,
+      growth: 5000,
+      growthValue: 20,
+      pinkDiamondBeginDate: Date.now() - 2 * DAY_MS,
+      pinkDiamondExpirationDate: Date.now() + 5 * DAY_MS,
+    },
+  });
+  const payload = w.find((x) => x.otherOptions);
+  assert.equal(payload.otherOptions.pinkDiamondLevel, 7);
+  assert.equal(
+    payload.otherOptions.growthValue_next,
+    2800,
+    "nextGrowth 若为 0/undefined，isExpirationDate 的 `||100` 会把阈值错显成 100"
+  );
+});
+
+test("内嵌粉钻表：顶级换算出的钓鱼次数为 7*2=14（不是 NaN、不是 12）", () => {
+  const DAY_MS = 864e5;
+  const w = runDailyRollover({
+    otherOptions: {
+      pinkDiamond: true,
+      pinkDiamondLevel: 6,
+      growth: 3000,
+      growthValue: 20,
+      pinkDiamondBeginDate: Date.now() - 2 * DAY_MS,
+      pinkDiamondExpirationDate: Date.now() + 5 * DAY_MS,
+    },
+  });
+  const payload = w.find((x) => x.fishing);
+  assert.ok(payload, "跨天分支应写入 fishing");
+  assert.equal(payload.fishing.allvipcnt, 14, "顶级 7 级 -> 14 次");
+  assert.equal(payload.fishing.canusecnt, 14);
+});
+
+test("内嵌粉钻表：未到 2800 时仍是 6 级（顶级改动不影响下一档）", () => {
+  const DAY_MS = 864e5;
+  const w = runDailyRollover({
+    otherOptions: {
+      pinkDiamond: true,
+      pinkDiamondLevel: 5,
+      growth: 1800,
+      growthValue: 0, // 不额外累加，保持在 1800
+      pinkDiamondBeginDate: Date.now() - 2 * DAY_MS,
+      pinkDiamondExpirationDate: Date.now() + 5 * DAY_MS,
+    },
+  });
+  const payload = w.find((x) => x.otherOptions);
+  assert.equal(payload.otherOptions.pinkDiamondLevel, 6);
+  assert.equal(payload.otherOptions.growthValue_next, 2800);
+});
+
 // ------------------------------------------------ 成长率权重表守卫
 
 test("getEffectGrowthRate：健康值非数字时按最差健康扣权重，不当成满健康", () => {

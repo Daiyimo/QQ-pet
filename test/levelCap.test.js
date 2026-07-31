@@ -62,6 +62,50 @@ test("粉钻 getNowLevel 顶级 7 可达", () => {
   assert.equal(pinkDiamondLevel.getNowLevel(999999).level, 7);
 });
 
+test("粉钻顶级返回的区间与 level 自洽（[2800,2800] 表示已满级）", () => {
+  // 顶级没有上界阈值。upGrowth 必须是 7 级自己的下界 2800——若返回 6 级的
+  // [1800,2800) 就与 level:7 自相矛盾，按 (growth-up)/(next-up) 算进度会 >100%。
+  for (const g of [2800, 2801, 5000, 1e9]) {
+    const r = pinkDiamondLevel.getNowLevel(g);
+    assert.equal(r.level, 7, `growth=${g} 应为 7 级`);
+    assert.equal(r.upGrowth, 2800, `growth=${g} 的 upGrowth 应是 7 级下界 2800`);
+    assert.equal(r.nextGrowth, 2800, `growth=${g} 无下一档，nextGrowth 同为 2800`);
+  }
+});
+
+test("粉钻 6 级区间不受顶级改动影响", () => {
+  const r = pinkDiamondLevel.getNowLevel(1800);
+  assert.deepEqual([r.upGrowth, r.nextGrowth, r.level], [1800, 2800, 6]);
+  const r2 = pinkDiamondLevel.getNowLevel(2799);
+  assert.deepEqual([r2.upGrowth, r2.nextGrowth, r2.level], [1800, 2800, 6]);
+});
+
+test("粉钻顶级时 isExpirationDate 的 growthValue_next 不会被 ||100 兜底吃掉", () => {
+  // nextGrowth 若返回 0/undefined，isExpirationDate 里的 `nextGrowth || 100`
+  // 会把下一档阈值错显成 100
+  const now = Date.now();
+  const DAY = 1000 * 60 * 60 * 24;
+  const opt = pinkDiamondLevel.isExpirationDate({
+    growth: 3000,
+    growthValue: 20,
+    pinkDiamond: true,
+    pinkDiamondLevel: 7,
+    pinkDiamondBeginDate: now - 2 * DAY,
+    pinkDiamondExpirationDate: now + 2 * DAY,
+  });
+  assert.equal(opt.pinkDiamondLevel, 7);
+  assert.equal(opt.growthValue_next, 2800, "应为 2800，不能是 100");
+});
+
+test("主表 LevelFn 的封顶区间未被粉钻改动波及", () => {
+  // 主表有 402 项，400 级的区间 [levels[399], levels[400]) 本来就是自洽的，不该改成零宽
+  const r = Level.getNowLevel(999999999);
+  assert.equal(r.level, CAP);
+  assert.equal(r.upGrowth, LEVELS[CAP - 1]);
+  assert.equal(r.nextGrowth, LEVELS[CAP]);
+  assert.notEqual(r.upGrowth, r.nextGrowth, "主表封顶区间不是零宽");
+});
+
 test("粉钻 getNowLevel 各档边界", () => {
   const expect = [
     [0, 1],

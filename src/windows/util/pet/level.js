@@ -126,11 +126,14 @@ class pinkDiamondFn {
         break;
       }
     }
-    // growth >= levels[最后一项] -> 顶级。沿用主表封顶口径：返回最后一段区间，
-    // 让进度条显示为「该段已满」，而不是 0/undefined（后者会让调用方的
-    // `nextGrowth || 100` 兜底把下一档阈值错显成 100）。
+    // growth >= levels[最后一项] -> 顶级（7 级）。
+    // 顶级没有下一档阈值，返回 [2800, 2800] 表示「已满级」：
+    //   - upGrowth 必须是 7 级自己的下界 2800。返回 6 级的 [1800,2800) 会与 level:7
+    //     自相矛盾，任何按 (growth-upGrowth)/(nextGrowth-upGrowth) 算进度的调用方都会 >100%；
+    //   - nextGrowth 同样取 2800（而不是 0/undefined），否则 isExpirationDate 里
+    //     `nextGrowth || 100` 的兜底会把下一档阈值错显成 100。
     if (result.length === 0) {
-      result = [this.levels[topLevel - 2], this.levels[topLevel - 1]];
+      result = [this.levels[topLevel - 1], this.levels[topLevel - 1]];
       level = topLevel;
     }
     this.level = level;
@@ -197,11 +200,11 @@ class pinkDiamondFn {
   }
 }
 const pinkDiamondLevel = new pinkDiamondFn();
-try {
-  if (module) module.exports = { Level, pinkDiamondLevel };
-} catch (error) {
-  // 渲染层普通 script 环境没有 module，这是预期分支；其余异常必须留痕
-  if (!/module is not defined/.test(String(error && error.message))) {
-    console.error("[level] 导出失败:", (error && error.stack) || error);
-  }
+// 双模加载：主进程/测试是 CommonJS，渲染层是普通 script（没有 module）。
+// 用 typeof 判定而不是 try/catch —— module 缺失是可预期分支，靠捕获 ReferenceError
+// 再正则匹配 "module is not defined" 依赖的是 V8 的英文异常文本，不是 API 契约，
+// 换引擎/换 locale 就会开始刷日志；而裸 catch 又会顺手吞掉真正的赋值异常。
+// 同 src/ini/root.js 的写法。
+if (typeof module !== "undefined" && module) {
+  module.exports = { Level, pinkDiamondLevel };
 }

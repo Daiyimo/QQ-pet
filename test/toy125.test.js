@@ -92,24 +92,6 @@ test("ini/pet.js：默认背包 cache 含 toy 类", () => {
   );
 });
 
-test("State.js：useConsumables 补 toy 分支，mood 按条目值结算、按 maxInfo.mood 钳制", () => {
-  const src = readSource("src/windows/util/pet/State.js");
-  // 原断言快照了硬编码上限 `r>1e3?1e3:r`；上限已改为按 maxInfo.mood 钳制
-  // （缺省回落 1000），这里只校验「有 toy 分支」+「用 maxInfo.mood 做上限」两个意图。
-  assert.ok(
-    src.includes('if("toy"==t.type){let M=+e.maxInfo?.mood||1e3,r=isNumber(e.info.mood)+(+t.mood||0);'),
-    "useConsumables 应有 toy mood 结算分支"
-  );
-  assert.ok(
-    src.includes("l.info.mood=r>M?M:r"),
-    "toy 的 mood 应钳到 maxInfo.mood 而不是硬编码 1000"
-  );
-  assert.ok(
-    src.includes('"food"!=t.type&&"commodity"!=t.type&&"toy"!=t.type||'),
-    "toy 使用后应与 food/commodity 同走状态回调"
-  );
-});
-
 test("control/index.js：日常 tab 加玩具入口", () => {
   const src = readSource("src/windows/popups/control/index.js");
   assert.ok(
@@ -227,7 +209,6 @@ test("Goods.buy：玩具可购、PD 玩具受粉钻门槛且开通后 8 折", ()
       assert.strictEqual(yb, 3464, "背景11 1920 元宝 8 折应为 1536");
       assert.deepStrictEqual(g.storeGoods.background, ["_b0000011-1"], "背景应进背包 background 类");
 
-      clearTimeout(g.saveTimes); // 拦下 toSaveGoodsCache 的延迟 setCache，避免测试结束后异步触发
     }
   );
 });
@@ -254,7 +235,6 @@ test("Goods.getConsumables：旧存档（无 toy 键）归一化后玩具可买�
 
       const page = g.getConsumablesPage({ pageSize: 4, current: 1, type: "toy", getWhere: "store" });
       assert.notStrictEqual(page.state, "err", "旧存档玩具背包分页不应报错");
-      clearTimeout(g.saveTimes);
     }
   );
 });

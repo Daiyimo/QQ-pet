@@ -84,6 +84,83 @@ test("buy 落盘失败时不扣元宝", () => {
   assert.equal(petInfo.info.yb, before, "背包没落盘就扣钱会导致钱物两空");
 });
 
+// ---- 落盘失败必须回滚内存（否则物品白拿）----
+// 只「不扣元宝」是不够的：a() 已经把物品写进 this.storeGoods，若不回滚，
+// 之后任意一次成功的 toSaveGoodsCache()（例如用掉另一件道具）会把这件
+// 没付钱的物品持久化下来。
+
+test("buy 落盘失败时内存不残留物品", () => {
+  const { g } = makeGoods(emptyStore());
+  failSetCache = true;
+  const r = g.buy("background*" + bgKey);
+  assert.equal(r.ok, false);
+  assert.deepEqual(g.storeGoods.background, [], "落盘失败必须回滚内存，不能留下白拿的物品");
+});
+
+test("buy 落盘失败后再成功落盘，不会把白拿的物品带进存档", () => {
+  const { g } = makeGoods(emptyStore({ food: ["_100010031-2"] }));
+  failSetCache = true;
+  assert.equal(g.buy("background*" + bgKey).ok, false);
+  // 恢复磁盘后做一次正常操作，触发成功落盘
+  failSetCache = false;
+  assert.equal(g.useConsumables({ type: "food", keyName: "_100010031", num: "2" }), true);
+  assert.deepEqual(cache.store.background, [], "上一次失败购买的物品不得被后续落盘顺带持久化");
+  assert.deepEqual(cache.store.food, ["_100010031-1"]);
+});
+
+test("toAddGoods 落盘失败时返回 false 且内存回滚到原样", () => {
+  // 期望值必须与传进 store 的数组解耦：emptyStore 是浅展开，storeGoods.food 与
+  // 传入的数组是同一对象，就地改写会连带污染期望值。
+  const { g } = makeGoods(emptyStore({ food: ["_100010031-2", "_100010032-7"] }));
+  failSetCache = true;
+  const r = g.toAddGoods({ good: "food*_100010031" });
+  assert.equal(r, false, "落盘失败必须返回 false");
+  assert.deepEqual(
+    g.storeGoods.food,
+    ["_100010031-2", "_100010032-7"],
+    "数量不得停留在 +1 后的状态"
+  );
+});
+
+test("toAddGoods 落盘失败时新建条目也被回滚", () => {
+  const { g } = makeGoods(emptyStore({ food: [] }));
+  failSetCache = true;
+  assert.equal(g.toAddGoods({ good: "food*_100010031" }), false);
+  assert.deepEqual(g.storeGoods.food, [], "新 push 的条目必须一并回滚");
+});
+
+test("toAddGoods 批量入库中途抛错时整批回滚", () => {
+  const { g } = makeGoods(emptyStore({ food: ["_100010031-1"], toy: [] }));
+  // 第 2 件的类目不存在 -> a() 抛错，此时第 1 件已经写进内存
+  const r = g.toAddGoods({
+    goods: ["food*_100010031", "work*_bz", "toy*_t0001"],
+  });
+  assert.equal(r, false);
+  assert.deepEqual(g.storeGoods.food, ["_100010031-1"], "抛错前已入库的那件必须回滚");
+  assert.deepEqual(g.storeGoods.toy, [], "抛错后未处理的那件当然不该入库");
+});
+
+test("toAddGoods 回滚是就地还原，共享同一数组的缓存持有者也不残留", () => {
+  // getConsumables 用 {...默认值, ...getCache("store")} 浅展开，storeGoods 的类目数组
+  // 与 $Store 里的是同一对象；回滚若用整体赋值，别名持有者会留着 +1 后的脏数据。
+  const store = emptyStore({ food: ["_100010031-1"] });
+  const aliased = store.food;
+  const { g } = makeGoods(store);
+  assert.equal(g.storeGoods.food, aliased, "前置：确认存在别名共享");
+  failSetCache = true;
+  assert.equal(g.toAddGoods({ good: "food*_100010031" }), false);
+  assert.deepEqual(aliased, ["_100010031-1"], "别名持有的数组也必须被还原");
+});
+
+test("toAddGoods 成功路径不受回滚快照影响", () => {
+  const { g } = makeGoods(emptyStore({ food: ["_100010031-2"], toy: [] }));
+  const r = g.toAddGoods({ goods: ["food*_100010031", "toy*_t0001"] });
+  assert.equal(r, true);
+  assert.deepEqual(g.storeGoods.food, ["_100010031-3"]);
+  assert.deepEqual(g.storeGoods.toy, ["_t0001-1"]);
+  assert.deepEqual(cache.store.food, ["_100010031-3"], "成功时应已落盘");
+});
+
 test("buy 成功时扣款金额与入库数量一致", () => {
   const { g } = makeGoods(emptyStore());
   const price = +shop.background[bgKey].price;

@@ -216,19 +216,91 @@ test("close_game 会在关闭前落盘", () => {
 
 // ------------------------------------------------ 鱼苗价格口径
 
+// 折扣口径的**唯一基准**是商城侧的 pinkDiamondShop.applyPinkDiamondPrice。
+// 钓鱼渲染层跑在浏览器上下文、不能 require 主进程模块，所以 fryFinalPrice 是第二份
+// *实现*；但不允许有第二份*测试基准* —— 下面用逐值相等把两者钉在一起：折扣率或取整
+// 方式（比如为防刷改成 Math.floor）只要动一边，这里就会红。
+// pinkDiamondShop 在纯 Node 下可直接加载（惰性读 PD 商品表，applyPinkDiamondPrice
+// 只依赖全局 getPetInfoOne），无需把取整表达式再抽一层。
+const pinkDiamondShop = require(
+  path.join(__dirname, "..", "src", "windows", "util", "pet", "pinkDiamondShop.js")
+);
+
+// 让商城侧的 isPinkDiamondActive() 返回指定状态，跑完恢复原全局
+function withMallPinkDiamond(active, fn) {
+  const had = Object.prototype.hasOwnProperty.call(global, "getPetInfoOne");
+  const prev = global.getPetInfoOne;
+  global.getPetInfoOne = (k, t) =>
+    k === "pinkDiamond" && t === "otherOptions" ? active : "";
+  try {
+    return fn();
+  } finally {
+    if (had) global.getPetInfoOne = prev;
+    else delete global.getPetInfoOne;
+  }
+}
+
+// 覆盖真实鱼苗价 + 取整边界（x.4 / x.5 / x.6 各档）
+function parityPrices(sandbox) {
+  const fromShop = sandbox.ctx.shop.filter(Boolean).map((x) => +x.price_yb);
+  return [...new Set([...fromShop, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 18, 40, 666, 888])].filter(
+    (p) => p > 0
+  );
+}
+
 test("fryFinalPrice 非粉钻返回原价", () => {
   const s = makeSandbox();
   s.seed("isvip", 0);
   assert.equal(s.ctx.fryFinalPrice({ price_yb: 40 }), 40);
 });
 
-test("fryFinalPrice 粉钻按 8 折并与商城同一取整口径", () => {
+test("fryFinalPrice（粉钻）与商城 applyPinkDiamondPrice 对每个价格逐一相等", () => {
   const s = makeSandbox();
   s.seed("isvip", 1);
-  assert.equal(s.ctx.fryFinalPrice({ price_yb: 40 }), 32);
-  // Math.round(price*0.8)，与 pinkDiamondShop.applyPinkDiamondPrice 一致
-  assert.equal(s.ctx.fryFinalPrice({ price_yb: 13 }), Math.round(13 * 0.8));
-  assert.equal(s.ctx.fryFinalPrice({ price_yb: 18 }), Math.round(18 * 0.8));
+  const prices = parityPrices(s);
+  assert.ok(prices.length >= 10, "前置：应有足够的价格样本");
+  withMallPinkDiamond(true, () => {
+    for (const p of prices) {
+      assert.equal(
+        s.ctx.fryFinalPrice({ price_yb: p }),
+        pinkDiamondShop.applyPinkDiamondPrice(p),
+        `价格 ${p}：钓鱼折后价必须与商城 applyPinkDiamondPrice 一致`
+      );
+    }
+  });
+});
+
+test("fryFinalPrice（非粉钻）与商城 applyPinkDiamondPrice 对每个价格逐一相等", () => {
+  const s = makeSandbox();
+  s.seed("isvip", 0);
+  const prices = parityPrices(s);
+  withMallPinkDiamond(false, () => {
+    for (const p of prices) {
+      assert.equal(
+        s.ctx.fryFinalPrice({ price_yb: p }),
+        pinkDiamondShop.applyPinkDiamondPrice(p),
+        `价格 ${p}：未开通粉钻时两侧都应是原价`
+      );
+    }
+  });
+});
+
+test("折扣基准变化时钓鱼侧会被发现（口径漂移哨兵）", () => {
+  // 断言两侧对「折扣确实生效」这件事有一致认知：至少存在一个价格被打折。
+  // 若商城把折扣率改成 1.0 或取消折扣，这条会红，提示同步钓鱼侧。
+  const s = makeSandbox();
+  s.seed("isvip", 1);
+  const prices = parityPrices(s);
+  withMallPinkDiamond(true, () => {
+    const mallDiscounted = prices.filter((p) => pinkDiamondShop.applyPinkDiamondPrice(p) < p);
+    const fishDiscounted = prices.filter((p) => s.ctx.fryFinalPrice({ price_yb: p }) < p);
+    assert.ok(mallDiscounted.length > 0, "商城侧应有价格被打折");
+    assert.deepEqual(
+      fishDiscounted,
+      mallDiscounted,
+      "被打折的价格集合必须两侧完全相同"
+    );
+  });
 });
 
 test("fryFinalPrice 非法价格原样返回，不产生 NaN", () => {

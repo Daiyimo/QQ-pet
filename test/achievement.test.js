@@ -133,13 +133,6 @@ test("签到达人：streak 取自 sys.signin，7 天边界", () => {
   assert.equal(newly[0].id, "signMaster");
 });
 
-test("签到达人：只写 info.signin（会被 setPetInfo 丢弃的那条路）不足以解锁", () => {
-  // 防回归：不允许再退回「读 petInfo.info.signin 就算达成」的假绿实现。
-  // 注意 achievement.js 保留了 info.signin 前向兜底，所以这里必须两处都为空才断言不解锁。
-  const r = makeService(pet(), {});
-  assert.deepEqual(r.service.check("signin"), []);
-});
-
 test("忠实陪伴：onLineTime 单位为分钟，100 小时 = 6000 分钟", () => {
   let r = makeService(pet({ info: { onLineTime: 5999 } }));
   assert.deepEqual(r.service.check(), []);

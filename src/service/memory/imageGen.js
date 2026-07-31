@@ -119,8 +119,12 @@ function postBuffer(urlStr, headers, body, timeoutMs, maxBytes) {
   });
 }
 
-// 二次下载（响应只给 url 时），同样限 25MB
-function downloadBuffer(urlStr, timeoutMs, maxBytes) {
+// 二次下载（响应只给 url 时），同样限 25MB。
+// depth：重定向跳数，超过 MAX_REDIRECTS 即失败——否则自指向的 301 会无限跳转，
+// Promise 永不结算（每跳都是新请求，单次空闲超时也救不了）。
+const MAX_REDIRECTS = 5;
+
+function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     if (u.protocol !== "http:" && u.protocol !== "https:") {
@@ -131,7 +135,22 @@ function downloadBuffer(urlStr, timeoutMs, maxBytes) {
     const req = mod.get(u, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        resolve(downloadBuffer(new URL(res.headers.location, u).toString(), timeoutMs, maxBytes));
+        if (depth >= MAX_REDIRECTS) {
+          reject(
+            new Error(
+              `generated image download failed: too many redirects (>${MAX_REDIRECTS})`
+            )
+          );
+          return;
+        }
+        resolve(
+          downloadBuffer(
+            new URL(res.headers.location, u).toString(),
+            timeoutMs,
+            maxBytes,
+            depth + 1
+          )
+        );
         return;
       }
       const chunks = [];
@@ -224,7 +243,10 @@ class ImageGenerationClient {
         detail = String(
           (err && typeof err === "object" ? err.message : err) || parsed.message || detail
         );
-      } catch (e) {}
+      } catch (e) {
+        // 错误响应体不是 JSON：保留原始文本作为 detail，紧随其后就带着它抛错，
+        // 信息不会丢失，因此这里不重复打日志
+      }
       throw new Error(`image API returned HTTP ${statusCode}: ${redact(detail, apiKey).slice(0, 300)}`);
     }
     let payload;
@@ -273,15 +295,31 @@ function sysGet(key) {
   return typeof getSys === "function" ? getSys(key) : undefined;
 }
 
-// 从 sys 读取两张参考图（getSys("imageGenRefs")：[角色图路径, 风格图路径]）
+// 从 sys 读取两张参考图（getSys("imageGenRefs")：[角色图路径, 风格图路径]）。
+// 返回 null 表示不可用（调用方降级为 reason:"no-reference"），但"配置缺失"与
+// "路径读不出来/格式不对"是两回事，必须分别落日志，否则用户永远查不出真实原因。
 function loadReferenceImages() {
   const refs = sysGet("imageGenRefs");
   if (!Array.isArray(refs) || refs.length !== 2 || refs.some((p) => !p)) return null;
   try {
     const bufs = refs.map((p) => fs.readFileSync(String(p)));
-    if (bufs.some((b) => !b.length || b.length > MAX_IMAGE_BYTES || !isSupportedImage(b))) return null;
+    const bad = bufs.findIndex(
+      (b) => !b.length || b.length > MAX_IMAGE_BYTES || !isSupportedImage(b)
+    );
+    if (bad >= 0) {
+      console.error(
+        `[memory/imageGen] 参考图 #${bad + 1}（${refs[bad]}）为空、超过 ${MAX_IMAGE_BYTES} 字节` +
+          "或不是 PNG/JPEG/WEBP，已按未配置参考图降级",
+        new Error("invalid reference image")
+      );
+      return null;
+    }
     return bufs;
   } catch (e) {
+    console.error(
+      "[memory/imageGen] 读取参考图失败（路径不存在或无权限），已按未配置参考图降级:",
+      e && e.stack ? e.stack : e
+    );
     return null;
   }
 }

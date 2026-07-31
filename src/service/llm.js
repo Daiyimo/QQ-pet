@@ -1,5 +1,6 @@
 const _require = eval("require");
 const providers = _require("./llm/providers.js");
+const { extractJsonObject } = _require("./llm/jsonParse.js");
 
 const DEFAULT_MODEL = "deepseek-chat";
 const LEGACY_BASE_URL = "https://api.deepseek.com/v1";
@@ -64,7 +65,9 @@ function resolveProvider() {
   return providers.getChatProvider();
 }
 
-// 走统一提供商层发起单轮对话，并解析 {tolk,submitText} JSON 契约
+// 走统一提供商层发起单轮对话，并解析 {tolk,submitText} JSON 契约。
+// 解析走 llm/jsonParse.js 的健壮实现（模型带前置解释文字 / markdown 围栏 / 被截断都能救回），
+// 与 perception/loop.js 共用同一套标准。
 function callLLM(providerCfg, messages) {
   return providers
     .chat({
@@ -74,10 +77,7 @@ function callLLM(providerCfg, messages) {
       temperature: 0.9,
       timeoutMs: TIMEOUT_MS,
     })
-    .then((content) => {
-      const cleaned = String(content).replace(/```json|```/g, "").trim();
-      return JSON.parse(cleaned);
-    });
+    .then((content) => extractJsonObject(content, "台词模型"));
 }
 
 class LLMService {
@@ -103,7 +103,14 @@ class LLMService {
       .then((r) => {
         if (r?.tolk) this._queues[tolkName].push(r);
       })
-      .catch(() => {})
+      .catch((e) => {
+        // 降级行为不变（本次预取作废，调用方继续用离线台词），但必须留下完整堆栈：
+        // Key 失效 / 欠费 / 断网 / 模型返回非 JSON 都在这里，静默吞掉会让问题不可观测
+        console.error(
+          `[llm] 台词预取失败（tolkName=${tolkName}），本次跳过:`,
+          e && e.stack ? e.stack : e
+        );
+      })
       .finally(() => {
         this._pending[tolkName] = false;
       });
@@ -126,8 +133,23 @@ class LLMService {
     if (!providerCfg) return Promise.resolve(false);
     return providers
       .testProvider(providerCfg)
-      .then((r) => !!r?.ok)
-      .catch(() => false);
+      .then((r) => {
+        // testProvider 自己不抛错，失败信息在 r.error 里，同样要落日志
+        if (!r || !r.ok) {
+          console.error(
+            "[llm] 连通性测试未通过:",
+            (r && r.error) || "provider returned no result"
+          );
+        }
+        return !!r?.ok;
+      })
+      .catch((e) => {
+        console.error(
+          "[llm] 连通性测试异常，按失败处理:",
+          e && e.stack ? e.stack : e
+        );
+        return false;
+      });
   }
 
   generateOnce(promptType, contextData, petInfo) {
@@ -144,7 +166,14 @@ class LLMService {
       { role: "user", content: userPrompt },
     ])
       .then((r) => (r?.tolk ? r : null))
-      .catch(() => null);
+      .catch((e) => {
+        // 降级为 null（调用方走离线兜底台词），但必须留完整堆栈
+        console.error(
+          `[llm] 台词生成失败（promptType=${promptType}），已降级为离线台词:`,
+          e && e.stack ? e.stack : e
+        );
+        return null;
+      });
   }
 }
 

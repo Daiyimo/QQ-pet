@@ -185,7 +185,11 @@ class BarrageEmitter {
     if (this.recent.length > this.historySize) this.recent.shift();
     try {
       this.emitCallback(text);
-    } catch (e) {}
+    } catch (e) {
+      // 上屏失败不影响后续弹幕排队（已记入 recent，不会重发同一条），
+      // 但必须留堆栈：此前静默导致「弹幕不出现」完全无法定位是排序问题还是渲染问题。
+      console.error("[barrageRanker] 弹幕上屏回调抛错:", e?.stack || e);
+    }
     return true;
   }
 

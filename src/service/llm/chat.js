@@ -16,6 +16,10 @@ function getPetInfoSafe() {
   try {
     return typeof getPetInfo === "function" ? getPetInfo() : {};
   } catch (e) {
+    console.error(
+      "[llm/chat] 读取宠物信息失败，按空信息组装人设:",
+      e && e.stack ? e.stack : e
+    );
     return {};
   }
 }

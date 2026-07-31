@@ -64,7 +64,10 @@ function present() {
 function sendText(text) {
   if (!win || win.isDestroyed()) return;
   const js = `window.qqBarrage&&window.qqBarrage.show(${JSON.stringify(text)});void 0`;
-  win.webContents.executeJavaScript(js).catch(() => {});
+  win.webContents.executeJavaScript(js).catch((e) => {
+    // 注入失败说明弹幕层没渲染出来（白屏/CSP 变更），必须可观测
+    console.error("[barrage] 弹幕注入失败:", e && e.stack ? e.stack : e);
+  });
 }
 
 function show(text = "") {

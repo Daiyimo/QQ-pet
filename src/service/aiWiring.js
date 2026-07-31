@@ -73,12 +73,16 @@
   perceptionLoop.on("pet-hide", () => {
     try {
       if (petMain.window && !petMain.window.isDestroyed()) petMain.window.hide();
-    } catch (e) {}
+    } catch (e) {
+      console.error("[aiWiring] 隐藏桌宠窗口失败:", e && e.stack ? e.stack : e);
+    }
   });
   perceptionLoop.on("pet-show", () => {
     try {
       if (petMain.window && !petMain.window.isDestroyed()) petMain.window.show();
-    } catch (e) {}
+    } catch (e) {
+      console.error("[aiWiring] 恢复桌宠窗口失败:", e && e.stack ? e.stack : e);
+    }
   });
 
   // ---- Ctrl+M 开关 AI 对话窗（shotycutsMain 由主窗口创建后挂载，轮询等待）----
@@ -114,7 +118,9 @@
     const t = setInterval(() => {
       try {
         global.achievement && global.achievement.check("timer");
-      } catch (e) {}
+      } catch (e) {
+        console.error("[aiWiring] 成就巡检失败:", e && e.stack ? e.stack : e);
+      }
     }, 60000);
     t.unref && t.unref();
   };

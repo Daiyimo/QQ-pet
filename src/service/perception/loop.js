@@ -15,6 +15,7 @@ const {
 } = _require("./sceneStabilizer");
 const { BarrageEmitter, textsAreSimilar } = _require("./barrageRanker");
 const { chat, getVisionProvider } = _require("../llm/providers");
+const { tryExtractJsonObject } = _require("../llm/jsonParse");
 const { UNIFIED_PERCEPTION_PROMPT } = _require("../llm/prompts");
 
 const HEARTBEAT_MS = 5 * 60 * 1000;
@@ -65,22 +66,14 @@ function cleanDuplexMessage(message, { requireProactiveValue = true } = {}) {
 }
 
 // —— 感知响应解析（移植 service.py _parse_perception + _recover_truncated_perception）——
+// 常规 JSON 抽取走 llm/jsonParse.js 的共用实现（与 llm.js 同一套标准）；
+// 完全解析不出来时再走本文件特有的"截断恢复"（只捞 scene/confidence/scene_evidence）。
 function parsePerceptionJson(text) {
   const source = String(text || "");
   const start = source.indexOf("{");
   if (start < 0) throw new Error("perception response contains no JSON object");
   const body = source.slice(start);
-  let value = null;
-  try {
-    value = JSON.parse(body);
-  } catch (e) {
-    const end = body.lastIndexOf("}");
-    if (end > 0) {
-      try {
-        value = JSON.parse(body.slice(0, end + 1));
-      } catch (e2) {}
-    }
-  }
+  let value = tryExtractJsonObject(body);
   if (!value) {
     // 截断恢复：只取 scene/confidence/scene_evidence，其余字段留空
     const sceneMatch = body.match(/"scene"\s*:\s*"(game|course|other)"/);
@@ -107,8 +100,20 @@ function parsePerceptionJson(text) {
   return value;
 }
 
+// 字段归一化：模型偶发把本该是字符串的字段写成对象/数组，
+// String() 会得到 "[object Object]" 并被当成正文（弹幕曾因此上屏），这里直接判空。
 function str(value, limit) {
-  return String(value == null ? "" : value).trim().slice(0, limit);
+  if (value == null) return "";
+  if (typeof value === "object") return "";
+  return String(value).trim().slice(0, limit);
+}
+
+// 弹幕候选归一化：允许字符串，或 {text|content|barrage} 形式的对象；其余判空丢弃
+function candidateText(candidate, limit) {
+  if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    return str(candidate.text ?? candidate.content ?? candidate.barrage, limit);
+  }
+  return str(candidate, limit);
 }
 
 // 归一化为统一感知契约，并套用 game/course 置信门槛（validateScene）
@@ -140,8 +145,9 @@ function buildPerceptionResult(value) {
     assistant_message: str(value.assistant_message, 500),
     barrage: str(value.barrage, 30),
     // validateScene 的"无证据但有产出"兜底要看原始候选列表，先挂原始值
+    // （非字符串元素在这里就被剔除，避免 "[object Object]" 混进弹幕）
     barrage_candidates: Array.isArray(value.barrage_candidates)
-      ? value.barrage_candidates
+      ? value.barrage_candidates.map((c) => candidateText(c, 30)).filter(Boolean)
       : [],
     _evidenceProvided: evidenceProvided,
   };
@@ -184,6 +190,12 @@ class PerceptionLoop extends EventEmitter {
     this.timer = null;
     this.running = false;
     this.inFlight = false;
+    // 运行周期编号：每次 start()/stop() 自增。所有异步续作（tick 的 finally、
+    // 在途感知结果的派发）都要比对进入时捕获的 epoch，不一致即整段作废。
+    // 修复两个真实缺陷：① stop() 后在途结果仍派发导致桌宠被永久隐藏；
+    // ② stop()+start() 让旧 tick 的 finally 又排一条 timer，定时链叠加（截屏成倍）。
+    this._epoch = 0;
+    this._abort = null; // 在途感知请求的 AbortController，stop() 时掐断
     this.lastPerceptionAt = 0;
     this.lastAssistantAt = 0;
     this.recentAssistantMessages = []; // [{text, at}]，最多 6 条
@@ -217,19 +229,24 @@ class PerceptionLoop extends EventEmitter {
     this.detector.reset();
     this.idleMonitor.reset();
     this._failures = 0;
+    const epoch = ++this._epoch; // 本次运行周期；旧周期的续作全部作废
     const tick = () => {
-      if (!this.running) return;
-      this._tick()
+      if (!this.running || epoch !== this._epoch) return;
+      this._tick(epoch)
         .then(() => {
           this._failures = 0;
         })
         .catch((e) => {
           // 连续失败指数退避：interval × 2^n，封顶 30s（API key 失效/断网时不至于狂打请求）
           this._failures = (this._failures || 0) + 1;
+          // 本轮已被 stop() 作废（含 stop() 主动 abort 造成的失败）：不再对外上报
+          if (epoch !== this._epoch) return;
           this.emit("perception-failed", { error: e?.message || String(e) });
         })
         .finally(() => {
-          if (!this.running) return;
+          // 关键：epoch 比对。只看 this.running 会让"停止期间在途的 tick"
+          // 在用户重新开启后再排一条 timer，与新链并存 → 截屏频率成倍
+          if (!this.running || epoch !== this._epoch) return;
           const backoff = Math.min(
             30000,
             this._interval() * Math.pow(2, this._failures || 0)
@@ -244,21 +261,35 @@ class PerceptionLoop extends EventEmitter {
 
   stop() {
     this.running = false;
+    this._epoch += 1; // 作废所有在途 tick 与已排队的续作
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+    // 掐断在途的截屏→大模型请求，避免关闭功能后请求还在跑（也让 inFlight 尽快复位）
+    if (this._abort) {
+      try {
+        this._abort.abort();
+      } catch (e) {
+        console.error(
+          "[perception] 中断在途感知请求失败:",
+          e && e.stack ? e.stack : e
+        );
+      }
+      this._abort = null;
     }
     this.emitter.cancel();
     this._restoreFromGame();
   }
 
-  async _tick() {
+  async _tick(epoch = this._epoch) {
     if (!this._enabled()) {
       // 运行中被设置页关闭：若正处于游戏隐藏态则恢复桌宠与弹幕层
       this._restoreFromGame();
       return;
     }
     const frame = await this.captureFn({ maxWidth: 1280 });
+    if (epoch !== this._epoch) return; // 截屏期间被 stop()：不再更新检测器状态
     const changed = this.detector.changed(frame.bitmap, frame.width, frame.height);
     const idleEvent = this.idleMonitor.observe(changed);
 
@@ -283,23 +314,35 @@ class PerceptionLoop extends EventEmitter {
     this.inFlight = true;
     this.lastPerceptionAt = now;
     try {
-      await this._perceive(frame);
+      await this._perceive(frame, epoch);
     } finally {
       this.inFlight = false;
     }
   }
 
-  async _perceive(frame) {
+  async _perceive(frame, epoch = this._epoch) {
     const providerCfg = getVisionProvider();
     const context =
       `\n\n【动态上下文】当前稳定场景：${this.stabilizer.current}；` +
       `本地时间：${new Date().toLocaleString("zh-CN", { hour12: false })}。`;
-    const text = await this.chatFn({
-      providerCfg,
-      messages: [{ role: "user", content: UNIFIED_PERCEPTION_PROMPT + context }],
-      images: [frame.pngBuffer],
-      maxTokens: PERCEPTION_MAX_TOKENS,
-    });
+    const controller =
+      typeof AbortController === "function" ? new AbortController() : null;
+    this._abort = controller;
+    let text;
+    try {
+      text = await this.chatFn({
+        providerCfg,
+        messages: [{ role: "user", content: UNIFIED_PERCEPTION_PROMPT + context }],
+        images: [frame.pngBuffer],
+        maxTokens: PERCEPTION_MAX_TOKENS,
+        signal: controller ? controller.signal : undefined,
+      });
+    } finally {
+      if (this._abort === controller) this._abort = null;
+    }
+    // 请求期间用户关掉了感知（或重开了一轮）：丢弃这份过期结果。
+    // 否则会在感知已停止的情况下切场景、隐藏桌宠（且再没有 pet-show 来恢复）、重建弹幕窗。
+    if (epoch !== this._epoch) return;
     const parsed = parsePerceptionJson(text);
     const result = buildPerceptionResult(parsed);
     this._dispatch(result);
@@ -354,7 +397,12 @@ class PerceptionLoop extends EventEmitter {
       // 退出游戏场景时隐藏弹幕覆盖层（jarvis 原实现同款行为）
       try {
         global.barrageWindow && global.barrageWindow.hide();
-      } catch (e) {}
+      } catch (e) {
+        console.error(
+          "[perception] 隐藏弹幕覆盖层失败:",
+          e && e.stack ? e.stack : e
+        );
+      }
     }
     if (to === "game") {
       this._closeBubble();
@@ -380,7 +428,12 @@ class PerceptionLoop extends EventEmitter {
     this.emitter.cancel();
     try {
       global.barrageWindow && global.barrageWindow.hide();
-    } catch (e) {}
+    } catch (e) {
+      console.error(
+        "[perception] 收尾隐藏弹幕覆盖层失败:",
+        e && e.stack ? e.stack : e
+      );
+    }
   }
 
   // other 场景主动发言：清洁过滤 + 16s 冷却 + 相似去重
@@ -407,7 +460,12 @@ class PerceptionLoop extends EventEmitter {
         data: { type: "text", data: cleaned, submitText: "" },
         nextActiveStr: "speak",
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error(
+        "[perception] 主动发言气泡失败:",
+        e && e.stack ? e.stack : e
+      );
+    }
   }
 
   _speakIdleReminder() {
@@ -421,7 +479,12 @@ class PerceptionLoop extends EventEmitter {
         data: { type: "text", data: text, submitText: "" },
         nextActiveStr: "speak",
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error(
+        "[perception] 摸鱼提醒气泡失败:",
+        e && e.stack ? e.stack : e
+      );
+    }
   }
 
   // 进入 game：关掉宠物气泡，避免与弹幕重叠
@@ -431,15 +494,26 @@ class PerceptionLoop extends EventEmitter {
       openSpeak({
         data: { type: "text", data: "", submitText: "", finish: true },
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error(
+        "[perception] 关闭宠物气泡失败:",
+        e && e.stack ? e.stack : e
+      );
+    }
   }
 
   _showBarrage(text) {
+    // 感知已停止时不发弹幕：barrageWindow.show() 内部会 ensure() 重建刚被销毁的窗口
+    if (!this.running) return;
+    // 尊重"免打扰"总开关：气泡走 openSpeak 时被拦，弹幕不走 openSpeak，需在此自行门禁
+    if (typeof getSys === "function" && sysGet("doNotDisturb")) return;
     const bw = global.barrageWindow;
     if (bw && typeof bw.show === "function") {
       try {
         bw.show(text);
-      } catch (e) {}
+      } catch (e) {
+        console.error("[perception] 弹幕上屏失败:", e && e.stack ? e.stack : e);
+      }
     }
   }
 }

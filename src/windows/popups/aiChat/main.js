@@ -49,7 +49,12 @@ class mainClass {
             aiChat_h_clear_m: (event) => {
               try {
                 global.petChat && global.petChat.clearHistory();
-              } catch (e) {}
+              } catch (e) {
+                console.error(
+                  "[aiChat] 清空对话历史失败:",
+                  e && e.stack ? e.stack : e
+                );
+              }
               _this.sendReply(vm, { ok: true, type: "cleared" });
             },
             aiChat_h_close_m: () => {
@@ -82,11 +87,16 @@ class mainClass {
         // 窗口工厂会让非白名单窗口跟随桌宠透明度（可低至 0.1），聊天窗强制不透明
         try {
           win && win.setOpacity && win.setOpacity(1);
-        } catch (e) {}
+        } catch (e) {
+          console.error("[aiChat] 设置窗口不透明失败:", e && e.stack ? e.stack : e);
+        }
         this.init();
       })
       .catch((err) => {
-        console.log(err);
+        console.error(
+          "[aiChat] 创建对话窗口失败:",
+          err && err.stack ? err.stack : err
+        );
       });
   }
 
@@ -99,7 +109,9 @@ class mainClass {
       if (vm && !vm.isDestroyed() && vm.webContents) {
         vm.webContents.send("aiChat_m_reply_h", data);
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error("[aiChat] 回复投递到渲染层失败:", e && e.stack ? e.stack : e);
+    }
   }
 
   // 截主屏，返回 PNG Buffer；失败返回 null
@@ -113,7 +125,7 @@ class mainClass {
       const png = sources[0].thumbnail.toPNG();
       return png && png.length ? png : null;
     } catch (e) {
-      console.log("aiChat captureScreen error", e);
+      console.error("[aiChat] 截屏失败:", e && e.stack ? e.stack : e);
       return null;
     }
   }
@@ -161,7 +173,9 @@ class mainClass {
             nextActiveStr: "speak",
           });
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error("[aiChat] 气泡播报回复失败:", e && e.stack ? e.stack : e);
+      }
     } catch (err) {
       this.sendReply(vm, {
         ok: false,

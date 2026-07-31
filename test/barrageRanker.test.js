@@ -183,3 +183,40 @@ test("BarrageEmitter：shouldEmit 门控返回 false 时中止发射", () => {
   emitter.offerCandidates(["打得真漂亮啊这波"]);
   assert.equal(emitted.length, 0);
 });
+
+test("BarrageEmitter：上屏回调抛错时记录堆栈且不中断后续弹幕排队", () => {
+  // 回归：此前 _emit 里是 catch (e) {}，上屏失败完全静默，
+  // 导致「弹幕不出现」无法区分是排序问题还是渲染问题。
+  const state = { timers: [] };
+  const emitted = [];
+  const logged = [];
+  const origError = console.error;
+  console.error = (...args) => logged.push(args);
+  try {
+    const emitter = new BarrageEmitter(
+      (text) => {
+        emitted.push(text);
+        if (text.includes("团战")) throw new Error("渲染层已销毁");
+      },
+      {
+        now: () => 0,
+        setTimeoutFn: (fn) => {
+          state.timers.push(fn);
+          return state.timers.length;
+        },
+        clearTimeoutFn: () => {},
+      }
+    );
+    emitter.offerCandidates(["这波团战打得漂亮", "对面直接被打崩了"]);
+    // 首条抛错不应阻断排队：第二条的定时器仍被挂上
+    assert.equal(state.timers.length, 1);
+    state.timers.shift()();
+    assert.deepEqual(emitted, ["这波团战打得漂亮", "对面直接被打崩了"]);
+  } finally {
+    console.error = origError;
+  }
+  assert.equal(logged.length, 1);
+  assert.match(logged[0][0], /barrageRanker/);
+  // 必须带堆栈，只打 message 不算合格
+  assert.match(String(logged[0][1]), /渲染层已销毁[\s\S]*at /);
+});

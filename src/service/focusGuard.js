@@ -42,7 +42,10 @@ class FocusGuard {
     this.timer = setInterval(() => {
       try {
         this._tick();
-      } catch (e) {}
+      } catch (e) {
+        // 巡检异常不能让定时器静默失效：降级为跳过本轮，但必须留完整堆栈
+        console.error("[focusGuard] 巡检 tick 异常，跳过本轮:", e && e.stack ? e.stack : e);
+      }
     }, TICK_INTERVAL_MS);
   }
 
@@ -166,7 +169,12 @@ class FocusGuard {
     let petInfo = {};
     try {
       petInfo = typeof getPetInfo === "function" ? getPetInfo() : {};
-    } catch (e) {}
+    } catch (e) {
+      console.error(
+        "[focusGuard] 读取宠物信息失败，按空信息生成台词:",
+        e && e.stack ? e.stack : e
+      );
+    }
 
     llmService
       .generateOnce(type, ctx, petInfo)
@@ -184,7 +192,14 @@ class FocusGuard {
           showFallback();
         }
       })
-      .catch(() => showFallback());
+      .catch((e) => {
+        // generateOnce 内部已记日志，这里补记"提醒降级为离线文案"的上下文
+        console.error(
+          `[focusGuard] ${type} 提醒的 AI 台词生成失败，改用离线文案:`,
+          e && e.stack ? e.stack : e
+        );
+        showFallback();
+      });
   }
 }
 

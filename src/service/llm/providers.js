@@ -3,8 +3,13 @@
 // 所有全局依赖均为惰性访问，保证普通 node 下直接 require 也不会炸。
 const _require = eval("require");
 const https = _require("https");
+const http = _require("http");
 
 const DEFAULT_TIMEOUT_MS = 30000;
+// 响应体字节上限：正常对话/视觉响应远小于此，配置错误或被劫持的端点可能持续吐数据，
+// 而 req.setTimeout 是"空闲超时"，持续有数据时永不触发 → 必须自己封顶。
+// 与 memory/imageGen.js 的做法一致（那里对图片/JSON 分别限 25MB/36MB）。
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const ENC_PREFIX = "enc:"; // apiKey 落盘时加密 base64 的前缀标记，无前缀视为明文（兼容旧数据）
 const ENCRYPT_FAILED = "encfail:"; // 加密不可用时的失败信号；只在内存中流转，落盘前必须被拦截
 
@@ -124,8 +129,13 @@ function normalizeImage(img) {
   return { base64, mediaType };
 }
 
-// 底层 POST JSON（Node 内置 https，风格参照旧 llm.js 的 callDeepSeek）
-function postJson(urlStr, headers, payload, timeoutMs) {
+// 底层 POST JSON（Node 内置 http/https）。
+// - 按 URL 的 protocol 选择模块与默认端口（本地端点如 http://127.0.0.1:11434/v1 也能用；
+//   过去恒用 https + 443，填 http 地址会报天书般的 OpenSSL 错误）；
+// - 响应体累计超过 MAX_RESPONSE_BYTES 立即中断，避免主进程内存被撑爆；
+// - 按 Buffer 收集后一次性 toString("utf8")，避免多字节字符在 chunk 边界被截成乱码；
+// - 支持 signal（AbortSignal）：调用方关闭功能时可真正掐断在途请求。
+function postJson(urlStr, headers, payload, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
     let u;
     try {
@@ -135,11 +145,28 @@ function postJson(urlStr, headers, payload, timeoutMs) {
         new Error(`API 地址无效（${urlStr || "空"}），请在设置页检查服务商配置`)
       );
     }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return reject(
+        new Error(`API 地址协议不支持（${u.protocol}），只支持 http/https`)
+      );
+    }
+    if (signal && signal.aborted) {
+      return reject(new Error("request aborted"));
+    }
+    const mod = u.protocol === "http:" ? http : https;
     const body = JSON.stringify(payload);
-    const req = https.request(
+    let settled = false;
+    let onAbort = null;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      fn(arg);
+    };
+    const req = mod.request(
       {
         hostname: u.hostname,
-        port: u.port || 443,
+        port: u.port || (u.protocol === "http:" ? 80 : 443),
         path: u.pathname + u.search,
         method: "POST",
         headers: {
@@ -149,17 +176,44 @@ function postJson(urlStr, headers, payload, timeoutMs) {
         },
       },
       (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve({ statusCode: res.statusCode, body: data }));
-        res.on("error", reject);
+        const chunks = [];
+        let total = 0;
+        res.on("data", (chunk) => {
+          total += chunk.length;
+          if (total > MAX_RESPONSE_BYTES) {
+            res.destroy();
+            req.destroy();
+            finish(
+              reject,
+              new Error(
+                `API 响应体超过 ${MAX_RESPONSE_BYTES} 字节上限，已中断（请检查服务商地址是否正确）`
+              )
+            );
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () =>
+          finish(resolve, {
+            statusCode: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
+        );
+        res.on("error", (e) => finish(reject, e));
       }
     );
-    req.on("error", reject);
+    req.on("error", (e) => finish(reject, e));
     req.setTimeout(timeoutMs, () => {
       req.destroy();
-      reject(new Error("timeout"));
+      finish(reject, new Error("timeout"));
     });
+    if (signal) {
+      onAbort = () => {
+        req.destroy();
+        finish(reject, new Error("request aborted"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
     req.write(body);
     req.end();
   });
@@ -229,7 +283,7 @@ function convertMessagesAnthropic(messages, images) {
   return { system: systemParts.join("\n"), messages: conv };
 }
 
-async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeoutMs }) {
+async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
   const url = String(cfg.baseUrl || "").replace(/\/+$/, "") + "/chat/completions";
   const payload = {
     model: cfg.model,
@@ -241,7 +295,8 @@ async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeo
     url,
     { Authorization: `Bearer ${cfg.apiKey}` },
     payload,
-    timeoutMs || DEFAULT_TIMEOUT_MS
+    timeoutMs || DEFAULT_TIMEOUT_MS,
+    signal
   );
   if (statusCode < 200 || statusCode >= 300) {
     throw new Error(`openai HTTP ${statusCode}: ${String(body).slice(0, 500)}`);
@@ -268,7 +323,7 @@ async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeo
   return content;
 }
 
-async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, timeoutMs }) {
+async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
   const base = (cfg.baseUrl || "https://api.anthropic.com").replace(/\/+$/, "");
   // baseUrl 已带 /v1 时（如 Step Plan 的 .../step_plan/v1）直接拼 /messages，
   // 否则补 /v1/messages（如 https://api.anthropic.com）
@@ -291,7 +346,8 @@ async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, ti
       "anthropic-version": "2023-06-01",
     },
     payload,
-    timeoutMs || DEFAULT_TIMEOUT_MS
+    timeoutMs || DEFAULT_TIMEOUT_MS,
+    signal
   );
   if (statusCode < 200 || statusCode >= 300) {
     throw new Error(`anthropic HTTP ${statusCode}: ${String(body).slice(0, 500)}`);
@@ -323,7 +379,8 @@ async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, ti
 
 // 统一对话入口：返回模型文本输出（string）。
 // providerCfg = { id, type: "openai"|"anthropic", baseUrl, apiKey, model }
-async function chat({ providerCfg, messages, images, maxTokens, temperature, timeoutMs }) {
+// signal：可选 AbortSignal，调用方（如感知循环 stop()）用它掐断在途请求。
+async function chat({ providerCfg, messages, images, maxTokens, temperature, timeoutMs, signal }) {
   if (!providerCfg) throw new Error("未配置 LLM 提供商");
   if (!providerCfg.apiKey) {
     throw new Error(`提供商「${providerCfg.id || "未知"}」缺少 API Key`);
@@ -331,7 +388,7 @@ async function chat({ providerCfg, messages, images, maxTokens, temperature, tim
   if (!Array.isArray(messages) || !messages.length) {
     throw new Error("messages 不能为空");
   }
-  const args = { messages, images, maxTokens, temperature, timeoutMs };
+  const args = { messages, images, maxTokens, temperature, timeoutMs, signal };
   if (providerCfg.type === "anthropic") return chatAnthropic(providerCfg, args);
   return chatOpenAI(providerCfg, args);
 }
@@ -481,6 +538,7 @@ module.exports = {
   migrateLegacyApiKey,
   ENC_PREFIX,
   ENCRYPT_FAILED,
+  MAX_RESPONSE_BYTES,
   // —— 单元测试注入点（仅测试调用，生产代码不要用）——
   __setSafeStorageStub(ss) {
     _safeStorageStub = ss || null;

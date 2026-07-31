@@ -8,14 +8,15 @@ const {
   createAchievementService,
 } = require("../src/service/achievement.js");
 
-// 构造可注入的服务实例：petInfo / 内存 store / 记录 setPetInfo 与 openSpeak 调用
-function makeService(petInfo) {
+// 构造可注入的服务实例：petInfo / sys 数据 / 内存 store / 记录 setPetInfo 与 openSpeak 调用
+function makeService(petInfo, sys = {}) {
   const calls = { setPetInfo: [], openSpeak: [] };
   const mem = { map: {} };
   const service = createAchievementService({
     getPetInfo: () => petInfo,
     setPetInfo: (d) => calls.setPetInfo.push(d),
     openSpeak: (opt) => calls.openSpeak.push(opt),
+    getSys: (name) => (name ? sys[name] : sys),
     store: {
       get: () => mem.map,
       set: (m) => {
@@ -114,15 +115,29 @@ test("小富翁：yb 10000 边界", () => {
   assert.equal(newly[0].id, "rich");
 });
 
-test("签到达人：signin 缺失不报错，streak 7 边界", () => {
+// 签到状态的权威存储是 sys.signin（signIn.js 走 setSys；info.signin 不在 ini/pet.js 的
+// 默认 info 表里，会被 setPetInfo 静默丢弃）。原用例直接注入 info.signin，这个前置条件
+// 生产环境永远不成立 —— 属于假绿测试，这里改成经 getSys 的真实链路。
+// 端到端链路（signIn.doSignIn -> sys.signin -> 成就解锁）另见 test/achievementSignin.test.js。
+test("签到达人：streak 取自 sys.signin，7 天边界", () => {
+  // 无签到记录：不报错也不解锁
   let r = makeService(pet());
   assert.deepEqual(r.service.check("signin"), []);
-  r = makeService(pet({ info: { signin: { streak: 6 } } }));
+  // 连签 6 天：不解锁
+  r = makeService(pet(), { signin: { streak: 6 } });
   assert.deepEqual(r.service.check("signin"), []);
-  r = makeService(pet({ info: { signin: { streak: 7 } } }));
+  // 连签 7 天：解锁
+  r = makeService(pet(), { signin: { streak: 7 } });
   const newly = r.service.check("signin");
   assert.equal(newly.length, 1);
   assert.equal(newly[0].id, "signMaster");
+});
+
+test("签到达人：只写 info.signin（会被 setPetInfo 丢弃的那条路）不足以解锁", () => {
+  // 防回归：不允许再退回「读 petInfo.info.signin 就算达成」的假绿实现。
+  // 注意 achievement.js 保留了 info.signin 前向兜底，所以这里必须两处都为空才断言不解锁。
+  const r = makeService(pet(), {});
+  assert.deepEqual(r.service.check("signin"), []);
 });
 
 test("忠实陪伴：onLineTime 单位为分钟，100 小时 = 6000 分钟", () => {

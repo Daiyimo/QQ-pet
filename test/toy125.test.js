@@ -92,11 +92,17 @@ test("ini/pet.js：默认背包 cache 含 toy 类", () => {
   );
 });
 
-test("State.js：useConsumables 补 toy 分支，mood 按条目值结算、上限 1000", () => {
+test("State.js：useConsumables 补 toy 分支，mood 按条目值结算、按 maxInfo.mood 钳制", () => {
   const src = readSource("src/windows/util/pet/State.js");
+  // 原断言快照了硬编码上限 `r>1e3?1e3:r`；上限已改为按 maxInfo.mood 钳制
+  // （缺省回落 1000），这里只校验「有 toy 分支」+「用 maxInfo.mood 做上限」两个意图。
   assert.ok(
-    src.includes('if("toy"==t.type){let r=isNumber(e.info.mood)+(+t.mood||0);l.info||(l.info={}),l.info.mood=r>1e3?1e3:r}'),
+    src.includes('if("toy"==t.type){let M=+e.maxInfo?.mood||1e3,r=isNumber(e.info.mood)+(+t.mood||0);'),
     "useConsumables 应有 toy mood 结算分支"
+  );
+  assert.ok(
+    src.includes("l.info.mood=r>M?M:r"),
+    "toy 的 mood 应钳到 maxInfo.mood 而不是硬编码 1000"
   );
   assert.ok(
     src.includes('"food"!=t.type&&"commodity"!=t.type&&"toy"!=t.type||'),

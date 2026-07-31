@@ -1,5 +1,7 @@
 let saveOpt = {},
   saveTime = null;
+// 饲料单价（元宝）。使用饲料必须先校验余额，否则元宝会被扣成负数。
+const FEED_COST_YB = 5;
 // 设置键值对到 Cookie 中，过期时间为 1 年
 function setCookie(key, value, save) {
   const now = new Date();
@@ -15,15 +17,51 @@ function setCookie(key, value, save) {
     //加入需要保存的数据
     saveOpt[key] = value + "";
     saveTime = setTimeout(() => {
-      console.log("saveOpt", saveOpt);
-      if (!saveInfoData) {
-        return;
-      }
-      // 保存
-      saveInfoData && saveInfoData(JSON.parse(JSON.stringify(saveOpt)));
-      saveOpt = {};
+      flushSaveOpt();
     }, 500);
   }
+}
+
+// 把攒着的改动立即回写主进程。
+// 关窗前必须调一次：500ms 防抖期内关闭窗口会连同定时器一起销毁，收获到的元宝与被摘掉的鱼
+// 都不会落盘，重开窗口时又会用主进程里的旧数据重新种 cookie —— 等于可以反复收获同一条鱼。
+function flushSaveOpt() {
+  if (saveTime) {
+    clearTimeout(saveTime);
+    saveTime = null;
+  }
+  if (!Object.keys(saveOpt).length) return false;
+  if (typeof saveInfoData !== "function") {
+    console.error("[fishing] saveInfoData 不可用，本次改动无法落盘:", saveOpt);
+    return false;
+  }
+  const payload = JSON.parse(JSON.stringify(saveOpt));
+  saveOpt = {};
+  try {
+    saveInfoData(payload);
+  } catch (e) {
+    // 落盘失败要留痕并把数据放回待存队列，不能静默丢
+    saveOpt = { ...payload, ...saveOpt };
+    console.error("[fishing] saveInfoData 落盘失败:", (e && e.stack) || e);
+    return false;
+  }
+  return true;
+}
+
+// 鱼苗实付价：粉钻生效时 8 折，取整口径与商城 pinkDiamondShop.applyPinkDiamondPrice
+// 一致（Math.round(price*0.8)）。展示（case 3）与扣费（case 4）都必须走这里 ——
+// 原实现展示价写死 `price_yb / 0.8`（放大 1.25 倍）且不看 isvip，与实付价对不上账。
+function fryFinalPrice(fish) {
+  const price = +(fish && fish.price_yb) || 0;
+  if (!(price > 0)) return price;
+  return +getCookie("isvip") === 1 ? Math.round(price * 0.8) : price;
+}
+
+// 兜底：窗口被系统关闭按钮/刷新销毁时也要落盘（close_game 只覆盖游戏内的关闭按钮）
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    flushSaveOpt();
+  });
 }
 
 // 从 Cookie 中读取键值对
@@ -831,6 +869,8 @@ window["PSW"] = {
 };
 window.close_game = function (e) {
   console.log("close_game", e);
+  // 关窗前先把 500ms 防抖里未落盘的改动同步写回，否则收获/扣费会丢（可反复收获同一条鱼）
+  flushSaveOpt();
   close_game && close_game();
 };
 
@@ -878,6 +918,13 @@ window.PETSendData = function (dataOl) {
       let PondFishes2 = getCookie("fishes") || "[]";
       PondFishes2 = JSON.parse(PondFishes2);
       let msg = 5;
+      // 余额校验必须在改动鱼的成长数据之前：否则元宝会被扣成负数并落盘
+      var ybFeed = Number(getCookie("yb"));
+      if (!(ybFeed >= FEED_COST_YB)) {
+        result.result = 1;
+        result.msg = "元宝不足!";
+        break;
+      }
       for (let k in PondFishes2) {
         if (PondFishes2[k].id == data.data.id) {
           //有
@@ -905,7 +952,7 @@ window.PETSendData = function (dataOl) {
       if (msg == 8) {
         //成功
         setCookie("fishes", JSON.stringify(PondFishes2), true);
-        setCookie("yb", Number(getCookie("yb")) - 5, true);
+        setCookie("yb", ybFeed - FEED_COST_YB, true);
         result.msg = "使用成功~";
         setTimeout(() => {
           getPetInfoAgain();
@@ -921,7 +968,7 @@ window.PETSendData = function (dataOl) {
       for (let k in shop) {
         s[k] = {
           ...shop[k],
-          price_yb: shop[k].price_yb / 0.8,
+          price_yb: fryFinalPrice(shop[k]),
         };
       }
       result.fries = s;
@@ -945,11 +992,13 @@ window.PETSendData = function (dataOl) {
         let PondFish4 = getCookie("fishes") || "[]";
         console.log("PondFish4", PondFish4);
         PondFish4 = JSON.parse(PondFish4);
+        // 展示价（case 3）与实付价必须同源，否则粉钻 8 折在钓鱼商店对不上账
+        var fryPrice = fryFinalPrice(fish);
         // console.log("yb", yb, fish, data, PondFish4);
         if (PondFish4.length >= 5) {
           result.result = 5;
           result.msg = "已经满了";
-        } else if (yb < fish.price_yb) {
+        } else if (yb < fryPrice) {
           result.result = 1;
           result.msg = "元宝不足!";
         } else {
@@ -962,7 +1011,7 @@ window.PETSendData = function (dataOl) {
             stage: 1,
             time: 0,
             interval: fish.interval,
-            costyb: fish.price_yb,
+            costyb: fryPrice,
             YB: fish.sell_price,
             quantity: fish.quantity,
             basequantity: fish.quantity,
@@ -976,7 +1025,7 @@ window.PETSendData = function (dataOl) {
             siLiao: 0, //累计当前阶段使用饲料情况。每个饲料减少1个小时成长时间
           });
           setCookie("fishes", JSON.stringify(PondFish4), true);
-          setCookie("yb", Number(yb) - Number(fish.price_yb), true);
+          setCookie("yb", yb - fryPrice, true);
         }
       } else {
         // paytype == 2  Q币购买, paytype == 3 Q点购买

@@ -1,3 +1,6 @@
+// 宠物等级上限（README：「等级上限 400 级」）。levels 表末尾的哨兵项不参与等级匹配。
+const LEVEL_CAP = 400;
+
 class LevelFn {
   levels = [
     0, 100, 300, 600, 1100, 1800, 2800, 4200, 5900, 8000, 10600, 13700, 17400,
@@ -58,6 +61,10 @@ class LevelFn {
   ];
   level = 1;
   constructor() {}
+  // 成长值 -> 等级。等级 k 对应区间 [levels[k-1], levels[k])。
+  // 上限 400 级（README「等级上限 400 级」），levels 表末尾多出的哨兵项不参与匹配。
+  // 注意：level 必须是局部量——本类是模块级单例（下方 const Level），若把中间结果写回
+  // this.level 再读出来，未匹配分支会把上一次调用的等级泄漏给下一次调用者。
   getNowLevel(growth) {
     if (!growth || +growth != +growth)
       return {
@@ -66,18 +73,26 @@ class LevelFn {
         level: 1,
       };
     growth = +growth;
+    const maxLevel = Math.min(LEVEL_CAP, this.levels.length - 1);
     let result = [];
-    for (let k = 1; k <= 400; k++) {
+    let level = 1;
+    for (let k = 1; k <= maxLevel; k++) {
       if (growth >= this.levels[k - 1] && growth < this.levels[k]) {
         result = [this.levels[k - 1], this.levels[k]];
-        this.level = k;
+        level = k;
         break;
       }
     }
+    // 成长值已达/超过封顶阈值：显式返回顶级，不能落回默认值或上次调用的残留值
+    if (result.length === 0) {
+      result = [this.levels[maxLevel - 1], this.levels[maxLevel]];
+      level = maxLevel;
+    }
+    this.level = level;
     return {
       upGrowth: result[0],
       nextGrowth: result[1],
-      level: this.level,
+      level,
     };
   }
 }
@@ -86,7 +101,13 @@ const Level = new LevelFn();
 //粉钻成长值
 class pinkDiamondFn {
   levels = [0, 100, 300, 600, 1100, 1800, 2800];
+  // 与 LevelFn 对齐：必须有初值，否则首次以「成长值已封顶」调用时返回 undefined，
+  // 会经 toChangeOtherDatas 变成 NaN 写进钓鱼次数。
+  level = 1;
   constructor() {}
+  // 粉钻等级 1~7：等级 k 对应 [levels[k-1], levels[k])，顶级 7 为开区间 [2800, +∞)。
+  // 原实现循环到 k<=7 时要比较 levels[7]（undefined），恒不成立，导致 7 级不可达且
+  // growth>=2800 时返回 this.level 的残留值/undefined。
   getNowLevel(growth) {
     if (!growth || +growth != +growth)
       return {
@@ -95,18 +116,28 @@ class pinkDiamondFn {
         level: 1,
       };
     growth = +growth;
+    const topLevel = this.levels.length; // 7：最高一级没有上界阈值
     let result = [];
-    for (let k = 1; k <= 7; k++) {
+    let level = 1;
+    for (let k = 1; k < topLevel; k++) {
       if (growth >= this.levels[k - 1] && growth < this.levels[k]) {
         result = [this.levels[k - 1], this.levels[k]];
-        this.level = k;
+        level = k;
         break;
       }
     }
+    // growth >= levels[最后一项] -> 顶级。沿用主表封顶口径：返回最后一段区间，
+    // 让进度条显示为「该段已满」，而不是 0/undefined（后者会让调用方的
+    // `nextGrowth || 100` 兜底把下一档阈值错显成 100）。
+    if (result.length === 0) {
+      result = [this.levels[topLevel - 2], this.levels[topLevel - 1]];
+      level = topLevel;
+    }
+    this.level = level;
     return {
       upGrowth: result[0],
       nextGrowth: result[1],
-      level: this.level,
+      level,
     };
   }
   hour = 1000 * 60 * 60 * 24;
@@ -156,19 +187,21 @@ class pinkDiamondFn {
   toChangeOtherDatas(pinkDiamondOPt) {
     //重置🐟
     let fishing = {};
-    if (pinkDiamondOPt.pinkDiamond) {
-      //有粉钻
-      fishing.allvipcnt = pinkDiamondOPt.pinkDiamondLevel * 2;
-      fishing.canusecnt = fishing.allvipcnt;
-    } else {
-      //无
-      fishing.allvipcnt = pinkDiamondOPt.pinkDiamondLevel * 2;
-      fishing.canusecnt = 0;
-    }
+    // 等级缺失/非数字一律按 0 计，避免 undefined*2 = NaN 写进钓鱼次数
+    let level = +pinkDiamondOPt.pinkDiamondLevel;
+    if (!Number.isFinite(level) || level < 0) level = 0;
+    fishing.allvipcnt = level * 2;
+    // 有粉钻才给可用次数，无粉钻恒为 0
+    fishing.canusecnt = pinkDiamondOPt.pinkDiamond ? fishing.allvipcnt : 0;
     return { fishing };
   }
 }
 const pinkDiamondLevel = new pinkDiamondFn();
 try {
   if (module) module.exports = { Level, pinkDiamondLevel };
-} catch (error) {}
+} catch (error) {
+  // 渲染层普通 script 环境没有 module，这是预期分支；其余异常必须留痕
+  if (!/module is not defined/.test(String(error && error.message))) {
+    console.error("[level] 导出失败:", (error && error.stack) || error);
+  }
+}

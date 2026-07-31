@@ -68,7 +68,9 @@ function readState() {
       }
       return emptyState();
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error("[signIn] readState 读取失败，回退内存态:", (e && e.stack) || e);
+  }
   return memoryState || emptyState();
 }
 
@@ -186,7 +188,9 @@ function celebrate(streak, rewards) {
       active: "speak",
       nextActiveStr: "speak",
     });
-  } catch (e) {}
+  } catch (e) {
+    console.error("[signIn] celebrate 气泡失败:", (e && e.stack) || e);
+  }
 }
 
 module.exports = {

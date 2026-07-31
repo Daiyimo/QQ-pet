@@ -56,6 +56,10 @@ const REWARD_MOOD = 50; // 回家奖励：心情
 const REWARD_YB = 15; // 回家奖励：元宝
 
 // 前置校验：状态位 -> 拒绝文案（[host] 为气泡占位符，与既有 openSpeak 习惯一致）
+// 关于 die：全库没有任何代码给 activeOption.die 赋真值，死亡态实际存放在 activeOption.ill
+// （其 type === "dead"，见 State.js 的病情链末端）。这里两者都拦：
+//   - ill.type === "dead" 是真正生效的死亡判定（下面 DEAD_TEXT 分支）；
+//   - die 保留为防御性校验，万一将来有代码开始写这个字段也不会漏判。
 const BLOCKERS = [
   ["die", "[host]……先把我救活，才能去旅游呀"],
   ["ill", "[host]，我生病了，等我病好了再去旅游吧~"],
@@ -63,6 +67,9 @@ const BLOCKERS = [
   ["study", "[host]，我正在学习呢，结束后再去吧~"],
   ["trip", "[host]，我已经在旅途中啦~"],
 ];
+
+// 死亡态专用文案（activeOption.ill.type === "dead"）
+const DEAD_TEXT = "[host]……先把我救活，才能去旅游呀";
 
 class TravelService {
   // deps 全部可选，缺省走全局：{ now, random, setTimeout, clearTimeout, getPetInfo, setPetInfo, openSpeak, mainWindow, store, achievementService }
@@ -73,9 +80,15 @@ class TravelService {
     this.finishTimer = null; // 回家定时器
     this.hideTimer = null; // exit 动画后隐藏窗口的定时器
     this.inited = false;
+    this.saveDirty = false; // 上次收集进度落盘是否失败（失败则下次结算时重试）
   }
 
   // ---- 依赖解析（注入优先，否则取全局）----
+  // 统一的异常留痕：本服务的依赖大多是可选全局（Electron 主窗口 / $Store / openSpeak），
+  // 缺失时降级是预期行为，但**异常必须留完整堆栈**，不能裸吞（规范铁律 3）。
+  _warn(where, e) {
+    console.error(`[travel] ${where} 失败:`, (e && e.stack) || e);
+  }
   _now() {
     return this.deps.now ? this.deps.now() : Date.now();
   }
@@ -93,6 +106,7 @@ class TravelService {
     try {
       return fn ? fn() || {} : {};
     } catch (e) {
+      this._warn("_getPetInfo", e);
       return {};
     }
   }
@@ -101,7 +115,9 @@ class TravelService {
     if (fn)
       try {
         fn(payload);
-      } catch (e) {}
+      } catch (e) {
+        this._warn("_setPetInfo", e);
+      }
   }
   _openSpeak(text) {
     const fn = this.deps.openSpeak || global.openSpeak;
@@ -112,7 +128,9 @@ class TravelService {
           active: "speak",
           nextActiveStr: "speak",
         });
-      } catch (e) {}
+      } catch (e) {
+        this._warn("_openSpeak", e);
+      }
   }
   _store() {
     return this.deps.store !== undefined ? this.deps.store : global.$Store;
@@ -123,6 +141,7 @@ class TravelService {
     try {
       return _require("../windows/main/main.js");
     } catch (e) {
+      this._warn("_mainWindow 加载", e);
       return null;
     }
   }
@@ -135,7 +154,9 @@ class TravelService {
       if (mw && mw.window && mw.window.webContents) {
         mw.window.webContents.send("main_bus-html_active", { active });
       }
-    } catch (e) {}
+    } catch (e) {
+      this._warn("_playActive", e);
+    }
   }
   _hideMain() {
     try {
@@ -144,7 +165,9 @@ class TravelService {
         mw.window.hide();
         mw.show = false;
       }
-    } catch (e) {}
+    } catch (e) {
+      this._warn("_hideMain", e);
+    }
   }
   _showMain() {
     try {
@@ -153,7 +176,9 @@ class TravelService {
         mw.window.show();
         mw.show = true;
       }
-    } catch (e) {}
+    } catch (e) {
+      this._warn("_showMain", e);
+    }
   }
 
   // ---- 收集进度持久化 ----
@@ -171,7 +196,9 @@ class TravelService {
         this.collected = list.filter((id) => PROVINCES.some((p) => p.id === id));
         return;
       }
-    } catch (e) {}
+    } catch (e) {
+      this._warn("_loadCollected 读 $Store", e);
+    }
     try {
       const info = this._getPetInfo().info || {};
       if (Array.isArray(info.travel_china)) {
@@ -179,22 +206,35 @@ class TravelService {
           PROVINCES.some((p) => p.id === id),
         );
       }
-    } catch (e) {}
+    } catch (e) {
+      this._warn("_loadCollected 读宠物档案", e);
+    }
   }
+  // 落盘收集进度。返回是否成功写入权威存储（$Store）——失败时**不能当成功处理**，
+  // 置 dirty 标志供下次 finishTravel 重试，且必须留堆栈（收集进度静默丢失会让
+  // 「环游中国」成就永远不解锁且无任何线索）。
   _saveCollected() {
+    let ok = false;
     try {
       const store = this._store();
       if (store && store.setItem) {
         store.setItem(STORE_KEY, { collected: this.collected.slice() });
+        ok = true;
+      } else {
+        console.error("[travel] _saveCollected 失败: $Store 不可用，收集进度未落盘");
       }
-    } catch (e) {}
-    // 同步进宠物档案（info 模型需含 travel_china/travel_china_num 键才会真正落盘，见文件头注释）
+    } catch (e) {
+      this._warn("_saveCollected 写 $Store", e);
+    }
+    this.saveDirty = !ok;
+    // 同步进宠物档案（info.travel_china / travel_china_num 已在 ini/pet.js 默认表内）
     this._setPetInfo({
       info: {
         travel_china: this.collected.slice(),
         travel_china_num: this.collected.length,
       },
     });
+    return ok;
   }
 
   _clearTimers() {
@@ -236,11 +276,13 @@ class TravelService {
   startTravel() {
     const petInfo = this._getPetInfo();
     const activeOption = petInfo.activeOption || {};
-    // 前置校验：有 ill/die/work/study/trip 任一状态则拒绝
+    // 前置校验：有 ill/work/study/trip 任一状态则拒绝。死亡态存放在 activeOption.ill
+    // （type === "dead"），单独给文案。
     for (const [key, text] of BLOCKERS) {
       if (activeOption[key]) {
-        this._openSpeak(text);
-        return { ok: false, reason: key };
+        const dead = key === "ill" && activeOption.ill && activeOption.ill.type === "dead";
+        this._openSpeak(dead ? DEAD_TEXT : text);
+        return { ok: false, reason: dead ? "die" : key };
       }
     }
     // 随机选一个未收集的省份；全收集后随机任意省份
@@ -285,6 +327,10 @@ class TravelService {
       this.collected.push(province.id);
     }
     this._saveCollected();
+    // 落盘失败不静默：进度只在内存里，重启会丢，必须让用户/日志看得到
+    if (this.saveDirty) {
+      this._openSpeak("[host]，我回来了，但纪念品好像没收好……（收集进度保存失败）");
+    }
     // 清除 activeOption.trip
     this._clearTripState();
     // 奖励：mood +50（上限按 maxInfo.mood，缺省 1000）、yb +15
@@ -311,7 +357,9 @@ class TravelService {
     if (ach && typeof ach.check === "function") {
       try {
         ach.check("travel");
-      } catch (e) {}
+      } catch (e) {
+        this._warn("成就联动 check(travel)", e);
+      }
     }
     return { ok: true, province, collected: this.collected.length };
   }

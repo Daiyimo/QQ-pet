@@ -82,8 +82,10 @@ const ACHIEVEMENTS = [
     name: "签到达人",
     desc: "连续签到 7 天",
     icon: "📅",
-    // info.signin.streak 由签到系统写入，缺失不报错
-    check: (p) => num(p && p.info && p.info.signin && p.info.signin.streak) >= 7,
+    // 签到状态的权威存储是 sys.signin（src/service/signIn.js 头注释：info.signin 不在
+    // ini/pet.js 的默认 info 表里，会被 setPetInfo 静默丢弃），所以这里读 ctx.signinStreak，
+    // 由 readSigninStreak() 从 getSys("signin") 取，petInfo.info.signin 仅作前向兜底。
+    check: (p, ctx) => num(ctx && ctx.signinStreak) >= 7,
   },
   {
     id: "online100",
@@ -103,6 +105,7 @@ function defView(def) {
 //   getPetInfo() -> petInfo
 //   setPetInfo(data)
 //   openSpeak(opt)            庆祝气泡
+//   getSys(name) -> value     系统数据（签到状态存这里，见 signIn.js）
 //   store: { get() -> map, set(map) }   兜底持久化（默认走 global.$Store）
 function createAchievementService(deps = {}) {
   const getPetInfoFn =
@@ -113,6 +116,9 @@ function createAchievementService(deps = {}) {
     ((d) => {
       if (typeof globalThis.setPetInfo === "function") globalThis.setPetInfo(d);
     });
+  const getSysFn =
+    deps.getSys ||
+    ((name) => (typeof globalThis.getSys === "function" ? globalThis.getSys(name) : undefined));
   const speakFn =
     deps.openSpeak ||
     ((opt) => {
@@ -135,14 +141,19 @@ function createAchievementService(deps = {}) {
     return map;
   }
 
-  // 持久化已解锁表（双写，见文件头说明）
+  // 持久化已解锁表（双写，见文件头说明）。两路都失败时成就会在下次 check 重新解锁并重复庆祝，
+  // 所以失败必须留完整堆栈。
   function persist(map) {
     try {
       setPetInfoFn({ info: { achievements: map } });
-    } catch (e) {}
+    } catch (e) {
+      console.error("[achievement] 写入 petInfo.info.achievements 失败:", (e && e.stack) || e);
+    }
     try {
       store.set(map);
-    } catch (e) {}
+    } catch (e) {
+      console.error("[achievement] 写入 $Store.achievements 失败:", (e && e.stack) || e);
+    }
   }
 
   // 庆祝气泡：成就达成：xxx
@@ -157,7 +168,32 @@ function createAchievementService(deps = {}) {
         active: "speak",
         nextActiveStr: "speak",
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error("[achievement] 庆祝气泡失败:", (e && e.stack) || e);
+    }
+  }
+
+  // 读取连续签到天数：权威来源是 sys.signin.streak（signIn.js 的 writeState）；
+  // 若将来 ini/pet.js 把 signin 加进默认 info 表，petInfo.info.signin 作为兜底也能用。
+  function readSigninStreak(petInfo) {
+    let streak = 0;
+    try {
+      const s = getSysFn("signin");
+      if (s && typeof s === "object") streak = num(s.streak);
+    } catch (e) {
+      console.error("[achievement] 读取 sys.signin 失败:", (e && e.stack) || e);
+    }
+    const fromInfo = petInfo && petInfo.info && petInfo.info.signin;
+    if (fromInfo && typeof fromInfo === "object") {
+      streak = Math.max(streak, num(fromInfo.streak));
+    }
+    return streak;
+  }
+
+  // 判定上下文：petInfo 之外的数据源（目前只有签到状态）统一从这里取，
+  // 保证 check / getAll 两条路径口径一致。
+  function buildContext(petInfo) {
+    return { signinStreak: readSigninStreak(petInfo) };
   }
 
   // 遍历全部定义，对新达成的成就执行解锁（写存储 + 庆祝气泡）。
@@ -167,14 +203,17 @@ function createAchievementService(deps = {}) {
   function check(trigger) {
     const petInfo = getPetInfoFn() || {};
     const unlockedMap = loadUnlocked(petInfo);
+    const ctx = buildContext(petInfo);
     const newly = [];
     for (const def of ACHIEVEMENTS) {
       if (unlockedMap[def.id]) continue; // 已解锁，跳过（幂等）
       let ok = false;
       try {
-        ok = !!def.check(petInfo);
+        ok = !!def.check(petInfo, ctx);
       } catch (e) {
-        ok = false; // 单个判定异常不影响其它成就
+        // 单个判定异常不影响其它成就，但必须留完整堆栈
+        console.error(`[achievement] 成就 ${def.id} 判定异常:`, (e && e.stack) || e);
+        ok = false;
       }
       if (!ok) continue;
       const at = new Date().toISOString();

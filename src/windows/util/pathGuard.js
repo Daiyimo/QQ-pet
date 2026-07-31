@@ -16,8 +16,14 @@
  * - Windows 文件系统大小写不敏感（本项目仅打包 win），默认按不敏感比较，
  *   否则 `.../actionnew/x` 这类合法路径会被误拒；可用 caseInsensitive 显式覆盖（便于测试）。
  * - NUL 字节直接拒绝：fs.* 遇到会抛 ERR_INVALID_ARG_VALUE，且常见于路径截断绕过。
+ * - **符号链接 / NTFS junction 复核**：纯字符串前缀校验挡不住 `ActionNew\evil -> C:\`
+ *   这类链接（resolve 后仍在 root 之内，但真实目标在外）。因此 resolveInsideDir 在
+ *   前缀校验通过后，再对 root 与 target 做 realpath（路径不存在时逐级回退到最近存在的
+ *   祖先，再把剩余片段拼回）后重新校验一次。isInsideDir 保持纯字符串语义不变，
+ *   供只做词法判断的调用方使用。
  */
 const path = require("path");
+const fs = require("fs");
 
 /** 皮肤资源根目录（相对 src/windows/main/ 即 preload 所在目录） */
 const SKIN_ASSETS_ROOT_REL = "../../assets/ActionNew";
@@ -36,7 +42,43 @@ function stripTrailingSep(p) {
 }
 
 /**
+ * 尽力而为的 realpath：解析符号链接 / junction。
+ * 目标路径可能还不存在（皮肤包缺文件是常态），因此逐级回退到最近存在的祖先做 realpath，
+ * 再把剩余片段拼回——这样"父目录是 junction"这种绕过依然能被识别。
+ * @param {string} p
+ * @returns {string} 解析后的绝对路径；完全无法解析时退回 path.resolve(p)
+ */
+function realpathBestEffort(p) {
+  const resolved = path.resolve(p);
+  let current = resolved;
+  const rest = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native(current);
+      return rest.length ? path.join(real, ...rest) : real;
+    } catch (e) {
+      // 路径（或其祖先）尚不存在：往上退一级继续找
+      if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) {
+        const parent = path.dirname(current);
+        if (parent === current) return resolved; // 已到根仍不存在，按原路径处理
+        rest.unshift(path.basename(current));
+        current = parent;
+        continue;
+      }
+      // 权限（EACCES/EPERM）等意外错误：不能静默吞，记完整堆栈后按原路径交给前缀校验
+      console.error(
+        "[pathGuard] realpath 解析失败，本次按原始路径校验:",
+        resolved,
+        e && e.stack ? e.stack : e
+      );
+      return resolved;
+    }
+  }
+}
+
+/**
  * 判断 targetPath 是否位于 rootDir 之内（含等于 rootDir 本身）。
+ * 纯字符串语义：不解析符号链接（链接复核在 resolveInsideDir 里做）。
  * @param {string} rootDir 白名单根目录
  * @param {string} targetPath 待校验路径
  * @param {{caseInsensitive?:boolean}} [options]
@@ -55,10 +97,13 @@ function isInsideDir(rootDir, targetPath, options = {}) {
 
 /**
  * 把 segments 解析为 rootDir 下的绝对路径；越界或非法输入返回 null。
+ * 两道校验：① 词法前缀校验（挡 `..` 与绝对路径覆盖）；
+ *          ② realpath 复核（挡符号链接 / NTFS junction 指向 root 之外）。
  * @param {string} rootDir 白名单根目录
  * @param {string[]} segments 不可信路径片段（皮肤名 / Config.xml 中的相对文件名等）
- * @param {{caseInsensitive?:boolean}} [options]
- * @returns {string|null} 绝对路径，或 null 表示拒绝
+ * @param {{caseInsensitive?:boolean, followSymlinks?:boolean}} [options]
+ *        followSymlinks 默认 true；仅在需要纯词法判断（如自测）时显式关掉。
+ * @returns {string|null} 绝对路径（未解析链接的词法路径），或 null 表示拒绝
  */
 function resolveInsideDir(rootDir, segments, options = {}) {
   if (isBadString(rootDir)) return null;
@@ -68,7 +113,19 @@ function resolveInsideDir(rootDir, segments, options = {}) {
     if (isBadString(s)) return null;
   }
   const target = path.resolve(rootDir, ...parts);
-  return isInsideDir(rootDir, target, options) ? target : null;
+  if (!isInsideDir(rootDir, target, options)) return null;
+  if (options.followSymlinks === false) return target;
+  // 链接复核：root 与 target 都解析真实路径后必须仍满足包含关系
+  const realRoot = realpathBestEffort(rootDir);
+  const realTarget = realpathBestEffort(target);
+  if (!isInsideDir(realRoot, realTarget, options)) {
+    console.error(
+      "[pathGuard] 拒绝：路径经符号链接/junction 解析后越出白名单根目录",
+      JSON.stringify({ root: rootDir, target, realRoot, realTarget })
+    );
+    return null;
+  }
+  return target;
 }
 
-module.exports = { SKIN_ASSETS_ROOT_REL, isInsideDir, resolveInsideDir };
+module.exports = { SKIN_ASSETS_ROOT_REL, isInsideDir, resolveInsideDir, realpathBestEffort };

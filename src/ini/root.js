@@ -1,4 +1,52 @@
 const _require = eval("require");
+
+// 端口被占用（EADDRINUSE）时最多再试几个相邻端口。
+// 依据：只需躲开"上次进程残留 / 其他软件恰好占了 33385"这类冲突，
+// 试 5 个端口足够；再多只会拖长用户点按到窗口出现的等待。
+const LISTEN_MAX_ATTEMPTS = 5;
+
+/**
+ * 带 error 处理与端口自增重试的 listen。
+ *
+ * 背景（本次修复的缺陷）：原实现三处 `app.listen(port, host, cb)` 都只传成功回调，
+ * 没有 server.on("error")。EADDRINUSE 通过 'error' 事件抛出，会落到 main.js 的
+ * uncaughtException（设计上只记日志不退出），于是成功回调永不执行——
+ * 用户点"池塘 / 游戏 / 密室"时窗口永远不出现，且没有任何提示。
+ *
+ * @param {object} expressApp express 实例
+ * @param {number|string} basePort 起始端口
+ * @param {string} host 绑定地址（本项目恒为 127.0.0.1）
+ * @param {Function} onListening (server) => void 绑定成功
+ * @param {Function} onGiveUp    (error) => void  全部端口失败，调用方必须降级
+ */
+const listenWithRetry = (expressApp, basePort, host, onListening, onGiveUp) => {
+  const start = Number(basePort);
+  const tryPort = (port, attempt) => {
+    let settled = false;
+    const server = expressApp.listen(port, host, function () {
+      if (settled) return;
+      settled = true;
+      onListening(server);
+    });
+    // listen 失败只会通过 'error' 事件暴露，必须挂监听，否则直接变未捕获异常
+    server.on("error", function (error) {
+      if (settled) return;
+      settled = true;
+      console.error(
+        `[ini/root] 本机静态服务绑定 ${host}:${port} 失败（第 ${attempt}/${LISTEN_MAX_ATTEMPTS} 次尝试）:`,
+        error && error.stack ? error.stack : error
+      );
+      const canRetry = error && error.code === "EADDRINUSE" && attempt < LISTEN_MAX_ATTEMPTS;
+      if (canRetry) {
+        tryPort(port + 1, attempt + 1);
+        return;
+      }
+      onGiveUp(error);
+    });
+  };
+  tryPort(Number.isFinite(start) ? start : 33385, 1);
+};
+
 // 本机无法进行js与flash交互有安全机制问题， 通过开端口形式进行flash页面引入
 const createMain = (fn, post, ip, fileName, none) => {
   if (none) {
@@ -15,50 +63,25 @@ const createMain = (fn, post, ip, fileName, none) => {
   // fileName = 'u'
   let pattt = path.join(__dirname, "../../src");
   app.use("/" + fileName, express.static(pattt));
-  let aotuIp = getLocalIP();
   // 离线本地版：只绑定 127.0.0.1，不对局域网暴露 src/ 静态目录
-  var server = app.listen(post, ip || "127.0.0.1", function () {
-    var host = server.address().address;
-    var port = server.address().port;
-    fn(port, host, fileName);
-    console.log("express at http://%s:%s/%s", host, port, fileName);
-  });
-};
-
-let device = {};
-//本机websocket
-const openWS = (wsPopt) => {
-  let ws = _require("nodejs-websocket");
-  let server = ws.createServer(function (conn) {
-    conn.on("text", async function (data) {
-      // 接受客户端消息 并处理
-      //重写发送消息事件
-      conn.sendTextJson = (option) => {
-        try {
-          option = JSON.stringify(option);
-        } catch (error) {}
-        conn.sendText(option);
-      };
-      try {
-        data = JSON.parse(data);
-      } catch (e) {}
-      if (data.router == "joinDevice") {
-        device[data.name] = conn;
-      }
-      if (data.router == "setMsg") {
-        device[data.name].sendTextJson(data.data);
-      }
-    });
-    conn.on("close", function (code, reason) {
-      //code = 1001 reason= “”
-    });
-    conn.on("error", function (code, reason) {
-      //code= 报错信息，reason = undefined
-    });
-  });
-  server.listen(wsPopt, "127.0.0.1", function () {
-    console.log("websocket：" + wsPopt);
-  });
+  listenWithRetry(
+    app,
+    post,
+    ip || "127.0.0.1",
+    function (server) {
+      var host = server.address().address;
+      var port = server.address().port;
+      fn(port, host, fileName);
+      console.log("express at http://%s:%s/%s", host, port, fileName);
+    },
+    function () {
+      // 端口全被占用：把 null 交给调用方降级，不能让回调永不触发
+      console.error(
+        `[ini/root] 本机静态服务启动失败（${LISTEN_MAX_ATTEMPTS} 个端口均不可用），依赖它的窗口将无法加载`
+      );
+      fn(null, null, fileName);
+    }
+  );
 };
 
 function getLocalIP(fn) {
@@ -122,9 +145,13 @@ function getLocalIP(fn) {
   return ip;
 }
 
-try {
-  if (module) module.exports = { openWS, createMain };
-} catch (error) {}
+// openWS（nodejs-websocket 本机 ws 服务）已删除：全仓无任何调用点，属死代码，
+// 依赖 nodejs-websocket 也随之从 package.json 移除。
+// 用 typeof 判定替代原来的 `try{...}catch(error){}`：module 缺失是可预期分支，
+// 不该用裸 catch 表达（裸 catch 会顺手吞掉真正的赋值异常）。
+if (typeof module !== "undefined" && module) {
+  module.exports = { createMain, listenWithRetry, LISTEN_MAX_ATTEMPTS };
+}
 /**
  * 
 sad
@@ -228,6 +255,24 @@ let url = {
   port: "",
   fileName: "",
 };
+// 启动中的请求队列：绑定要等 listen 回调（失败还要重试相邻端口），
+// 期间用户可能连点多次「池塘 / 游戏 / 密室」。不排队的话每次点击都会新起一个
+// express 实例各自重试，端口越占越乱。
+let starting = false;
+let pending = [];
+const flushPending = (result) => {
+  const waiters = pending;
+  pending = [];
+  starting = false;
+  for (const waiter of waiters) {
+    try {
+      waiter(result);
+    } catch (e) {
+      // 单个调用方的回调抛错不能影响其他等待者，但必须留堆栈
+      console.error("[ini/root] openLocalHost 回调执行失败:", e && e.stack ? e.stack : e);
+    }
+  }
+};
 global.openLocalHost = (fn) => {
   if (!fn) {
     return;
@@ -236,6 +281,9 @@ global.openLocalHost = (fn) => {
     fn(url);
     return;
   }
+  pending.push(fn);
+  if (starting) return;
+  starting = true;
   const express = _require("express");
   const app = express();
   const path = _require("path");
@@ -247,18 +295,30 @@ global.openLocalHost = (fn) => {
   // fileName = 'u'
   let pattt = path.join(__dirname, "../../src");
   app.use("/" + fileName, express.static(pattt));
-  let aotuIp = getLocalIP();
   let post = "33385";
   // 离线本地版：只绑定 127.0.0.1
-  var server = app.listen(post, "127.0.0.1", function () {
-    var host = server.address().address;
-    var port = server.address().port;
-    url = {
-      host: host,
-      port: port,
-      fileName: fileName,
-    };
-    fn(url);
-    console.log("express at http://%s:%s/%s", host, port, fileName);
-  });
+  listenWithRetry(
+    app,
+    post,
+    "127.0.0.1",
+    function (server) {
+      var host = server.address().address;
+      var port = server.address().port;
+      url = {
+        host: host,
+        port: port,
+        fileName: fileName,
+      };
+      console.log("express at http://%s:%s/%s", host, port, fileName);
+      flushPending(url);
+    },
+    function () {
+      // 端口全占用：回调收到 null，调用方必须按"打不开"降级并提示用户，
+      // 绝不能像修复前那样让回调永不触发、窗口静默不出现。
+      console.error(
+        `[ini/root] 本机静态服务启动失败（33385 起 ${LISTEN_MAX_ATTEMPTS} 个端口均被占用），Flash/Ruffle 窗口无法加载`
+      );
+      flushPending(null);
+    }
+  );
 };

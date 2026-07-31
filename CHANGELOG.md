@@ -4,6 +4,74 @@
 
 版本号说明：跟随 QQ 宠物怀旧服的上游版本线命名。本项目 fork 自 [qqpet_automation](https://github.com/xuemian168/qqpet_automation)，来源与许可见 `NOTICE.md`。
 
+## [未发布]
+
+一轮全量源码审查后的集中修复。审查分五个域并行进行（主进程/IPC、宠物数值与经济、AI 服务层、渲染层、存储与测试），共确认约 50 项缺陷，本次修完其中全部代码类缺陷。新增 182 个测试（279 → 461），全绿。
+
+### 修复
+
+**数据安全**
+
+- **存档损坏会被整体清零**：`src/ini/store.js` 开着 electron-store 的 `clearInvalidConfig`，该选项语义是「读配置抛 `SyntaxError` 就把整个配置文件清空」，而这个 store 是宠物存档、系统设置、加密后的 API Key 的唯一载体。断电 / 磁盘满导致 `config-qq-local.json` 被截断时，下次启动即走「新宠物」分支，存档、成就、服务商配置全部消失，且日志里没有任何痕迹。现改为把损坏文件隔离为 `config-qq-local.corrupt-<时间戳>.json` 后再新建，用户可自行找回。
+- **背包可被 `splice(-1)` 损坏**：`Goods.useConsumables` 用渲染时的数量快照做精确串匹配定位道具，一旦背包在此期间变化（打工/学习结算发道具）就 `indexOf` 得 -1，`splice(-1)` 打在数组**最后一个元素**上——无关道具被整条替换或删除，而属性效果已经先结算完，界面还提示「使用成功」。现在结算属性**之前**先校验。
+- **买东西白扣元宝**：`Goods.buy` 先扣款、后入库，且 `toAddGoods` 的异常被自己吞掉、返回值无人检查。配合 `cleanOurStoreGoods` 漏掉 `background` 类目，买背景会扣钱、物品不进背包、还能重复购买。现改为先入库校验成功再扣款。
+- **道具可复制 / 钓鱼可无限刷元宝**：背包落盘有 1s 防抖、钓鱼存档有 500ms 防抖，而属性与元宝是同步落盘，且都没有退出前 flush。收获后立刻关窗重开，鱼还在。
+
+**安全**
+
+- **删除 `viewSwf` 工具窗与 `src/windows/util/file.js`**：其三个 IPC 通道把渲染层传来的任意路径直接交给 `fs.rename` / `readFileSync` / `readdir`，零校验，也没用上仓库里现成的 `pathGuard`。
+- **环境变量 `NODE_TOOL` 不过白名单**：其值被直接拼进 `require("./src/windows/tool/" + name + "/main.js")`。删除 viewSwf 后 `NODE_TOOL=viewSwf` 会 `MODULE_NOT_FOUND` 让桌宠崩在启动阶段；可控值则能加载任意本地 js。现 argv 与 env 统一走 `src/ini/toolResolver.js` 的白名单。
+- **API Key 随整个 sys 配置广播进渲染进程**：设置页广播只剔除了 `shortcuts`，`llmProviders` / `imageGenProvider` / `llmApiKey` 常驻渲染进程内存（safeStorage 不可用时其中是明文）。现按字段裁剪；渲染层本就不需要这些字段。
+- **`pathGuard` 可被 junction / 符号链接绕过**：只做 `path.resolve` + 前缀比较，无 `realpath` 复核。附带收益是同时归一化了 NTFS 8.3 短名。
+- 打工/学习二次确认无复检（TOCTOU）：确认期间宠物病死时，`doActive` 会无条件把 `activeOption.ill` 置 null，等于免费复活 + 免费治病，还会静默清掉进行中的旅行。
+
+**功能失效**
+
+- **桌面特效开启后点不动桌面**：`floatStyle` 的 mousemove 处理器里 `i||return8` 引用了一个未声明的标识符（本意是 `if(!i)return`），每次 mousemove 抛 `ReferenceError`，吞掉后面的穿透状态上报，全屏 overlay 持续吃掉鼠标事件。
+- **关闭屏幕感知后桌宠永久消失**：`stop()` 没有取消令牌，在途请求返回后照样 `emit pet-hide`，而恢复显示的 `_restoreFromGame` 已先执行过，此后没有任何代码会再 `show()`。同一根因还会把刚销毁的弹幕窗重新创建。
+- **感知开关反复切换会叠加定时链**，实测截屏频率从 3 次/秒升到 17 次/秒，直到再次关闭感知才恢复。
+- **本地服务端口被占用时窗口永远不出现**：`root.js` 三处 `listen` 都没挂 `error`，EADDRINUSE 只会抛成未捕获异常，池塘/钓鱼/密室的回调永不触发、零提示。现端口自增重试，全失败则让调用方降级并提示。
+- **「签到达人」成就永不解锁**：签到写 `sys.signin`（`signIn.js` 的注释明确说过 `info.signin` 会被 `setPetInfo` 丢弃），而成就读的正是 `p.info.signin`。此前测试因手工注入 `info.signin` 一直是绿的。
+- **本地模型接不上**：`providers.postJson` 硬编码 `https.request` + 端口 443，填 `http://127.0.0.1:11434/v1`（Ollama / LM Studio）必然失败，且只报 OpenSSL 底层错误。同项目的 `imageGen` 做对了协议分流。
+- **带跳转的网址一律白屏**：`urlWindow` 无条件 `preventDefault()` 所有 `will-redirect`，而渲染层收到新 URL 只更新地址栏、不重新导航。
+- **商城装扮页错版且翻页锁死**：背景名录预拉取用 `pageSize:20` 污染了背包缓存，20 个背景被挤进 2×3 网格。
+- **悬浮条不收起**：主窗口 blur 时 `changeState("hide")` 传的是字符串而实现读 `e.type`，实际走的是显示分支并下发 `type:undefined`；另一处 `"mainFocus"==x||"hide"==x&&doHide()` 因 `&&` 优先级高于 `||` 而恒为 no-op。
+- **贴边处单击/右键会误触发隐藏**：`onRelease` 只看 `isDown` 字段存在性，不看值也不看本次是否真的拖动过。
+- `Alt+Q` 截图在 Windows 上必抛 `ENOENT` 且把 `isPrintIng` 永久卡在 true（此后按键只打日志），`exit` 回调 `this` 丢失、成败判断还是反的。现按平台分支并补 `error` 监听。
+
+**数值**
+
+- 等级表封顶缺一档且未匹配时返回**实例残留的上次等级**（实测：先查 288 级，再查 6 亿成长值仍返回 288）。该缺陷在 `level.js` 与 `GrowUp.js` 内嵌的 webpack 副本里各有一份，成长主循环走的是后者，两处都已修。
+- 粉钻等级 7 不可达，成长值 ≥2800 时 `level` 为 `undefined`，`undefined*2 = NaN` 传进钓鱼一键成长次数。
+- 粉钻过期当天仍按生效发 VIP 次数（`toChangeOtherDatas` 拿的是结算**前**的旧对象）。
+- `getInterval` 的表里字面量键重复（`100`/`500`/`0` 各两次），「非数值」守卫被后者覆盖丢弃，老存档 health 为空时被当满健康按最高速率成长。
+- 病树下标错位：「吃太饱」取 `s[3]`（越界 `undefined`）使该致病路径整体失效；`getRandom(1,2)` 让咳嗽系病树永不可达，对应 4 种药成死道具。
+- `toAddGoods` 用 `indexOf` 前缀匹配，`_10001030` 永远进不了背包、数量加到 `_100010300` 头上。
+- 钓鱼「使用饲料」不校验余额，元宝可扣成负数并持久化；鱼苗商店展示价 `/0.8` 而扣费用原价（非粉钻用户看到的价是实付的 1.25 倍，粉钻 8 折在钓鱼里反而不生效）。
+- `getRandom` 用 `Math.round`，两端取值概率只有中间档的一半（实测 `getRandom(5,8)` → 16%/33%/33%/17%）。
+- `addPetInfo` 超上限时整条丢弃而非钳制，导致心情等奖励静默丢失。
+
+**可诊断性（项目铁律：异常不裸吞）**
+
+- 全仓 34 处空体 catch 补日志（按级别表：已知业务错误 `warn`、意外异常 `error` + 完整堆栈），降级行为一字未改。未动 12 处 webpack 双模加载探针。
+- LLM 全链路的 `.catch(()=>{})` 补堆栈：此前 Key 失效、欠费、返回非 JSON 全部无声，用户只看到兜底台词。
+- `dataWatcher` 四处静默吞异常补堆栈，`watcher.on("error", () => {})` 空实现改为带退避重建。另修 `app` 可用性判定——`require("electron")` 在非 Electron 运行时**能成功、只是 `app` 为 undefined**，只靠 `try/catch` 会漏。
+- `travel.js` 9 处、`signIn.js` 2 处裸 catch 补堆栈；`_saveCollected` 落盘失败不再当成功（此前旅行收集进度静默丢失，`travelChina` 成就永不解锁）。
+
+### 变更
+
+- LLM 的 JSON 解析两套标准收敛为 `src/service/llm/jsonParse.js`：`callLLM` 此前只去 ` ```json ` 围栏，模型在 JSON 前带一句解释就解析失败；感知侧的截断恢复行为保留。
+- `postJson` 响应体加 2 MiB 上限，并把字符串累加改为 Buffer 收集（原写法会把跨 chunk 的多字节汉字切成乱码）。
+- 弹幕补免打扰门禁（弹幕不走 `openSpeak`，此前绕过总开关）。
+- 皮肤 XML 解码先嗅探 BOM 与 `encoding` 声明，UTF-8 素材不再乱码。
+- 移除 `crypto-js` / `node-xlsx` / `nodejs-websocket` 三个零调用依赖及 `openWS` 死代码。`axios` 的 advisory 单独排期。
+
+### 测试
+
+- 279 → **461** 个测试，全绿。新增覆盖此前完全空白的领域：感知的 `start()`/`stop()` 生命周期、存档损坏隔离、`dataWatcher` 全部降级分支、端口重试、`pathGuard` 的符号链接绕过。
+- `test/edgeHide.smoke.js` 改名为 `edgeHide.test.js`：`npm test` 的 glob 是 `test/*.test.js`，该文件里的状态机断言从未被执行过（断言内容未改）。
+- 修掉 `test/achievement.test.js` 里一条假绿用例——它手工注入 `info.signin`，而该前置条件在生产环境永远不成立。
+
 ## [1.2.6] - 2026-07-29
 
 首个以 1.2.6 命名的版本。本次集中修复安全、隐私与稳定性问题（P0 级），不含新功能。

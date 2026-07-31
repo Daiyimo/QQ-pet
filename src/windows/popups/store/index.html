@@ -1,68 +1,233 @@
 <div id="appMain">
-  <div class="storeV2 notSelect">
-    <div class="sv2-head">
-      <div class="sv2-title">商城</div>
-      <div class="sv2-yb">
-        <span class="sv2-yb-icon">¥</span>
-        <span class="sv2-yb-num">{{petInfo?.info?.yb || 0}}</span>
-        <span class="sv2-yb-label">元宝</span>
-      </div>
-      <div class="sv2-close not_drag focusPress" @click="closeWindow">×</div>
-    </div>
-
-    <div class="sv2-body">
-      <div class="sv2-tabs not_drag">
-        <div
-          v-for="(tab, idx) in tabs"
-          :key="idx"
-          class="sv2-tab focusPress"
-          :class="{active: activeTab === tab.value}"
-          @click="switchTab(tab.value)"
-        >
-          {{tab.label}}
-        </div>
-      </div>
-
-      <div class="sv2-content">
-        <div v-if="loading" class="sv2-empty">加载中…</div>
-        <div v-else-if="error" class="sv2-empty">{{error}}</div>
-        <div v-else-if="filteredItems.length === 0" class="sv2-empty">
-          该分类暂无可购买商品<br/>
-          <small>（部分原版商品需通过任务/送礼获取）</small>
-        </div>
-        <div v-else class="sv2-grid not_drag">
-          <div
-            v-for="item in filteredItems"
-            :key="item.keyName"
-            class="sv2-card"
-          >
-            <div class="sv2-card-head">
-              <div class="sv2-card-icon">{{iconFor(item)}}</div>
-              <div class="sv2-card-name">{{item.name}}</div>
+  <div class="shoppingMall notSelect">
+    <div class="smWindow">
+      <!-- 左栏：官方 1.2.5 储物柜（我的背包）。四段贴图对齐官方 ShoppingMall 左半：
+           leftSelfHeadBk(mall_03.gif 选中物品展示 254) + leftSelfCenterBk(mall2_03.gif tab条 51)
+           + leftSelfGoodsBk(user_mallconbg.gif 2x3 背包格 247) + leftSelfFootBk(mall2_25.gif 元宝+分页 42) -->
+      <div class="leftSelf">
+        <!-- 上方：宠物状态展示区（对齐官方"此处展示宠物与状态"的定位） -->
+        <div class="leftSelfHeadBk por">
+          <div class="lsh_pet fc">
+            <img class="lsh_avatar" :src="petAvatar" alt="" draggable="false" />
+            <div class="lsh_petInfo">
+              <div class="lsh_petName toe">
+                {{petInfo?.info?.name || '小企鹅'}}<span class="lsh_lv">Lv.{{petInfo?.maxInfo?.level ?? 0}}</span><span v-if="pinkDiamond" class="smPdTag">粉钻</span>
+              </div>
+              <div class="lsh_host toe">{{petInfo?.info?.host || '主人'}} 的宠物 · {{petInfo?.info?.sex || 'GG'}}</div>
             </div>
-            <div class="sv2-card-body">
-              <div v-if="item.starve" class="sv2-attr">饥饿 +{{item.starve}}</div>
-              <div v-if="item.clean" class="sv2-attr">清洁 +{{item.clean}}</div>
-              <div v-if="item.intel" class="sv2-attr">智力 +{{item.intel}}</div>
-              <div v-if="item.charm" class="sv2-attr">魅力 +{{item.charm}}</div>
-              <div v-if="item.strong" class="sv2-attr">武力 +{{item.strong}}</div>
-              <div v-if="item.desc" class="sv2-desc">{{item.desc}}</div>
+            <!-- 当前背景：无背景时不显示任何图标（无背景 = 没有任何背景） -->
+            <div class="lsh_bg fcc" :title="currentBgName ? '当前背景：' + currentBgName : '当前无背景'">
+              <img v-if="currentBgImg" class="lsh_bgImg" :src="currentBgImg" alt="" draggable="false" />
+              <div class="lsh_bgName">{{currentBgName || '无背景'}}</div>
             </div>
-            <div class="sv2-card-foot">
-              <span class="sv2-price">¥ {{item.price}}</span>
-              <button
-                class="sv2-buy focusPress"
-                :disabled="(petInfo?.info?.yb || 0) < item.price"
-                @click="buy(item)"
-              >
-                购买
-              </button>
+          </div>
+          <div class="lsh_stats">
+            <div class="lsh_stat" v-for="st in petStats" :key="st.label">
+              <span class="lsh_statLabel">{{st.label}}</span>
+              <div class="lsh_bar por"><div class="lsh_barIn" :style="{width: st.pct + '%', background: st.color}"></div></div>
+              <span class="lsh_statVal">{{st.text}}</span>
             </div>
           </div>
         </div>
+
+        <!-- tab 条：喂养[食品/日用品/药品]、功能[玩具]、装扮[背景]（官方大 tab 82x27 贴图 + 通用子 tab） -->
+        <div class="leftSelfCenterBk">
+          <div class="lscb_top fc not_drag">
+            <div
+              v-for="mall in bagMalls"
+              :key="mall.value"
+              class="lscb_t_onve"
+              :class="[mall.cls, {active: activeBagMall === mall.value}]"
+              :title="mall.label"
+              @click="switchBagMall(mall.value)"
+            ></div>
+          </div>
+          <div class="lscb_dowm not_drag">
+            <div
+              v-for="tab in bagTabs"
+              :key="tab.value"
+              class="lscb_dowmOnce"
+              :class="{active: activeBagTab === tab.value}"
+              @click="switchBagTab(tab.value)"
+            >
+              <div class="lscb_dowmOnceText">{{tab.label}}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 物品网格：官方 selfGood(Card_Items.png) 2x3，每页 6 件 -->
+        <div class="leftSelfGoodsBk por">
+          <div v-if="bagLoading" class="lsEmpty">加载中…</div>
+          <div v-else-if="bagError" class="lsEmpty">{{bagError}}</div>
+          <div v-else-if="bagItems.length === 0" class="lsEmpty">储物柜空空的，去右边商城买点吧~</div>
+          <div v-else class="selfGoodList fc">
+            <div
+              v-for="item in bagItems"
+              :key="item.keyName + '_' + item.num"
+              class="selfGood fc por"
+            >
+              <div class="selfGoodImgBox por">
+                <!-- 悬停浮层：属性 + 描述（官方 selfGoodImgBox:hover .goodFloatMsg） -->
+                <div class="goodFloatMsg">
+                  <div class="gfmName">{{item.name}}</div>
+                  <div v-for="(row, rIdx) in floatRows(item)" :key="rIdx" class="goodDatas">{{row}}</div>
+                </div>
+                <img class="selfGoodImg" :src="item.icon" :alt="item.name" draggable="false" @error="onIconError($event)" />
+              </div>
+              <div class="selfGoodinfo">
+                <div class="sg_name toe">{{item.name}}</div>
+                <div class="sg_num">{{activeBagTab === 'background' ? '已拥有' : '剩余：' + item.num}}</div>
+              </div>
+              <div
+                v-if="activeBagTab === 'background'"
+                class="selfGoodUse fcc not_drag"
+                :class="{sg_using: isCurBg(item.keyName)}"
+                :title="isCurBg(item.keyName) ? '当前使用中的背景' : '装备这个背景'"
+                @click.stop="useGood(item)"
+              >{{isCurBg(item.keyName) ? '使用中' : '装备'}}</div>
+              <div v-else class="selfGoodUse fcc not_drag" title="使用" @click.stop="useGood(item)">使用</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部：元宝 + 分页（mall2_25.gif 已烘焙 元宝:/箭头，透明覆盖层对位，悬停显示官方高亮贴图） -->
+        <div class="leftSelfFootBk por">
+          <div class="lsfb_yb wsnw">{{petInfo?.info?.yb || 0}}</div>
+          <div class="lsfb_paging fc not_drag">
+            <div class="lsfb_upMore" title="第一页" @click="bagGoto(1)"></div>
+            <div class="lsfb_up" title="上一页" @click="bagGoto(bagCurrent - 1)"></div>
+            <div class="lsfb_text tc">{{bagCurrent}}/{{bagTotal}}</div>
+            <div class="lsfb_down" title="下一页" @click="bagGoto(bagCurrent + 1)"></div>
+            <div class="lsfb_downMore" title="最后一页" @click="bagGoto(bagTotal)"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右栏：商城（原单栏内容整体右移，结构与贴图保持 1.2.5 复刻不变） -->
+      <div class="rightSelf">
+      <!-- 商品面板：官方 rt_bg_04.gif，8 个空卡槽 + 分页/购物车图形已烘焙在背景里 -->
+      <div class="rightSelfCenterBk">
+        <div v-if="loading" class="smEmpty">加载中…</div>
+        <div v-else-if="error" class="smEmpty">{{error}}</div>
+        <div v-else class="rGoodList fc">
+          <div
+            v-for="(item, idx) in items"
+            :key="item.keyName"
+            class="rGoods fC"
+            :title="item.pd && !pinkDiamond ? '无粉钻会员' : ''"
+          >
+            <div class="rG_title toe">{{item.name}}</div>
+            <div class="rG_body fc">
+              <div class="rG_leftImgBox">
+                <!-- 悬停浮层：属性 + 描述（官方 goodFloatMsg） -->
+                <div class="goodFloatMsg">
+                  <div class="gfmName">{{item.name}}</div>
+                  <div v-for="(row, rIdx) in floatRows(item)" :key="rIdx" class="goodDatas">{{row}}</div>
+                </div>
+                <div v-if="item.pd" class="PD" title="粉钻专属"></div>
+                <img
+                  class="rG_leftImg"
+                  :src="item.icon"
+                  :alt="item.name"
+                  draggable="false"
+                  @error="onIconError($event)"
+                />
+              </div>
+              <div class="rG_info fC">
+                <div class="rG_price wsnw">元宝：{{displayPrice(item)}}</div>
+              </div>
+            </div>
+            <div class="rG_foot fc not_drag">
+              <div class="rG_buts">等级 {{item.needLevel || 0}}</div>
+              <div class="rG_cart" title="加入购物车" @click="addToCart(item)"></div>
+              <div class="rG_pay" title="立即购买" @click="buyNow(item)"></div>
+            </div>
+          </div>
+          <!-- 空货位遮盖：rt_bg_04 面板烘焙了 8 个灰卡槽，不满页时会露出带假按钮的灰槽（像渲染坏了）。
+               用同色系浅色占位格盖住，读作"空货位"。格数 = 8 - 本页商品数，与商品卡同处 flex 网格自动对位。 -->
+          <div
+            v-for="n in Math.max(0, 8 - items.length)"
+            :key="'mask' + n"
+            class="rGoods rGoodsMask"
+          ></div>
+        </div>
+
+        <!-- 分页条：透明覆盖在背景烘焙的分页图标上，悬停显示官方高亮贴图 -->
+        <div class="rightSelfPaging fc not_drag">
+          <div class="rsfb_upMore" title="第一页" @click="gotoPage(1)"></div>
+          <div class="rsfb_up" title="上一页" @click="gotoPage(current - 1)"></div>
+          <div class="rsfb_text tc">{{current}}/{{total}}</div>
+          <div class="rsfb_down" title="下一页" @click="gotoPage(current + 1)"></div>
+          <div class="rsfb_downMore" title="最后一页" @click="gotoPage(total)"></div>
+          <div class="shoppingCart por" title="购物车" @click="openCart">
+            <div v-if="cartCount > 0" class="shoppingCartNum fcc">{{cartCount}}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 顶部：大区 tab（推荐/喂养/功能/装扮）+ 子类 tab，官方 Sale_Tag_BG 贴图 -->
+      <div class="rightSelfHead">
+        <div class="rscb_tabs fc not_drag">
+          <div
+            v-for="mall in malls"
+            :key="mall.value"
+            class="rscb_t_onve"
+            :class="[mall.cls, {active: activeMall === mall.value}]"
+            :title="mall.label"
+            @click="switchMall(mall.value)"
+          ></div>
+          <!-- 第 5 个烘焙空槽遮盖：Sale_Tag_BG 表头有 5 个 tab 位而本项目只有 4 个大区，
+               用同一贴图下半行（无分隔槽区域）盖住第 5 槽，保持官方 86px tab 比例不拉伸 -->
+          <div class="rscb_slotCover"></div>
+        </div>
+        <div class="rscb_dowm not_drag">
+          <div
+            v-for="tab in tabs"
+            :key="tab.value"
+            class="rscb_dowmOnce"
+            :class="{active: activeTab === tab.value}"
+            @click="switchTab(tab.value)"
+          >
+            <div class="rscb_dowmOnceText">{{tab.label}}</div>
+          </div>
+        </div>
+        <div class="smYb wsnw">
+          元宝：{{petInfo?.info?.yb || 0}}<span v-if="pinkDiamond" class="smPdTag">粉钻</span>
+        </div>
+      </div>
+
+      <div class="smClose not_drag" title="关闭" @click="closeWindow"></div>
+      <div class="mallFoot"></div>
       </div>
     </div>
 
-    <div v-if="toast" class="sv2-toast" :class="toastType">{{toast}}</div>
+    <!-- 购物车结算（官方 shopping_cartbg.gif，表头/共计/按钮已烘焙） -->
+    <div v-if="showCart" class="markFull fcc">
+      <div class="shoppingCartMain por not_drag">
+        <div class="cartClose" title="关闭" @click="showCart = false"></div>
+        <div class="cartGoodList">
+          <div v-if="cartList.length === 0" class="cartEmpty">购物车是空的，去挑点好东西吧~</div>
+          <div v-for="row in cartList" :key="row.goodKey" class="cartGood fc">
+            <div class="cg_name toe">{{row.name}}</div>
+            <div class="cg_num">{{row.cartNum}}</div>
+            <div class="cg_type">{{typeName(row.type)}}</div>
+            <div class="cg_price wsnw tc">{{linePrice(row)}}</div>
+            <div class="cg_btns fc">
+              <div class="cg_cutUp" title="-10" @click="stepCart(row, -10)"></div>
+              <div class="cg_cut" title="-1" @click="stepCart(row, -1)"></div>
+              <div class="cg_add" title="+1" @click="stepCart(row, 1)"></div>
+              <div class="cg_addDown" title="+10" @click="stepCart(row, 10)"></div>
+            </div>
+          </div>
+        </div>
+        <div class="cg_totalNum wsnw">{{cartCount}}</div>
+        <div class="cg_totalPrice wsnw">{{cartTotal}}</div>
+        <div class="cartPayBtn" title="确认支付" @click="checkout"></div>
+        <div class="cartGoBtn" title="继续购物" @click="showCart = false"></div>
+      </div>
+    </div>
+
+    <div v-if="paying" class="markFull fcc smPaying">购买中，请稍后···</div>
+    <div v-if="toast" class="smToast" :class="toastType">{{toast}}</div>
   </div>
 </div>

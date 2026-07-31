@@ -26,11 +26,11 @@ body {
   /* opacity: 0.4; */
   /* padding: 30px; */
   user-select: none;
-  cursor: url("../../assets/img_res/hand/default/normal.cur"), default;
+  cursor: url("../../assets/img_res/hand/focus/normal.cur"), default;
   position: relative;
 }
 #move:active {
-  cursor: url("../../assets/img_res/hand/default/press.cur"), default;
+  cursor: url("../../assets/img_res/hand/focus/press.cur"), default;
 }
 #pet, ruffle-player, ruffle-player * {
   /* opacity: 0.2; */

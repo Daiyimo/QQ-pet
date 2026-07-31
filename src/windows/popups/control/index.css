@@ -16,7 +16,6 @@
   margin: 0 !important;
   box-shadow: unset !important;
   border-radius: 10px !important;
-  background-color: red !important;
 }
 #appMain {
   display: flex;
@@ -50,6 +49,20 @@
 }
 .obliqueHover:hover .m_h_i_bk_6 {
   opacity: 1;
+  width: 120%;
+  height: 120%;
+  left: -10%;
+  top: -10%;
+  animation: controlHaloLoading 1s linear infinite;
+}
+/* 官方 1.2.5：hover 时 bk/6.svg 光环 120% 放大并旋转 */
+@keyframes controlHaloLoading {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 .marginLR {
   margin: 0 10px;

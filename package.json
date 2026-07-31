@@ -1,7 +1,7 @@
 {
   "name": "qq-local",
   "version": "1.2.6",
-  "description": "QQ宠物·云端版 - Windows 桌宠，AI 能力全部走云端多服务商 LLM",
+  "description": "QQ宠物·离线+AI版 - Windows 桌宠，本体离线运行，AI 能力可选接入多服务商 LLM（默认关闭）",
   "license": "MIT",
   "main": "main.js",
   "scripts": {
@@ -31,7 +31,7 @@
   "build": {
     "publish": null,
     "appId": "com.qqlocal.desktop",
-    "productName": "QQ宠物云端版",
+    "productName": "QQ宠物离线+AI版",
     "directories": {
       "output": "dist"
     },
@@ -62,10 +62,10 @@
       "installerHeaderIcon": "resources/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "QQ宠物云端版"
+      "shortcutName": "QQ宠物离线+AI版"
     },
     "portable": {
-      "artifactName": "QQ宠物云端版-${version}-portable.exe"
+      "artifactName": "QQ宠物离线+AI版-${version}-portable.exe"
     }
   }
 }

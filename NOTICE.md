@@ -4,7 +4,7 @@
 
 本项目 fork 自开源项目 [qqpet_automation / WorkBuddy](https://github.com/xuemian168/qqpet_automation)（MIT License，Copyright © 2026 xuemian168），并在其 `qq-pet-macos` 分支基础上继续开发。上游项目对 QQ 宠物怀旧服 v1.2.4 的 Electron 应用做了逆向分析、跨平台移植、遥测与设备指纹移除，以及 Ruffle WASM 替代 Adobe Flash。
 
-本项目在此基础上新增的主要内容：云端多服务商 LLM 接入（OpenAI 兼容协议 / Anthropic）、屏幕感知、记忆与日记、课程录制、弹幕层、成就 / 签到 / 旅行系统、贴边隐藏、换肤路由。
+本项目在此基础上新增的主要内容：多服务商 LLM 接入（OpenAI 兼容协议 / Anthropic，可选且默认关闭）、屏幕感知、记忆与日记、课程录制、弹幕层、成就 / 签到 / 旅行系统、贴边隐藏、换肤路由。
 
 按 MIT License 要求，上游版权声明已保留于本项目 `LICENSE` 文件中。
 

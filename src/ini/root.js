@@ -16,7 +16,8 @@ const createMain = (fn, post, ip, fileName, none) => {
   let pattt = path.join(__dirname, "../../src");
   app.use("/" + fileName, express.static(pattt));
   let aotuIp = getLocalIP();
-  var server = app.listen(post, ip || aotuIp[0], function () {
+  // 离线本地版：只绑定 127.0.0.1，不对局域网暴露 src/ 静态目录
+  var server = app.listen(post, ip || "127.0.0.1", function () {
     var host = server.address().address;
     var port = server.address().port;
     fn(port, host, fileName);
@@ -55,7 +56,7 @@ const openWS = (wsPopt) => {
       //code= 报错信息，reason = undefined
     });
   });
-  server.listen(wsPopt, function () {
+  server.listen(wsPopt, "127.0.0.1", function () {
     console.log("websocket：" + wsPopt);
   });
 };
@@ -248,7 +249,8 @@ global.openLocalHost = (fn) => {
   app.use("/" + fileName, express.static(pattt));
   let aotuIp = getLocalIP();
   let post = "33385";
-  var server = app.listen(post, aotuIp[0], function () {
+  // 离线本地版：只绑定 127.0.0.1
+  var server = app.listen(post, "127.0.0.1", function () {
     var host = server.address().address;
     var port = server.address().port;
     url = {

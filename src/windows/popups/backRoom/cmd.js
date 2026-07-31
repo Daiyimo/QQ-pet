@@ -61,7 +61,7 @@ function openIE(url){
 }
 
 function openVip(url){
-	url = url || 'http://pay.qq.com/app/service/public/openservice.shtml?serviceCode=PETVIP&serviceName=%E7%B2%89%E9%92%BB&serviceFee=10&aid=bjgm';
+	url = url || 'about:blank'; // 离线本地版：移除粉钻开通外链
 	if($ISWEB){
 		window.parent.PET.OpenVip(url);
 	}else{

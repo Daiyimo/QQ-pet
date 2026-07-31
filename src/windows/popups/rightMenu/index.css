@@ -1,19 +1,9 @@
-:root {
-  --shadowSize: 10px;
-  --shadowSizeR: 8px;
-  --shadowSize_: -10px;
-  --shadowSizeR_: -8px;
-  /* box-shadow: inset 0 var(--shadowSize) 5px -10px #0045ac; */
-  --transform: all 1s;
-  --rightColor: #5571ec;
-}
 #appMain {
   display: flex;
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  transition: all 1s;
-  font-size: 14px;
+  font-size: 12px;
   background-color: transparent !important;
 }
 
@@ -30,143 +20,124 @@
   position: fixed;
   bottom: 0;
   left: 50%;
+  z-index: 9999;
 }
 
+/* ===== 菜单容器：对齐官方 1.2.5 右键菜单 —— 白底扁平面板 + 左侧蓝色竖条 =====
+   官方实测：110px 宽、行高 20px、白底、#175282 12px 600 粗、左缘蓝色渐变条；
+   贴图（ditu 铅笔风）只在 hover 行上出现，常态是干净白底。
+   本项目保留 130px（最长 6 字标签 + 箭头需要 ~129px）。 */
 .bk_body {
   width: 130px;
-  transition: all 1s;
-  background: linear-gradient(
-    to top,
-    rgba(237, 247, 255, 0.8),
-    rgba(253, 255, 255, 0.8)
-  );
-  background-color: transparent !important;
-  /* background-image: url("../assets/stateInfo/ditu05.png"); */
-  /* background-size: 100% 100%; */
-  /* background-repeat: no-repeat; */
-  /* opacity: 0.3; */
-  color: #042b4b;
-  font-weight: 500;
+  background: #ffffff;
+  color: #175282;
+  font-weight: 600;
+  font-size: 12px;
   line-height: 20px;
-  border-radius: 5px;
-  transform: var(--transform);
+  border: 1px solid #b9d2ea;
+  border-left: 4px solid #4a9eda;
+  border-radius: 6px;
+  box-shadow: 0 2px 12px rgba(23, 82, 130, 0.2);
+  /* 打开动画：淡入 + 轻微上抬（只给主面板；子菜单 v-show 常驻、即显即隐，不跑动画） */
+  animation: rmOpen 0.16s ease-out;
 }
-div {
-  transform: var(--transform);
+/* 子菜单不跑打开动画（避免"闪一下才打开"） */
+.bk_body.sun_bk_body {
+  animation: none;
+}
+@keyframes rmOpen {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
-.bk_body .head .h_left {
-  width: 20px;
-  height: 7px;
+/* 头/尾九宫格贴图行弃用（官方实为白底面板），保留容器不动 DOM */
+.bk_body .head,
+.bk_body .foot {
+  display: none;
 }
-.bk_body .head .h_center {
-  height: 7px;
-}
-.bk_body .head .h_right {
-  width: 20px;
-  height: 7px;
+
+/* ===== 菜单行：左勾选区 20px + 文本区 flex:1 + 右端 21/31px，行高 20px（官方实测行距） ===== */
+/* 常态：纯白扁平，无贴图 */
+.bk_body .center {
+  height: 20px;
+  transition: background-color 0.15s;
 }
 .bk_body .center .c_left {
-  width: 12px;
-  height: 19px;
-  background-size: contain;
-  background-repeat: no-repeat;
-  transform: var(--transform);
+  width: 20px;
+  height: 20px;
 }
 .bk_body .center .c_center {
-  height: 19px;
-  background-size: 100% 100%;
-  background-repeat: no-repeat;
-  transform: var(--transform);
+  height: 20px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 .bk_body .center .c_right {
   width: 21px;
-  height: 19px;
-  background-size: contain;
-  background-repeat: no-repeat;
-  transform: var(--transform);
+  height: 20px;
 }
-/* //箭头 */
+/* 有子菜单：右端蓝色小三角（沿用官方箭头贴图） */
 .bk_body .center.haveChildren .c_right {
   width: 31px;
-  height: 19px;
-  /* background-image: url("../assets/Menu/ditu06_jiantou00_2.bmp"); */
-  background-size: contain;
+  height: 20px;
+  background-image: url("../assets/Menu/ditu06_jiantou00_2.png");
+  background-size: 100% 100%;
   background-repeat: no-repeat;
-  position: relative;
-}
-.bk_body .center.haveChildren .c_right::after {
-  content: "";
-  display: inline-block;
-  width: 0;
-  height: 0;
-  position: absolute;
-  left: 50%;
-  top: calc(50% - 4px);
-  border: 4px solid var(--rightColor);
-  border-color: transparent transparent var(--rightColor) var(--rightColor);
-  transform: rotate(-135deg);
-}
-.bk_body .foot .f_left {
-  width: 20px;
-  height: 7px;
-}
-.bk_body .foot .f_center {
-  height: 7px;
-}
-.bk_body .foot .f_right {
-  width: 20px;
-  height: 7px;
-}
-/* 有消息 */
-.bk_body .center.new > .c_left .c_left_new {
-  width: 21px;
-  height: 19px;
-  background-image: url("../assets/Menu/ditu04_new.bmp");
-}
-.bk_body .center.new > .c_left {
-  width: 20px;
-}
-/* 动态 */
-.bk_body .center.active > .c_left {
-  width: 12px;
-  height: 19px;
-  background-image: url("../assets/Menu/ditu05_2.bmp");
-  background-size: 100% 100%;
-}
-.bk_body .center.active:active > .c_left {
-  width: 12px;
-  height: 19px;
-  background-image: url("../assets/Menu/ditu05_2.bmp");
-  background-size: 100% 100%;
-  filter: brightness(0.92);
-}
-.bk_body .center.active > .c_center {
-  height: 19px;
-  background-image: url("../assets/Menu/ditu05_2.bmp");
-}
-.bk_body .center.active > .c_right {
-  background-image: url("../assets/Menu/ditu06_2.bmp");
-}
-.bk_body .center.active.haveChildren > .c_right {
-  width: 31px;
-  background-image: url("../assets/Menu/ditu06_jiantou01_2.bmp") !important;
-}
-.bk_body .center.active.haveChildren:hover .c_right {
-  background-image: url("../assets/Menu/ditu06_jiantou01_2.bmp") !important;
-}
-/* //子菜单 */
-.sun_bk_body {
-  /* transform: translateX(-100%) translateY(-40%); */
+  background-position: center;
 }
 
-.sun_bk_body .center.active > .c_right_sun {
-  background-image: url("../assets/Menu/ditu06_2.bmp") !important;
-}
-.sun_bk_body .center .c_right {
-  width: 21px;
-  height: 19px;
-  background-image: url("../assets/Menu/ditu06.bmp") !important;
-  background-size: contain;
+/* 勾选/标记状态：左区显示 ditu04_new（20x18 黄色手绘圆点），对齐官方 chooseDo */
+.bk_body .center.new > .c_left .c_left_new {
+  width: 20px;
+  height: 18px;
+  background-image: url("../assets/Menu/ditu04_new.png");
+  background-size: 100% 100%;
   background-repeat: no-repeat;
+}
+
+/* ===== hover（JS mousemove 置 .active）：换官方铅笔贴图行（与官方一致） ===== */
+.bk_body .center.active > .c_left {
+  background-image: url("../assets/Menu/ditu04_22.png");
+  background-size: 100% 100%;
+}
+.bk_body .center.active > .c_center {
+  background-image: url("../assets/Menu/ditu05_2.png");
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  color: #175282;
+}
+.bk_body .center.active:active > .c_center {
+  filter: brightness(0.92);
+}
+.bk_body .center.active > .c_right {
+  background-image: url("../assets/Menu/ditu06_2.png");
+  background-size: 100% 100%;
+}
+.bk_body .center.active.haveChildren > .c_right,
+.bk_body .center.active.haveChildren:hover .c_right {
+  background-image: url("../assets/Menu/ditu06_jiantou01_2.png") !important;
+  background-size: 100% 100%;
+}
+
+/* ===== 子菜单（结构同主菜单，定位由 JS 内联 transform 控制） ===== */
+.sun_bk_body {
+  position: absolute;
+}
+/* 动态隐藏项（如 followMain 模式下的退出宠物），对齐官方 .unShow 规则 */
+.bk_body .center.unShow {
+  display: none;
+}
+/* 子菜单右端：无箭头常态贴图 hover 换图 */
+.sun_bk_body .center .c_right_sun {
+  width: 21px;
+  height: 20px;
+}
+.sun_bk_body .center.active > .c_right_sun {
+  background-image: url("../assets/Menu/ditu06_2.png") !important;
+  background-size: 100% 100%;
 }

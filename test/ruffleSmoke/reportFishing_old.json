@@ -1,0 +1,74 @@
+{
+  "mode": "old",
+  "port": 56166,
+  "reqLog": [
+    {
+      "url": "/fishingPlayer.html",
+      "status": 200,
+      "file": "test\\ruffleSmoke\\fishingPlayer.html"
+    },
+    {
+      "url": "/src/windows/js/ruffle/ruffle.js",
+      "status": 200,
+      "file": "src\\windows\\js\\ruffle\\ruffle.js"
+    },
+    {
+      "url": "/src/windows/js/ruffle/core.ruffle.574040544d43249e8cb7.js",
+      "status": 200,
+      "file": "src\\windows\\js\\ruffle\\core.ruffle.574040544d43249e8cb7.js"
+    },
+    {
+      "url": "/src/windows/js/ruffle/ff951d624993ac946031.wasm",
+      "status": 200,
+      "file": "src\\windows\\js\\ruffle\\ff951d624993ac946031.wasm"
+    },
+    {
+      "url": "/main.swf",
+      "status": 200,
+      "file": "src\\windows\\popups\\fishing\\main.swf"
+    },
+    {
+      "url": "/pet/fishing/config.xml",
+      "status": 200,
+      "file": "src\\windows\\popups\\fishing\\pet\\fishing\\config.xml"
+    },
+    {
+      "url": "/pet//fishing//res//bg//1.swf",
+      "status": 200,
+      "file": "src\\windows\\popups\\fishing\\pet\\fishing\\res\\bg\\1.swf"
+    },
+    {
+      "url": "/pet/fishing/res/pet/112.swf",
+      "status": 200,
+      "file": "src\\windows\\popups\\fishing\\pet\\fishing\\res\\pet\\112.swf"
+    }
+  ],
+  "checks": {
+    "eiReady": true,
+    "pushed": true,
+    "pixels": {
+      "stddev": 43.05,
+      "mean": 138.22,
+      "changedRatio": "2.17%"
+    },
+    "rendered": true,
+    "moving": true
+  },
+  "fishLog": [
+    {
+      "t": 1785373617413,
+      "kind": "SNS_GetSelfPetInfo",
+      "data": "called"
+    },
+    {
+      "t": 1785373620290,
+      "kind": "SNS_GetSelfPetInfo",
+      "data": "called"
+    },
+    {
+      "t": 1785373620290,
+      "kind": "SNS_GetSelfPetInfo",
+      "data": "called"
+    }
+  ]
+}

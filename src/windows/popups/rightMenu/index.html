@@ -17,7 +17,7 @@
         <div class="c_center f1" cando :fv="item.value">{{item.label}}</div>
         <div class="c_right" cando :fv="item.value"></div>
         <div class="bk_body sun_bk_body poa" :fv="item.value" cando :style="sunBkBodyStyle"
-          v-if="item.children && activeFatherValue == item.value">
+          v-show="item.children && activeFatherValue == item.value">
           <!-- top: sunPositionTop + 'px' -->
           <div class="head fcc w100" cando :fv="item.value">
             <div class="h_left" cando :fv="item.value"></div>

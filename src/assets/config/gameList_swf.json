@@ -1,0 +1,80 @@
+{
+ "gameList": [
+  {
+   "name": "QQ地下城与勇士之Q宠版",
+   "router": "QQ地下城与勇士之Q宠版.swf"
+  },
+  {
+   "name": "QQ宠物跳跳",
+   "router": "QQ宠物跳跳.swf"
+  },
+  {
+   "name": "宠爱QQ堂",
+   "router": "宠爱QQ堂.swf"
+  },
+  {
+   "name": "QQ宠物挖矿",
+   "router": "QQ宠物挖矿.swf"
+  },
+  {
+   "name": "QQ端盘子",
+   "router": "QQ端盘子.swf"
+  },
+  {
+   "name": "QQ穿越火线1.2",
+   "router": "QQ穿越火线1.2.swf"
+  },
+  {
+   "name": "QQ飞车",
+   "router": "QQ飞车.swf"
+  },
+  {
+   "name": "QQ狩猎场",
+   "router": "QQ狩猎场.swf"
+  },
+  {
+   "name": "QQ抓喜鹊",
+   "router": "QQ抓喜鹊.swf"
+  },
+  {
+   "name": "Q宠爱森林",
+   "router": "Q宠爱森林.swf"
+  },
+  {
+   "name": "Q宠速配",
+   "router": "Q宠速配.swf"
+  },
+  {
+   "name": "泡泡",
+   "router": "泡泡.swf"
+  },
+  {
+   "name": "摘星星",
+   "router": "摘星星.swf"
+  },
+  {
+   "name": "捉鱼",
+   "router": "捉鱼.swf"
+  },
+  {
+   "name": "QQ穿云",
+   "router": "QQ穿云.swf"
+  },
+  {
+   "name": "QQ跆拳道",
+   "router": "QQ跆拳道.swf"
+  },
+  {
+   "name": "QQ跑酷",
+   "router": "QQ跑酷.swf"
+  },
+  {
+   "name": "Q宠保姆",
+   "router": "Q宠保姆.swf"
+  },
+  {
+   "name": "Q宠搭积木",
+   "router": "Q宠搭积木.swf"
+  }
+ ]
+}

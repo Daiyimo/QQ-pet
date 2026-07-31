@@ -39,7 +39,7 @@
       :key="index"
       :class="[index != 0 && index != (menus?.length ? menus.length : 0) - 1 ? 'marginLR':'']"
     >
-      <div class="m_head obliqueHover focusPress fcc" cando>
+      <div class="m_head obliqueHover focusPress fcc" cando @click="!item.children&&chooseOnce(item)">
         <div class="m_h_name" cando>{{item.name}}</div>
         <div class="m_h_i_back fcc focusPress">
           <img

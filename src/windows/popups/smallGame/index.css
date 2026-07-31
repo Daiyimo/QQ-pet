@@ -13,21 +13,32 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 窗口 backgroundColor 为 #00000000 且不透明，实际渲染成黑色；
+     菜单文字是深色，黑底上会隐形（小游戏窗口左侧"全黑"的根因），这里补浅色底 */
+  background-color: #f7f7f7;
 }
 .leftMenu {
-  width: 150px;
+  width: 170px;
   max-width: 30px;
   height: 100%;
   display: flex;
   flex-direction: column;
   transition: all 0.5s;
 }
+/* 折叠态只留展开箭头，隐藏菜单内容（150px 固定宽菜单项在 30px 容器里会压成竖条，看起来像渲染异常） */
+.leftMenu:not(.openMenu) .menu_main {
+  display: none;
+}
 .menu_main {
   width: 100%;
   overflow: hidden auto;
 }
 .menu_item {
-  width: 150px;
+  width: 170px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 8px;
   border-radius: 8px;
   border-bottom: 1px solid #00000017;
@@ -72,27 +83,58 @@
   flex: 1;
   width: 0px;
   height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f7f7f7;
+}
+/* 未选游戏时的占位提示（替代黑屏） */
+.swfTip {
+  color: #999;
+  font-size: 14px;
+  user-select: none;
 }
 .gameMain {
   width: 100%;
   height: 100%;
+  /* Ruffle 把 embed 换成 ruffle-player（保留 id/class），wmode transparent 时
+     SWF 舞台之外的区域透出窗口底色（#00000000 渲染成黑），补浅色底让黑带消失 */
+  background-color: #f7f7f7;
 }
+ruffle-player.gameMain {
+  background-color: #f7f7f7;
+}
+/* 菜单展开/收起按钮（初衷：收起菜单放大游戏画面）——细描边圆形按钮 + 箭头旋转动效 */
 .open {
-  width: 30px;
-  height: 30px;
-  font-size: 25px;
+  width: 26px;
+  height: 26px;
+  margin: 3px 0 0 3px;
+  flex: none;
+  border-radius: 50%;
+  background: #fff;
+  color: #5a8dee;
+  border: 1px solid #d8e2f2;
+  box-shadow: 0 1px 4px rgba(30, 60, 120, 0.18);
   cursor: pointer;
-  transition: all 0.5s;
+  transition: all 0.3s;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.open:hover {
+  background: #5a8dee;
+  color: #fff;
+  transform: scale(1.1);
+}
+.open svg {
+  transition: transform 0.3s;
+}
+/* 收起态（菜单隐藏）：箭头朝右，提示"点击展开" */
+.open:not(.openIcon) svg {
   transform: rotate(180deg);
 }
-.open.openIcon {
-  transform: rotate(0deg);
-}
 .leftMenu.openMenu {
-  max-width: 150px;
+  max-width: 170px;
 }
 .topSee {
   height: 30px;

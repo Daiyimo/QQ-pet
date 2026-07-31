@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+  </style>
+  <title>fishing-smoke</title>
+  <!-- 与 src/windows/popups/fishing/indexOnLine.html 完全一致的 Ruffle 配置 -->
+  <script>
+    window.RufflePlayer = window.RufflePlayer || {};
+    window.RufflePlayer.config = {
+      autoplay: "on",
+      unmuteOverlay: "hidden",
+      warnOnUnsupportedContent: false,
+      polyfills: true,
+      letterbox: "off",
+      wmode: "transparent"
+    };
+  </script>
+  <script src="../../src/windows/js/ruffle/ruffle.js"></script>
+  <script>
+    // ---- 冒烟钩子：模拟 indexOnLine.js 提供给 SWF 的 ExternalInterface 环境 ----
+    window.__fishLog = [];
+    const flog = (kind, data) => {
+      try { window.__fishLog.push({ t: Date.now(), kind, data: String(data).slice(0, 500) }); } catch (e) { }
+    };
+    window.alert = (e) => { flog("alert", e); };
+
+    // 池塘数据（结构照抄 indexOnLine.js setPetInfo 的 ResultData）
+    const pondPayload = JSON.stringify({
+      data: {
+        allvipcnt: 3,
+        canusecnt: 3,
+        fishes: [],
+        length: 1,
+        harvestfish: 0,
+        needTime: 0,
+        power: 100,
+        isvip: 0,
+        vipLv: 0,
+        yb: 1000,
+      },
+      head: { cmd: 1, game: 6, key: "", svr: 0, ver: 1 },
+    });
+
+    window.__pushPond = function () {
+      const el = document.getElementById("hlyg");
+      if (el && typeof el.PETEventOnReceived === "function") {
+        el.PETEventOnReceived(pondPayload);
+        return true;
+      }
+      return false;
+    };
+
+    // SWF -> JS
+    window.PETSendData = function (dataOl) {
+      flog("PETSendData", dataOl);
+      try {
+        const d = JSON.parse(dataOl);
+        if (d && d.head && d.head.cmd === 1) {
+          setTimeout(() => window.__pushPond(), 100);
+        }
+      } catch (e) { }
+    };
+    window.SNS_GetSelfPetInfo = function () {
+      flog("SNS_GetSelfPetInfo", "called");
+      return {
+        petid: "1", qqnumber: "66666666", petName: "smoke", masterName: "smoke",
+        level: 10, isvip: 0, grade: "112", gender: "112", staus: 1,
+        starve: 1000, starveMax: 3000, clean: 1000, cleanMax: 3000,
+        qqsign: "", viplevel: 0,
+      };
+    };
+    window.PSW = { GoToNPC: (p) => flog("GoToNPC", p) };
+    window.close_game = function (e) { flog("close_game", e); };
+    window.getPetInfoFromMain = function () { flog("getPetInfoFromMain", "called"); setTimeout(() => window.__pushPond(), 100); };
+    window.saveInfoData = function (e) { flog("saveInfoData", JSON.stringify(e)); };
+    window.selfeLoad = true;
+  </script>
+</head>
+
+<body>
+  <div class="hlyg">
+    <embed id="hlyg" wmode="transparent" swLiveConnect="true" allowscriptaccess="always" name="hlyg" class="hlyg"
+      src="./main.swf"> </embed>
+  </div>
+</body>
+
+</html>

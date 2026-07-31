@@ -1,9 +1,16 @@
+/*
+ * 商店弹窗 —— 官方 1.2.5 商城复刻（类名/色值/贴图对齐 deobfuscated/renderer.index.js 12319 行 CSS blob）
+ * 贴图素材：src/assets/shppingMall/（从官方 1.2.5 app/dist/pet/shppingMall 拷出）
+ * 布局：官方双栏 —— 左栏储物柜/我的背包 347px（leftSelfHeadBk/CenterBk/GoodsBk/FootBk 四段 254+51+247+42=594）
+ *       + 间隔 10px + 右栏商城 456px（rt_bg 面板，头部 Sale_Tag_BG 叠在面板上）。
+ */
+
 #appMain {
   display: flex;
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  font-size: 14px;
+  font-size: 12px;
   background-color: transparent !important;
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -14,275 +21,878 @@
   width: 100% !important;
   margin: 0 !important;
   box-shadow: unset !important;
-  border-radius: 12px !important;
 }
 
-.storeV2 {
+/* 官方 .shoppingMall{color:#000000ae;font-size:12px} */
+.shoppingMall {
   position: relative;
   width: 100%;
   height: 100%;
-  background: linear-gradient(135deg, #fff7ed 0%, #fef3c7 100%);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid rgba(180, 130, 50, 0.25);
-}
-
-/* === 顶部 === */
-.sv2-head {
-  display: flex;
-  align-items: center;
-  height: 48px;
-  padding: 0 16px;
-  background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
-  color: #fff;
-  -webkit-app-region: drag;
-}
-.sv2-title {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 1px;
-  flex: 0 0 auto;
-}
-.sv2-yb {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-size: 14px;
-  background: rgba(0, 0, 0, 0.18);
-  padding: 4px 12px;
-  border-radius: 20px;
-  margin: 0 16px;
-  max-width: 200px;
-}
-.sv2-yb-icon {
-  font-weight: 700;
-  color: #fde68a;
-}
-.sv2-yb-num {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.sv2-yb-label {
-  opacity: 0.85;
+  color: #000000ae;
   font-size: 12px;
 }
-.sv2-close {
-  -webkit-app-region: no-drag;
-  width: 28px;
+
+/* 双栏面板：左 347 + 右 456 = 803（两栏相邻贴合，与官方一致；此前留 10px 缝隙会透出桌面像缺背景） */
+.smWindow {
+  position: relative;
+  width: 803px;
+  height: 601px;
+  margin: 18px auto 0;
+}
+
+/* 右栏容器：原单栏内容整体右移（内部绝对定位坐标不变） */
+.rightSelf {
+  position: absolute;
+  top: 0;
+  left: 347px;
+  width: 456px;
+  height: 601px;
+}
+
+/* ================= 左栏：官方 1.2.5 储物柜（我的背包） ================= */
+.leftSelf {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 347px;
+  height: 594px;
+}
+
+/* 头部：官方 .leftSelfHeadBk 345x254 mall_03.gif（宠物状态展示区） */
+.leftSelfHeadBk {
+  width: 345px;
+  height: 254px;
+  background-image: url(../assets/shppingMall/bk/mall_03.gif);
+  background-size: 100% 100%;
+}
+.lsh_pet {
+  padding: 30px 34px 0;
+  gap: 12px;
+}
+.lsh_avatar {
+  width: 56px;
+  height: 56px;
+  flex: none;
+}
+.lsh_petName {
+  font-weight: 900;
+  font-size: 16px;
+  color: #6b5320;
+}
+.lsh_lv {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #9b7ede;
+}
+.lsh_host {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #8a7335;
+}
+/* 当前背景（头部右侧）：无背景时只显示文字，不显示任何图标 */
+.lsh_bg {
+  margin-left: auto;
+  flex-direction: column;
+  align-self: flex-start;
+  max-width: 96px;
+}
+.lsh_bgImg {
+  width: 88px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px rgba(150, 131, 103, 0.5);
+}
+.lsh_bgName {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #8a7335;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 装扮卡"使用中"状态 */
+.selfGoodUse.sg_using {
+  filter: brightness(1.15) saturate(1.2);
+  font-weight: 900;
+}
+.lsh_stats {
+  padding: 14px 34px 0;
+}
+.lsh_stat {
+  display: flex;
+  align-items: center;
+  margin-top: 9px;
+  font-size: 12px;
+  color: #6b5320;
+}
+.lsh_statLabel {
+  width: 34px;
+  flex: none;
+  font-weight: 900;
+}
+.lsh_bar {
+  flex: 1;
+  height: 10px;
+  margin: 0 8px;
+  background: rgba(255, 255, 255, 0.55);
+  border-radius: 5px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(150, 131, 103, 0.4);
+}
+.lsh_barIn {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.4s;
+}
+.lsh_statVal {
+  width: 78px;
+  flex: none;
+  text-align: right;
+  font-weight: 700;
+}
+
+/* tab 条：官方 .leftSelfCenterBk 345x51 mall2_03.gif（上大 tab + 下子 tab） */
+.leftSelfCenterBk {
+  width: 345px;
+  height: 51px;
+  background-image: url(../assets/shppingMall/bk/mall2_03.gif);
+  background-size: 100% 100%;
+}
+/* 大区 tab：官方 .lscb_t_onve 82x27；贴图 mall_2x(常态 74-76px)/mall1_2x(选中 82px)，官方 100% 拉伸 */
+.lscb_top {
+  width: 100%;
+  padding: 1px 0 0 13px;
+}
+.lscb_t_onve {
+  display: inline-block;
+  width: 82px;
+  height: 27px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.bagWy { background-image: url(../assets/shppingMall/menu/mall_25.gif); }
+.bagWy.active { background-image: url(../assets/shppingMall/menu/mall1_25.gif); }
+.bagGN { background-image: url(../assets/shppingMall/menu/mall_26.gif); }
+.bagGN.active { background-image: url(../assets/shppingMall/menu/mall1_26.gif); }
+.bagZB { background-image: url(../assets/shppingMall/menu/mall_24.gif); }
+.bagZB.active { background-image: url(../assets/shppingMall/menu/mall1_24.gif); }
+
+/* 子类 tab：官方 .lscb_dowmOnce（lmenu_31.png，选中 Items_SubTag_Selected.png） */
+.lscb_dowm {
+  height: 22px;
+  position: relative;
+  top: -3px;
+  padding: 0 13px;
+}
+.lscb_dowmOnce {
+  display: inline-block;
+  background-image: url(../assets/shppingMall/menu/lmenu_31.png);
+  background-size: 100% 100%;
+  height: 22px;
+  margin-right: 2px;
+  font-size: 12px;
+  padding: 0 6px;
+  font-weight: 900;
+  cursor: pointer;
+  color: #6b5320;
+}
+.lscb_dowmOnce.active {
+  background-image: url(../assets/shppingMall/menu/Items_SubTag_Selected.png);
+}
+.lscb_dowmOnceText {
+  position: relative;
+  top: 3px;
+}
+
+/* 背包网格：官方 .leftSelfGoodsBk 347x247 user_mallconbg.gif（烘焙 2x3 六格，每页 6 件） */
+.leftSelfGoodsBk {
+  width: 347px;
+  height: 247px;
+  background-image: url(../assets/shppingMall/bk/user_mallconbg.gif);
+  background-size: 100% 100%;
+}
+.selfGoodList {
+  width: 100%;
+  flex-wrap: wrap;
+  padding: 2px 10px;
+  align-items: flex-start;
+  align-content: flex-start;
+}
+/* 物品卡：官方 .selfGood 157x76 Card_Items.png */
+.selfGood {
+  width: 157px;
+  height: 76px;
+  background-size: 100% 100%;
+  background-image: url(../assets/shppingMall/bk/Card_Items.png);
+  position: relative;
+  margin: 2px;
+  cursor: pointer;
+}
+.selfGood.active {
+  filter: brightness(1.08);
+}
+/* 官方 .selfGoodImgBox{margin:0 10px 0 8px;padding-left:7px} + .selfGoodImg 50x50 */
+.selfGoodImgBox {
+  margin: 0 10px 0 8px;
+  padding-left: 7px;
+}
+.selfGoodImg {
+  width: 50px;
+  height: 50px;
+}
+/* 左栏浮层向右展开（避免超出窗口左缘）；官方 selfGoodImgBox:hover 触发 */
+.selfGoodImgBox .goodFloatMsg {
+  left: auto;
+  right: -2px;
+  transform: translate(100%);
+}
+.selfGoodImgBox:hover .goodFloatMsg {
+  display: block;
+}
+/* 官方 .selfGoodinfo h100 pt8：名称 + 剩余数量 */
+.selfGoodinfo {
+  height: 100%;
+  padding-top: 8px;
+  width: 76px;
+}
+.sg_name {
+  font-weight: 900;
+  font-size: 12px;
+  max-width: 76px;
+}
+.sg_num {
+  font-size: 12px;
+  color: #8a7335;
+  padding-top: 2px;
+}
+/* 使用按钮：官方 .selfGoodUse 49x26 Sale_SubTag.png 右下角，14px 600 */
+.selfGoodUse {
+  width: 49px;
+  height: 26px;
+  position: absolute;
+  background-size: 100% 100%;
+  background-image: url(../assets/shppingMall/menu/Sale_SubTag.png);
+  right: 2px;
+  bottom: 2px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #6b5320;
+}
+.selfGoodUse:hover {
+  background-image: url(../assets/shppingMall/menu/Sale_SubTag_Selected.png);
+}
+
+/* 底部：官方 .leftSelfFootBk 345x42 mall2_25.gif（元宝: 与分页箭头已烘焙） */
+.leftSelfFootBk {
+  width: 345px;
+  height: 42px;
+  background-image: url(../assets/shppingMall/bk/mall2_25.gif);
+  background-size: 100% 100%;
+}
+/* 官方 .lsfb_yb{left:75;top:13;font-weight:900;font-size:12px} */
+.lsfb_yb {
+  position: absolute;
+  left: 75px;
+  top: 13px;
+  font-weight: 900;
+  font-size: 12px;
+}
+/* 分页条：官方 lsfb_* 透明覆盖在烘焙箭头上（起点 x=118 对齐贴图），悬停显示官方高亮贴图 */
+.lsfb_paging {
+  position: absolute;
+  left: 118px;
+  top: 10px;
+}
+.lsfb_upMore {
+  width: 37px;
+  height: 22px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.lsfb_upMore:hover { background-image: url(../assets/shppingMall/bk/page_first.png); }
+.lsfb_up {
+  width: 27px;
+  height: 22px;
+  margin-left: 2px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.lsfb_up:hover { background-image: url(../assets/shppingMall/bk/page_left.png); }
+.lsfb_text {
+  width: 50px;
+  margin-left: 5px;
+  position: relative;
+  top: 2px;
+  text-align: center;
+  font-weight: 900;
+}
+.lsfb_down {
+  width: 27px;
+  height: 22px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.lsfb_down:hover { background-image: url(../assets/shppingMall/bk/page_right.png); }
+.lsfb_downMore {
+  width: 37px;
+  height: 22px;
+  margin-left: 2px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.lsfb_downMore:hover { background-image: url(../assets/shppingMall/bk/page_last.png); }
+
+/* 左栏空态/加载 */
+.lsEmpty {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding: 90px 20px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6b5320;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+  z-index: 5;
+}
+
+/* ================= 右栏：官方 1.2.5 商城（原有单栏复刻，未改动） ================= */
+
+/* === 商品面板（官方 .rightSelfCenterBk 456x594 rt_bg_04.gif） === */
+.rightSelfCenterBk {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 456px;
+  height: 594px;
+  background-image: url(../assets/shppingMall/bk/rt_bg_04.gif);
+  background-size: 100% 100%;
+}
+
+/* === 头部（官方 .rightSelfHeadBk 443x68 Sale_Tag_BG.png，top:3 叠在面板上） === */
+.rightSelfHead {
+  position: absolute;
+  top: 3px;
+  left: 6px;
+  z-index: 10;
+  width: 443px;
+  height: 68px;
+  background-image: url(../assets/shppingMall/bk/Sale_Tag_BG.png);
+  background-size: 100% 100%;
+}
+
+/* 大区 tab（官方 .rscb_t_onve 86x34 + shopTj/shopWy/shopGN/shopZB 贴图） */
+.rscb_tabs {
+  padding: 7px 0 0 14px;
+}
+.rscb_t_onve {
+  display: inline-block;
+  width: 86px;
+  height: 34px;
+  background-size: 100% 100%;
+  cursor: pointer;
+  margin-right: 2px;
+}
+.shopTj { background-image: url(../assets/shppingMall/menu/mall_06.gif); }
+.shopTj.active { background-image: url(../assets/shppingMall/menu/mal_06.gif); }
+.shopWy { background-image: url(../assets/shppingMall/menu/mall_07.gif); }
+.shopWy.active { background-image: url(../assets/shppingMall/menu/mal_07.gif); }
+.shopGN { background-image: url(../assets/shppingMall/menu/mall_09.gif); }
+.shopGN.active { background-image: url(../assets/shppingMall/menu/mal_09.gif); }
+.shopZB { background-image: url(../assets/shppingMall/menu/mall_08.gif); }
+.shopZB.active { background-image: url(../assets/shppingMall/menu/mal_08.gif); }
+
+/* 第 5 个烘焙空槽遮盖（见 index.html 注释）：取同一贴图下半行同 x 位置的无槽纹理 */
+.rscb_slotCover {
+  position: absolute;
+  left: 366px; /* 14(padding) + 4×88(tab+margin) - 2 */
+  top: 7px;
+  width: 72px;
+  height: 34px;
+  background-image: url(../assets/shppingMall/bk/Sale_Tag_BG.png);
+  background-size: 443px 68px;
+  background-position: -366px -34px;
+}
+
+/* 子类 tab（官方 .rscb_dowmOnce：Sale_SubTag 贴图，26px 高，12px 字，900 粗） */
+.rscb_dowm {
+  height: 22px;
+  position: relative;
+  padding: 2px 0 0 14px;
+}
+.rscb_dowmOnce {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-image: url(../assets/shppingMall/menu/Sale_SubTag.png);
+  background-size: 100% 100%;
+  height: 26px;
+  font-size: 12px;
+  padding: 0 12px;
+  font-weight: 900;
+  cursor: pointer;
+  margin-right: 2px;
+  color: #6b5320;
+}
+.rscb_dowmOnce.active {
+  background-image: url(../assets/shppingMall/menu/Sale_SubTag_Selected.png);
+}
+.rscb_dowmOnceText {
+  position: relative;
+  top: 1px;
+}
+
+/* 元宝余额（头部右下空位） */
+.smYb {
+  position: absolute;
+  right: 12px;
+  bottom: 4px;
+  font-weight: 900;
+  font-size: 12px;
+  color: #6b5320;
+}
+.smPdTag {
+  margin-left: 4px;
+  font-size: 11px;
+  color: #fff;
+  background: #e2539d;
+  border-radius: 6px;
+  padding: 0 6px;
+}
+
+/* 关闭按钮（官方 rightclose.gif） */
+.smClose {
+  position: absolute;
+  top: 6px;
+  right: 2px;
+  z-index: 40;
+  width: 24px;
+  height: 24px;
+  background-image: url(../assets/shppingMall/bk/rightclose.gif);
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.smClose:hover {
+  filter: brightness(1.1);
+}
+
+/* === 商品网格（官方 .rGoodList top:74 padding:2px 10px flex-wrap） === */
+.rGoodList {
+  position: absolute;
+  top: 74px;
+  left: 0;
+  width: 100%;
+  flex-wrap: wrap;
+  padding: 2px 10px;
+  align-items: flex-start;
+  align-content: flex-start;
+}
+
+/* 商品卡（官方 .rGoods 216x119 s09.gif） */
+.rGoods {
+  width: 216px;
+  height: 119px;
+  background-image: url(../assets/shppingMall/bk/s09.gif);
+  background-size: 100% 100%;
+  position: relative;
+}
+
+/* 空货位占位：盖住房烘焙灰卡槽（见 index.html 注释），无贴图、无假按钮 */
+.rGoodsMask {
+  background-image: none;
+  background: rgb(200, 193, 181);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 2px rgba(150, 131, 103, 0.6);
+}
+
+/* 官方 .rG_title{font-weight:900;font-size:15px;height:28px;padding-left:9px} */
+.rG_title {
+  font-weight: 900;
+  font-size: 15px;
   height: 28px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  cursor: pointer;
-  border-radius: 6px;
-  transition: background 0.15s;
-}
-.sv2-close:hover {
-  background: rgba(0, 0, 0, 0.2);
+  padding-left: 9px;
+  max-width: 160px;
 }
 
-/* === 主体 === */
-.sv2-body {
-  flex: 1;
-  display: flex;
-  min-height: 0;
+.rG_body {
+  align-items: flex-start;
 }
 
-/* === 左侧 tab === */
-.sv2-tabs {
-  width: 100px;
-  flex-shrink: 0;
-  background: rgba(180, 130, 50, 0.08);
-  display: flex;
-  flex-direction: column;
-  padding: 12px 0;
-  border-right: 1px solid rgba(180, 130, 50, 0.15);
-}
-.sv2-tab {
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  color: #78350f;
-  font-size: 14px;
-  border-left: 3px solid transparent;
-  transition: background 0.15s, border-color 0.15s;
-}
-.sv2-tab:hover {
-  background: rgba(245, 158, 11, 0.12);
-}
-.sv2-tab.active {
-  background: rgba(245, 158, 11, 0.2);
-  border-left-color: #d97706;
-  font-weight: 600;
-  color: #92400e;
-}
-
-/* === 商品区 === */
-.sv2-content {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
-  min-height: 0;
-}
-.sv2-content::-webkit-scrollbar {
-  width: 8px;
-}
-.sv2-content::-webkit-scrollbar-thumb {
-  background: rgba(180, 130, 50, 0.3);
-  border-radius: 4px;
-}
-
-.sv2-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: #92400e;
-  opacity: 0.7;
-  text-align: center;
-  line-height: 1.8;
-}
-.sv2-empty small {
-  font-size: 12px;
-  opacity: 0.7;
-}
-
-.sv2-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
-}
-
-.sv2-card {
-  background: #fff;
-  border: 1px solid rgba(180, 130, 50, 0.2);
+/* 官方 .rG_leftImgBox{60x60;margin-top:8px;margin-left:12px;border-radius:8px} */
+.rG_leftImgBox {
+  width: 60px;
+  height: 60px;
+  margin-top: 8px;
+  margin-left: 12px;
   border-radius: 8px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-.sv2-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(180, 130, 50, 0.2);
-}
-
-.sv2-card-head {
+  position: relative;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  justify-content: center;
 }
-.sv2-card-icon {
-  font-size: 24px;
-  width: 32px;
+.rG_leftImg {
+  max-width: 60px;
+  max-height: 60px;
+}
+
+/* 官方 .PD{22x22;133.svg;top:-2px;left:-2px} 粉钻角标 */
+.PD {
+  width: 22px;
+  height: 22px;
+  background-image: url(../assets/shppingMall/bk/133.svg);
+  background-size: 100% 100%;
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  z-index: 2;
+}
+
+/* 官方 .goodFloatMsg 悬停浮层（图标盒悬停触发） */
+.goodFloatMsg {
+  pointer-events: none;
+  min-width: 130px;
+  position: absolute;
+  left: -2px;
+  top: 0;
+  transform: translate(-100%);
+  color: #fff;
+  background-color: #542e037b;
+  border-radius: 5px;
+  border: 1px solid #fff;
+  padding: 6px 8px 5px;
+  display: none;
+  z-index: 999;
+}
+.rG_leftImgBox:hover .goodFloatMsg {
+  display: block;
+}
+.gfmName {
+  white-space: nowrap;
+  font-weight: 600;
+}
+.goodDatas {
+  color: #ffffffb4;
+  white-space: nowrap;
+  font-size: 11px;
+  padding-top: 2px;
+}
+
+.rG_info {
+  padding: 16px 0 0 10px;
+}
+.rG_price {
+  font-weight: 900;
+  font-size: 13px;
+}
+.rG_pricePd {
+  color: #e2539d;
+}
+
+/* 卡底行：等级 + 加购/立即购买（透明覆盖层压在背景烘焙的按钮图形上） */
+.rG_foot {
+  margin-top: auto;
+  height: 26px;
+  padding-bottom: 3px;
+}
+/* 官方 .rG_buts{font-weight:900;font-size:12px;color:#03a29a;padding-left:13px;height:25px} */
+.rG_buts {
+  font-weight: 900;
+  font-size: 12px;
+  color: #03a29a;
+  padding-left: 13px;
+  height: 25px;
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+/* 官方 .rG_cart/.rG_pay：btn_empty.gif，opacity 0，hover .4 */
+.rG_cart {
+  width: 27px;
+  height: 18px;
+  margin: 0 0 4px;
+  z-index: 1;
+  background-image: url(../assets/shppingMall/bk/btn_empty.gif);
+  background-size: 100% 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.rG_cart:hover {
+  opacity: 0.4;
+}
+.rG_pay {
+  width: 35px;
+  height: 18px;
+  margin: 0 43px 4px 0;
+  z-index: 1;
+  background-image: url(../assets/shppingMall/bk/btn_empty.gif);
+  background-size: 100% 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.rG_pay:hover {
+  opacity: 0.4;
+}
+
+/* === 分页条（官方 .rightSelfPaging bottom:3 left:0；总宽 344，起点 x=112 对齐烘焙图标） === */
+.rightSelfPaging {
+  position: absolute;
+  bottom: 3px;
+  left: 0;
+  z-index: 10;
+  padding-left: 112px;
+}
+.rsfb_upMore {
+  width: 37px;
+  margin-right: 3px;
+  height: 22px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.rsfb_upMore:hover { background-image: url(../assets/shppingMall/bk/page_first.png); }
+.rsfb_up {
+  width: 27px;
+  height: 22px;
+  margin-right: 10px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.rsfb_up:hover { background-image: url(../assets/shppingMall/bk/page_left.png); }
+.rsfb_text {
+  width: 60px;
+  margin-right: 10px;
   text-align: center;
-  flex-shrink: 0;
+  font-weight: 900;
 }
-.sv2-card-name {
+.rsfb_down {
+  width: 27px;
+  height: 22px;
+  background-size: 100% 100%;
+  margin-right: 4px;
+  cursor: pointer;
+}
+.rsfb_down:hover { background-image: url(../assets/shppingMall/bk/page_right.png); }
+.rsfb_downMore {
+  margin-right: 6px;
+  width: 35px;
+  height: 22px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.rsfb_downMore:hover { background-image: url(../assets/shppingMall/bk/page_last.png); }
+
+/* 官方 .shoppingCart 110x30 + .shoppingCartNum 角标 */
+.shoppingCart {
+  width: 110px;
+  height: 30px;
+  cursor: pointer;
+}
+.shoppingCartNum {
+  position: absolute;
+  background-color: #b24c11;
+  font-size: 16px;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  right: 0;
+  top: 0;
+  transform: translate(50%, -50%);
+  color: #fff;
+  font-weight: 900;
+}
+
+/* 官方 .mallFoot 800x7 → 单面板按面板宽拉伸 */
+.mallFoot {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 456px;
+  height: 7px;
+  background-image: url(../assets/shppingMall/bk/mall2_40.gif);
+  background-size: 100% 100%;
+}
+
+/* 空态/加载 */
+.smEmpty {
+  position: absolute;
+  top: 74px;
+  left: 0;
+  width: 100%;
+  padding: 60px 20px;
+  text-align: center;
   font-size: 13px;
   font-weight: 600;
-  color: #78350f;
-  line-height: 1.3;
-  word-break: break-all;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  color: #6b5320;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+  z-index: 5;
 }
 
-.sv2-card-body {
-  flex: 1;
-  margin: 4px 0;
-  font-size: 11px;
-  color: #57534e;
-  line-height: 1.6;
-}
-.sv2-attr {
-  display: inline-block;
-  background: rgba(245, 158, 11, 0.12);
-  color: #92400e;
-  padding: 1px 6px;
-  border-radius: 4px;
-  margin: 1px 3px 1px 0;
-  font-size: 11px;
-}
-.sv2-desc {
-  margin-top: 4px;
-  opacity: 0.7;
-  font-size: 10px;
-  line-height: 1.4;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.sv2-card-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed rgba(180, 130, 50, 0.2);
-}
-.sv2-price {
-  color: #d97706;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.sv2-buy {
-  background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
-  color: #fff;
-  border: none;
-  padding: 4px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  transition: opacity 0.15s, transform 0.1s;
-}
-.sv2-buy:hover:not(:disabled) {
-  opacity: 0.9;
-}
-.sv2-buy:active:not(:disabled) {
-  transform: scale(0.95);
-}
-.sv2-buy:disabled {
-  background: #d6d3d1;
-  cursor: not-allowed;
-  color: #78716c;
-}
-
-/* === Toast === */
-.sv2-toast {
+/* === 购物车（官方 .markFull + .shoppingCartMain 536x331 shopping_cartbg.gif） === */
+.markFull {
   position: absolute;
-  bottom: 20px;
+  left: 0;
+  top: 0;
+  background-color: #36363645;
+  width: 100%;
+  height: 100%;
+  z-index: 50;
+}
+.shoppingCartMain {
+  width: 536px;
+  height: 331px;
+  background-image: url(../assets/shppingMall/bk/shopping_cartbg.gif);
+  background-size: 100% 100%;
+  color: #0202029f;
+}
+.cartClose {
+  width: 26px;
+  height: 25px;
+  background-size: 100% 100%;
+  position: absolute;
+  right: 7px;
+  top: 4px;
+  cursor: pointer;
+}
+.cartClose:hover {
+  background-image: url(../assets/shppingMall/bk/buttom_03.gif);
+}
+.cartGoodList {
+  position: absolute;
+  left: 12px;
+  top: 65px;
+  width: 510px;
+  height: 135px;
+  overflow: hidden auto;
+}
+.cartEmpty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 13px;
+  color: #8a7335;
+}
+.cartGood {
+  font-size: 14px;
+  border-bottom: 1px solid #3d3d3d36;
+  padding: 2px 0;
+}
+.cg_name { width: 108px; }
+.cg_num { width: 94px; }
+.cg_type { width: 108px; }
+.cg_price { width: 100px; }
+.cg_btns {
+  flex: 1;
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+.cg_cut {
+  background-image: url(../assets/shppingMall/bk/shoping_07.gif);
+  width: 18px;
+  height: 18px;
+  background-size: 100% 100%;
+  margin-right: 5px;
+  cursor: pointer;
+}
+.cg_add {
+  background-image: url(../assets/shppingMall/bk/shoping_09.gif);
+  width: 18px;
+  height: 18px;
+  margin-left: 5px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+.cg_cutUp {
+  background-image: url(../assets/shppingMall/cut.svg);
+  width: 18px;
+  height: 18px;
+  background-size: 100% 100%;
+  margin-right: 5px;
+  cursor: pointer;
+}
+.cg_addDown {
+  background-image: url(../assets/shppingMall/add.svg);
+  width: 18px;
+  height: 18px;
+  margin-left: 5px;
+  background-size: 100% 100%;
+  cursor: pointer;
+}
+
+/* 共计 / 物价总额（对齐烘焙文字右側空位） */
+.cg_totalNum {
+  position: absolute;
+  left: 96px;
+  top: 206px;
+  font-size: 14px;
+}
+.cg_totalPrice {
+  position: absolute;
+  left: 236px;
+  top: 206px;
+  font-size: 14px;
+}
+
+/* 确认支付 / 继续购物（透明覆盖层压在烘焙按钮上） */
+.cartPayBtn {
+  position: absolute;
+  left: 128px;
+  top: 287px;
+  width: 80px;
+  height: 28px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.cartPayBtn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+.cartGoBtn {
+  position: absolute;
+  left: 333px;
+  top: 287px;
+  width: 80px;
+  height: 28px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.cartGoBtn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* 购买中遮罩（官方 markFull fcc「购买中，请稍后···」） */
+.smPaying {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  z-index: 60;
+}
+
+/* Toast（购买结果 / PD 文案提示） */
+.smToast {
+  position: absolute;
+  bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
+  max-width: 90%;
   padding: 8px 16px;
   border-radius: 6px;
   font-size: 13px;
   color: #fff;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  animation: sv2-toast-in 0.2s ease;
+  animation: sm-toast-in 0.2s ease;
   z-index: 100;
+  white-space: nowrap;
 }
-.sv2-toast.ok { background: #059669; }
-.sv2-toast.err { background: #dc2626; }
-.sv2-toast.info { background: #525252; }
+.smToast.ok { background: #059669; }
+.smToast.err { background: #dc2626; }
+.smToast.info { background: #525252; }
 
-@keyframes sv2-toast-in {
+@keyframes sm-toast-in {
   from { opacity: 0; transform: translate(-50%, 8px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }

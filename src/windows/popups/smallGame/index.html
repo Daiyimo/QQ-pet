@@ -5,29 +5,18 @@
         <div
           class="open"
           :class="{ openIcon: open }"
-          :title="open ? '收起' : '展开'"
+          :title="open ? '收起菜单，放大游戏画面' : '展开菜单'"
           @click="openMenu"
         >
-          <svg
-            t="1747818593746"
-            class="icon"
-            viewBox="0 0 1024 1024"
-            version="1.1"
-            xmlns="http://www.w3.org/2000/svg"
-            p-id="6447"
-            width="32"
-            height="32"
-          >
+          <svg viewBox="0 0 24 24" width="15" height="15">
             <path
-              d="M102.4 0h307.2a512 512 0 0 1 0 1024H102.4V0z"
-              fill="#409eff"
-              p-id="6448"
-            ></path>
-            <path
-              d="M396.62933368 512L611.53279968 726.76693299 563.19999968 775.099733 300.10026668 512 563.19999968 248.900267l48.264534 48.264533L396.69759968 512z"
-              fill="#FFFFFF"
-              p-id="6449"
-            ></path>
+              d="M14.5 5.5 8 12l6.5 6.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
           </svg>
         </div>
         <!-- <div class="TopTip" v-if="open">
@@ -98,6 +87,7 @@
       </div>
     </div>
     <div class="swfMain">
+      <div class="swfTip" v-if="!current">← 点击左侧游戏开始</div>
       <embed id="gameMain" name="gameMain" class="gameMain" />
     </div>
   </div>

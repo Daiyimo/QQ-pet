@@ -54,6 +54,11 @@ const EXIT_ANIM_MS = 1500; // exit 动画播放时长（播完再隐藏主窗口
 const STORE_KEY = "travel_china"; // $Store 里的收集进度键
 const REWARD_MOOD = 50; // 回家奖励：心情
 const REWARD_YB = 15; // 回家奖励：元宝
+// init() 恢复逻辑等待主窗口就绪的参数：doMain 在 main.cleate() 的异步创建完成前
+// 同步调用 travel.init()（main.js 的 window 在 cleate 的 Promise 回调里才赋值），
+// 窗口操作必须等窗口就绪，否则静默 no-op
+const MAIN_WINDOW_POLL_MS = 500; // 轮询间隔
+const MAIN_WINDOW_WAIT_MS = 30000; // 等待上限，超时后按窗口缺失降级执行
 
 // 前置校验：状态位 -> 拒绝文案（[host] 为气泡占位符，与既有 openSpeak 习惯一致）
 // 关于 die：全库没有任何代码给 activeOption.die 赋真值，死亡态实际存放在 activeOption.ill
@@ -81,6 +86,8 @@ class TravelService {
     this.hideTimer = null; // exit 动画后隐藏窗口的定时器
     this.inited = false;
     this.saveDirty = false; // 上次收集进度落盘是否失败（失败则下次结算时重试）
+    this._epoch = 0; // 取消令牌（同 perception/loop.js 的 _epoch 模式）：旅行被取消/结算时 +1，
+    // 让 init() 挂起的"等主窗口就绪"回调失效
   }
 
   // ---- 依赖解析（注入优先，否则取全局）----
@@ -181,6 +188,44 @@ class TravelService {
     }
   }
 
+  // ---- 主窗口就绪等待（init 恢复逻辑专用）----
+  // doMain 在 main.cleate() 异步完成前同步调用 init()，此时 mw.window 还是 null，
+  // _hideMain/_showMain/_playActive 会静默 no-op：恢复中的旅行期间宠物仍显示在桌面；
+  // 关机期间结束的旅行丢失 enter 动画与回家气泡。就绪前轮询，带超时兜底与 epoch 取消令牌。
+  _mainWindowReady() {
+    const mw = this._mainWindow();
+    return !!(mw && mw.window);
+  }
+
+  // 窗口已就绪则同步执行 fn；否则每 MAIN_WINDOW_POLL_MS 轮询，直到就绪、
+  // 旅行结束（epoch 变化）或超过 MAIN_WINDOW_WAIT_MS（降级执行 fn——窗口操作
+  // 会安全 no-op，但结算/隐藏语义不能永远搁置）。
+  _whenMainWindowReady(fn, label) {
+    if (this._mainWindowReady()) {
+      fn();
+      return;
+    }
+    const epoch = this._epoch;
+    const deadline = this._now() + MAIN_WINDOW_WAIT_MS;
+    const poll = () => {
+      if (epoch !== this._epoch) return; // 旅行已被取消/结算，恢复意图作废
+      if (this._mainWindowReady()) {
+        fn();
+        return;
+      }
+      if (this._now() >= deadline) {
+        console.error(
+          `[travel] ${label}：等待主窗口就绪超过 ${MAIN_WINDOW_WAIT_MS}ms，按窗口缺失降级执行:`,
+          new Error("main window not ready")
+        );
+        fn();
+        return;
+      }
+      this._setTimeout(poll, MAIN_WINDOW_POLL_MS);
+    };
+    this._setTimeout(poll, MAIN_WINDOW_POLL_MS);
+  }
+
   // ---- 收集进度持久化 ----
   _loadCollected() {
     // 优先 $Store；宠物档案 info.travel_china 作为兜底（档案模型扩展后）
@@ -262,6 +307,7 @@ class TravelService {
     const activeOption = this._getPetInfo().activeOption || {};
     this._setPetInfo({ activeOption: { ...activeOption, trip: null } });
     this.currentTrip = null;
+    this._epoch += 1; // 旅行结束：作废 init() 挂起的窗口就绪回调
   }
 
   // 当前旅行（内存优先，档案兜底）
@@ -406,6 +452,8 @@ class TravelService {
 
   // 应用启动时恢复未完成的旅行（主会话在 doMain 接线时调用）。
   // 剩余时间 >0 则继续倒计时；已过期则直接 finishTravel。
+  // 注意 doMain 在主窗口异步创建完成前同步调用本方法，涉及窗口的操作
+  //（隐藏窗口 / enter 动画 / 回家气泡）一律经 _whenMainWindowReady 等窗口就绪。
   init() {
     // 幂等：重复调用会再挂一个 finishTimer 导致重复结算
     if (this.inited) return { resumed: false, reason: "already_inited" };
@@ -418,14 +466,20 @@ class TravelService {
     this.currentTrip = trip;
     const remainingMs = trip.startTime + trip.duration - this._now();
     if (remainingMs > 0) {
-      // 宠物还没回家：保持窗口隐藏，继续倒计时
-      this._hideMain();
+      // 宠物还没回家：保持窗口隐藏（等主窗口就绪后执行），继续倒计时
+      this._whenMainWindowReady(() => this._hideMain(), "恢复旅行隐藏主窗口");
       this.finishTimer = this._setTimeout(() => this.finishTravel(), remainingMs);
       return { resumed: true, remainingMs };
     }
-    // 关机期间旅行已结束：直接结算回家
-    this.finishTravel();
-    return { resumed: true, finished: true };
+    // 关机期间旅行已结束：等主窗口就绪后结算（enter 动画/回家气泡依赖窗口）；
+    // 窗口已就绪（含测试注入的桩）时同步执行，行为与原来一致
+    const ready = this._mainWindowReady();
+    this._whenMainWindowReady(() => {
+      if (this._trip()) this.finishTravel(); // 等待期间可能被手动召回，结算前再确认
+    }, "关机期间结束的旅行结算");
+    return ready
+      ? { resumed: true, finished: true }
+      : { resumed: true, finished: false, deferred: true };
   }
 }
 
@@ -435,4 +489,6 @@ const travelService = new TravelService();
 module.exports = travelService;
 module.exports.TravelService = TravelService;
 module.exports.PROVINCES = PROVINCES;
+module.exports.MAIN_WINDOW_POLL_MS = MAIN_WINDOW_POLL_MS;
+module.exports.MAIN_WINDOW_WAIT_MS = MAIN_WINDOW_WAIT_MS;
 module.exports.createTravelService = (deps) => new TravelService(deps);

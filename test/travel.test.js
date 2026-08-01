@@ -6,6 +6,8 @@ const assert = require("node:assert/strict");
 const {
   createTravelService,
   PROVINCES,
+  MAIN_WINDOW_POLL_MS,
+  MAIN_WINDOW_WAIT_MS,
 } = require("../src/service/travel.js");
 
 // ---- 测试脚手架 ----
@@ -73,6 +75,7 @@ function makeWorld(opt = {}) {
     timers,
     storeData,
     achCalls,
+    mainWindow,
     now: () => now,
     advance: (ms) => {
       now += ms;
@@ -286,4 +289,106 @@ test("init：从 $Store 恢复历史收集进度", () => {
   const r = w.svc.init();
   assert.equal(r.resumed, false);
   assert.deepEqual(w.svc.collected, [1, 5]);
+});
+
+// ---- init 与主窗口创建竞态（doMain 在 main.cleate() 完成前同步调 init）----
+// makeWorld 的 mainWindow 桩默认 window 已就绪；竞态用例把 window 置 null 模拟窗口尚未创建
+test("init：主窗口未就绪时延迟隐藏，就绪后补隐藏（旅行中的宠物不再留在桌面）", () => {
+  const w = makeWorld();
+  w.pet.activeOption.trip = {
+    place: "四川",
+    provinceId: 21,
+    startTime: w.now() - 1000,
+    duration: 60000,
+  };
+  w.mainWindow.window = null; // 主窗口还在异步创建
+  const r = w.svc.init();
+  assert.equal(r.resumed, true);
+  assert.equal(r.remainingMs, 59000);
+  assert.equal(w.winCalls.includes("hide"), false, "窗口未就绪时不应静默 no-op 掉隐藏");
+  const pollTimers = w.timers.filter((t) => t.ms === MAIN_WINDOW_POLL_MS);
+  assert.equal(pollTimers.length, 1, "应挂一个窗口就绪轮询");
+  // 倒计时定时器不依赖窗口，照常续上
+  assert.ok(w.timers.some((t) => t.ms === 59000));
+  // 窗口创建完成 → 轮询发现就绪 → 补隐藏
+  w.mainWindow.window = {
+    webContents: { send: (ch, data) => w.plays.push(data.active) },
+    hide: () => w.winCalls.push("hide"),
+    show: () => w.winCalls.push("show"),
+  };
+  w.runTimers();
+  assert.ok(w.winCalls.includes("hide"), "窗口就绪后应补上隐藏");
+});
+
+test("init：窗口未就绪时过期旅行延迟结算，就绪后补 enter 动画与收集", () => {
+  const w = makeWorld();
+  w.pet.activeOption.trip = {
+    place: "云南",
+    provinceId: 23,
+    startTime: w.now() - 120000,
+    duration: 60000,
+  };
+  w.mainWindow.window = null;
+  const r = w.svc.init();
+  assert.equal(r.resumed, true);
+  assert.equal(r.finished, false);
+  assert.equal(r.deferred, true);
+  assert.deepEqual(w.svc.collected, [], "窗口就绪前暂不结算");
+  w.mainWindow.window = {
+    webContents: { send: (ch, data) => w.plays.push(data.active) },
+    hide: () => w.winCalls.push("hide"),
+    show: () => w.winCalls.push("show"),
+  };
+  w.runTimers();
+  assert.deepEqual(w.svc.collected, [23]);
+  assert.equal(w.pet.activeOption.trip, null);
+  assert.ok(w.plays.includes("enter"), "应补播 enter 动画");
+  assert.ok(w.speaks.some((s) => s.includes("我从云南回来啦")), "应补回家气泡");
+});
+
+test("init：延迟隐藏期间旅行被取消（epoch 作废），窗口就绪后不再误隐藏", () => {
+  const w = makeWorld();
+  w.pet.activeOption.trip = {
+    place: "北京",
+    provinceId: 1,
+    startTime: w.now() - 1000,
+    duration: 60000,
+  };
+  w.mainWindow.window = null;
+  w.svc.init();
+  w.svc.cancelTravel(); // 用户手动召回：trip 清除，epoch +1
+  w.mainWindow.window = {
+    webContents: { send: (ch, data) => w.plays.push(data.active) },
+    hide: () => w.winCalls.push("hide"),
+    show: () => w.winCalls.push("show"),
+  };
+  w.runTimers();
+  assert.equal(w.winCalls.includes("hide"), false, "已取消的旅行不应再隐藏窗口");
+});
+
+test("init：窗口始终不就绪时超时兜底，过期旅行仍结算不丢奖励", () => {
+  const w = makeWorld();
+  w.pet.activeOption.trip = {
+    place: "云南",
+    provinceId: 23,
+    startTime: w.now() - 120000,
+    duration: 60000,
+  };
+  w.mainWindow.window = null; // 永远不就绪
+  w.svc.init();
+  w.advance(MAIN_WINDOW_WAIT_MS + 1000); // 越过等待上限
+  const errors = [];
+  const origError = console.error;
+  console.error = (...args) => errors.push(args.map((a) => String(a)).join(" "));
+  try {
+    w.runTimers(); // 第一次轮询即触发超时兜底
+  } finally {
+    console.error = origError;
+  }
+  assert.deepEqual(w.svc.collected, [23], "超时降级后仍应完成结算");
+  assert.equal(w.pet.activeOption.trip, null);
+  assert.ok(
+    errors.some((s) => s.includes("[travel]") && s.includes("降级")),
+    "超时兜底必须留日志"
+  );
 });

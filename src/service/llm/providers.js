@@ -129,9 +129,19 @@ function normalizeImage(img) {
   return { base64, mediaType };
 }
 
+// http:// 明文协议只放行回环地址：本地 ollama / LM Studio 等端点（127.0.0.0/8、
+// localhost、[::1]）可用；非回环 http 会把 API Key 与聊天内容明文发给远端，明确拒绝。
+function isLoopbackHost(hostname) {
+  const h = String(hostname || "").toLowerCase();
+  if (h === "localhost" || h === "[::1]") return true;
+  // 127.0.0.0/8 整段都是回环
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
 // 底层 POST JSON（Node 内置 http/https）。
 // - 按 URL 的 protocol 选择模块与默认端口（本地端点如 http://127.0.0.1:11434/v1 也能用；
 //   过去恒用 https + 443，填 http 地址会报天书般的 OpenSSL 错误）；
+//   http:// 明文仅限回环地址（见 isLoopbackHost），非回环 http 直接拒绝；
 // - 响应体累计超过 MAX_RESPONSE_BYTES 立即中断，避免主进程内存被撑爆；
 // - 按 Buffer 收集后一次性 toString("utf8")，避免多字节字符在 chunk 边界被截成乱码；
 // - 支持 signal（AbortSignal）：调用方关闭功能时可真正掐断在途请求。
@@ -148,6 +158,14 @@ function postJson(urlStr, headers, payload, timeoutMs, signal) {
     if (u.protocol !== "http:" && u.protocol !== "https:") {
       return reject(
         new Error(`API 地址协议不支持（${u.protocol}），只支持 http/https`)
+      );
+    }
+    if (u.protocol === "http:" && !isLoopbackHost(u.hostname)) {
+      return reject(
+        new Error(
+          `API 地址使用 http:// 明文协议仅限本机回环地址（127.x.x.x / localhost / [::1]），` +
+            `已拒绝：${u.hostname}。云端服务商请改用 https://`
+        )
       );
     }
     // 与 memory/imageGen.js 的 buildEndpoint 对齐：拒绝 URL 内嵌凭据，
@@ -550,6 +568,7 @@ module.exports = {
   decryptApiKey,
   isEncryptFailed,
   migrateLegacyApiKey,
+  isLoopbackHost,
   ENC_PREFIX,
   ENCRYPT_FAILED,
   MAX_RESPONSE_BYTES,

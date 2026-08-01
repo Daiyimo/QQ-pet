@@ -80,11 +80,24 @@ function buildMultipart(fields, images) {
   return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-// 带大小限制的 POST，返回 {statusCode, body(Buffer)}
-function postBuffer(urlStr, headers, body, timeoutMs, maxBytes) {
+// 带大小限制的 POST，返回 {statusCode, body(Buffer)}。
+// signal（AbortSignal）：调用方关闭功能/结束会话时掐断在途请求（同 llm/providers.js 的做法）。
+function postBuffer(urlStr, headers, body, timeoutMs, maxBytes, signal) {
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new Error("image API request aborted"));
+      return;
+    }
     const u = new URL(urlStr);
     const mod = u.protocol === "http:" ? http : https;
+    let settled = false;
+    let onAbort = null;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      fn(arg);
+    };
     const req = mod.request(
       {
         hostname: u.hostname,
@@ -100,20 +113,29 @@ function postBuffer(urlStr, headers, body, timeoutMs, maxBytes) {
           total += chunk.length;
           if (total > maxBytes) {
             res.destroy();
-            reject(new Error("image API response exceeds the allowed size"));
+            finish(reject, new Error("image API response exceeds the allowed size"));
             return;
           }
           chunks.push(chunk);
         });
-        res.on("end", () => resolve({ statusCode: res.statusCode, body: Buffer.concat(chunks) }));
-        res.on("error", reject);
+        res.on("end", () =>
+          finish(resolve, { statusCode: res.statusCode, body: Buffer.concat(chunks) })
+        );
+        res.on("error", (e) => finish(reject, e));
       }
     );
-    req.on("error", reject);
+    req.on("error", (e) => finish(reject, e));
     req.setTimeout(timeoutMs, () => {
       req.destroy();
-      reject(new Error("image API request failed: timeout"));
+      finish(reject, new Error("image API request failed: timeout"));
     });
+    if (signal) {
+      onAbort = () => {
+        req.destroy();
+        finish(reject, new Error("image API request aborted"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
     req.write(body);
     req.end();
   });
@@ -122,33 +144,49 @@ function postBuffer(urlStr, headers, body, timeoutMs, maxBytes) {
 // 二次下载（响应只给 url 时），同样限 25MB。
 // depth：重定向跳数，超过 MAX_REDIRECTS 即失败——否则自指向的 301 会无限跳转，
 // Promise 永不结算（每跳都是新请求，单次空闲超时也救不了）。
+// signal（AbortSignal）：掐断在途下载；重定向的每一跳都会继承同一个 signal。
 const MAX_REDIRECTS = 5;
 
-function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0) {
+function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0, signal) {
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new Error("generated image download aborted"));
+      return;
+    }
     const u = new URL(urlStr);
     if (u.protocol !== "http:" && u.protocol !== "https:") {
       reject(new Error("image API returned an unsupported image URL"));
       return;
     }
     const mod = u.protocol === "http:" ? http : https;
+    let settled = false;
+    let onAbort = null;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      fn(arg);
+    };
     const req = mod.get(u, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         if (depth >= MAX_REDIRECTS) {
-          reject(
+          finish(
+            reject,
             new Error(
               `generated image download failed: too many redirects (>${MAX_REDIRECTS})`
             )
           );
           return;
         }
-        resolve(
+        finish(
+          resolve,
           downloadBuffer(
             new URL(res.headers.location, u).toString(),
             timeoutMs,
             maxBytes,
-            depth + 1
+            depth + 1,
+            signal
           )
         );
         return;
@@ -159,19 +197,26 @@ function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0) {
         total += chunk.length;
         if (total > maxBytes) {
           res.destroy();
-          reject(new Error("image API response exceeds the allowed size"));
+          finish(reject, new Error("image API response exceeds the allowed size"));
           return;
         }
         chunks.push(chunk);
       });
-      res.on("end", () => resolve(Buffer.concat(chunks)));
-      res.on("error", reject);
+      res.on("end", () => finish(resolve, Buffer.concat(chunks)));
+      res.on("error", (e) => finish(reject, e));
     });
-    req.on("error", reject);
+    req.on("error", (e) => finish(reject, e));
     req.setTimeout(timeoutMs, () => {
       req.destroy();
-      reject(new Error("generated image download failed: timeout"));
+      finish(reject, new Error("generated image download failed: timeout"));
     });
+    if (signal) {
+      onAbort = () => {
+        req.destroy();
+        finish(reject, new Error("generated image download aborted"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
 }
 
@@ -196,8 +241,9 @@ function responseImage(payload) {
 
 class ImageGenerationClient {
   // providerCfg = {baseUrl, apiKey, modelName}；referenceImages 恰好 2 个 Buffer。
+  // signal（AbortSignal）：可选，功能关闭/会话结束时掐断在途生成。
   // 返回 {imageBuffer, ext}。
-  async generate({ providerCfg, prompt, referenceImages, timeoutMs }) {
+  async generate({ providerCfg, prompt, referenceImages, timeoutMs, signal }) {
     const cfg = providerCfg || {};
     const endpoint = buildEndpoint(cfg.baseUrl);
     const apiKey = String(cfg.apiKey || "").trim();
@@ -233,7 +279,8 @@ class ImageGenerationClient {
       },
       body,
       timeout,
-      MAX_JSON_BYTES
+      MAX_JSON_BYTES,
+      signal
     );
     if (statusCode < 200 || statusCode >= 300) {
       let detail = respBody.subarray(0, 4096).toString("utf8");
@@ -260,7 +307,7 @@ class ImageGenerationClient {
     }
     let { image, url } = responseImage(payload);
     if (!image && url) {
-      image = await downloadBuffer(url, timeout, MAX_IMAGE_BYTES);
+      image = await downloadBuffer(url, timeout, MAX_IMAGE_BYTES, 0, signal);
     }
     if (!image || !image.length) throw new Error("image API response contains no image");
     if (image.length > MAX_IMAGE_BYTES) throw new Error("generated image exceeds 25 MB");
@@ -326,7 +373,8 @@ function loadReferenceImages() {
 
 // 生成某天的日程信息图。参考图未配置 → {ok:false, reason:"no-reference"}；
 // 图像提供商未配置 → {ok:false, reason:"no-provider"}。成功 → {ok:true, metadata}。
-async function generateDailyImage({ store, dailyService, day }) {
+// signal（AbortSignal）：可选，贯穿到 generate 的 POST 与二次下载，掐断在途生成。
+async function generateDailyImage({ store, dailyService, day, signal }) {
   const refs = loadReferenceImages();
   if (!refs) return { ok: false, reason: "no-reference" };
   const providerRaw = sysGet("imageGenProvider");
@@ -355,7 +403,7 @@ async function generateDailyImage({ store, dailyService, day }) {
 
   const client = new ImageGenerationClient();
   const prompt = prompts.buildDailyImagePrompt({ day, review });
-  const { imageBuffer, ext } = await client.generate({ providerCfg, prompt, referenceImages: refs });
+  const { imageBuffer, ext } = await client.generate({ providerCfg, prompt, referenceImages: refs, signal });
   const metadata = exportImagesMeta({ store, day, imageBuffer, ext, modelName: providerCfg.modelName });
   return { ok: true, metadata };
 }

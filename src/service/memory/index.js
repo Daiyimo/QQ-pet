@@ -43,12 +43,16 @@ const memoryService = {
     return dailyService.generateDaily(day || localDayString(new Date()));
   },
 
-  // 生成日程信息图（参考图/图像提供商均来自 sys 配置，未配置时返回 {ok:false, reason}）
-  generateDailyImage(day) {
+  // 生成日程信息图（参考图/图像提供商均来自 sys 配置，未配置时返回 {ok:false, reason}）。
+  // opts.signal（AbortSignal）：可选，功能关闭/会话结束时掐断在途生成请求。
+  // 已知边界：目前唯一生产调用方（设置页 genDailyImage 菜单，setup/main.js）是手动触发、
+  // 未传 signal；在途生成靠 imageGen 内部的 300s 超时兜底，收益不足以在压缩代码里接线。
+  generateDailyImage(day, opts = {}) {
     return imageGen.generateDailyImage({
       store,
       dailyService,
       day: day || localDayString(new Date()),
+      signal: opts.signal,
     });
   },
 };

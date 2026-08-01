@@ -192,3 +192,68 @@ test("非 http/https 的 API 地址被明确拒绝而不是报 OpenSSL 天书", 
     /协议不支持/
   );
 });
+
+// —— http:// 明文协议仅限回环地址（本地 ollama 可用，非回环 http 拒绝）——
+test("isLoopbackHost：127.0.0.0/8、localhost、[::1] 放行，其余拒绝", () => {
+  for (const h of ["127.0.0.1", "127.0.1.2", "127.255.255.254", "localhost", "[::1]"]) {
+    assert.strictEqual(providers.isLoopbackHost(h), true, h);
+  }
+  for (const h of ["192.168.1.10", "10.0.0.5", "example.com", "128.0.0.1", "", "[::2]"]) {
+    assert.strictEqual(providers.isLoopbackHost(h), false, h);
+  }
+});
+
+test("非回环 http:// 地址被明确拒绝（不发请求、不报 OpenSSL 天书）", async () => {
+  await assert.rejects(
+    providers.chat({
+      providerCfg: {
+        id: "bad",
+        type: "openai",
+        baseUrl: "http://192.168.1.10:8080/v1",
+        apiKey: "sk-test",
+        model: "m",
+      },
+      messages: [{ role: "user", content: "你好" }],
+      timeoutMs: 3000,
+    }),
+    /http:\/\/ 明文协议仅限本机回环地址/
+  );
+  await assert.rejects(
+    providers.chat({
+      providerCfg: {
+        id: "bad",
+        type: "openai",
+        baseUrl: "http://example.com/v1",
+        apiKey: "sk-test",
+        model: "m",
+      },
+      messages: [{ role: "user", content: "你好" }],
+      timeoutMs: 3000,
+    }),
+    /回环地址/
+  );
+});
+
+test("回环 http:// 地址仍可用（127.x 实连，见首个用例的 127.0.0.1 全链路）", async () => {
+  const server = await startServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+  });
+  try {
+    const text = await providers.chat({
+      providerCfg: {
+        id: "local",
+        type: "openai",
+        // 127/8 内非 .1 地址也必须放行（本地多实例端口分流场景）
+        baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+        apiKey: "sk-test",
+        model: "m",
+      },
+      messages: [{ role: "user", content: "你好" }],
+      timeoutMs: 5000,
+    });
+    assert.strictEqual(text, "ok");
+  } finally {
+    await closeServer(server);
+  }
+});

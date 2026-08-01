@@ -131,8 +131,10 @@
           </div>
           <div class="childrenIn fC slider" v-if="stem.type == 'see'">
             <div>{{stem.label}}：</div>
-            <div v-if="stem?.vType == 'html'" v-html="stem.value"></div>
-            <div v-else class="seeValue">{{stem.value}}</div>
+            <!-- 历史上有过 vType:"html" + v-html 分支，数据源虽是本地静态字符串，
+                 但 v-html 是上膛枪（一旦有人接入动态数据即 XSS），已改为纯文本插值；
+                 需要多行展示的静态内容请放进 stem.values 数组逐行渲染。 -->
+            <div class="seeValue">{{stem.value}}</div>
             <div class="seeValues" v-for="(sstem, ssndex) in (stem.values || [])" :key="ssndex">
               <div v-if="sstem.img">
                 <img class="seeImg" :src="sstem.img" alt="" />

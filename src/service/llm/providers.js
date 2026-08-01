@@ -314,8 +314,24 @@ function redact(value, secret) {
   return secret ? String(value).split(secret).join("***") : String(value);
 }
 
+// baseUrl 末段是否已经是 API 版本段（/v1、/v2…）。
+// 服务商官网首页给的地址半数带版本段（https://api.moonshot.cn/v1）、半数不带
+// （https://api.deepseek.com、https://api.anthropic.com）；自建网关还会带路径前缀
+// （https://gw.example.com/openai/v1）或用 /v2。两条协议分支必须共用这一个判定，
+// 否则同一个 baseUrl 换个 type 就得到不同结果——本文件此前只有 anthropic 侧判了
+// endsWith("/v1")，openai 侧裸拼 /chat/completions，用户填不带 /v1 的地址永久 404。
+// 口径与原 anthropic 分支一致（只看末段），仅把写死的 /v1 放宽为 /v{数字}。
+const API_VERSION_SEGMENT_RE = /\/v\d+$/;
+
+function hasApiVersionSegment(base) {
+  return API_VERSION_SEGMENT_RE.test(base);
+}
+
 async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
-  const url = String(cfg.baseUrl || "").replace(/\/+$/, "") + "/chat/completions";
+  const base = String(cfg.baseUrl || "").replace(/\/+$/, "");
+  const url = hasApiVersionSegment(base)
+    ? base + "/chat/completions"
+    : base + "/v1/chat/completions";
   const payload = {
     model: cfg.model,
     messages: mergeImagesOpenAI(messages, images),
@@ -356,9 +372,9 @@ async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeo
 
 async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
   const base = (cfg.baseUrl || "https://api.anthropic.com").replace(/\/+$/, "");
-  // baseUrl 已带 /v1 时（如 Step Plan 的 .../step_plan/v1）直接拼 /messages，
-  // 否则补 /v1/messages（如 https://api.anthropic.com）
-  const url = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
+  // baseUrl 已带版本段时（如 Step Plan 的 .../step_plan/v1）直接拼 /messages，
+  // 否则补 /v1/messages（如 https://api.anthropic.com）；判定见 hasApiVersionSegment
+  const url = hasApiVersionSegment(base) ? base + "/messages" : base + "/v1/messages";
   const { system, messages: conv } = convertMessagesAnthropic(messages, images);
   const payload = {
     model: cfg.model,

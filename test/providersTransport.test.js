@@ -257,3 +257,92 @@ test("回环 http:// 地址仍可用（127.x 实连，见首个用例的 127.0.0
     await closeServer(server);
   }
 });
+
+// —— baseUrl 版本段兼容：openai / anthropic 两条分支必须同口径 ——
+// 背景：服务商官网首页给的地址半数不带 /v1（https://api.deepseek.com），
+// openai 分支此前裸拼 /chat/completions，这类地址永久 404。
+
+// 起一个同时能应答两种协议的本地服务，返回实际收到的请求路径
+async function startPathRecorder() {
+  const paths = [];
+  const server = await startServer((req, res) => {
+    paths.push(req.url);
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        choices: [{ message: { content: "ok" } }], // openai 形状
+        content: [{ type: "text", text: "ok" }], // anthropic 形状
+      })
+    );
+  });
+  return { server, paths };
+}
+
+// [输入 baseUrl 后缀, 期望的请求路径前缀]，端口在用例里拼上
+const VERSION_SEGMENT_CASES = [
+  ["/v1", "/v1"], // 带 /v1：原样使用
+  ["", "/v1"], // 不带版本段：补 /v1
+  ["/", "/v1"], // 只有尾斜杠：去斜杠后补 /v1
+  ["/v1/", "/v1"], // 带 /v1 + 尾斜杠：去斜杠后原样使用
+  ["/v2", "/v2"], // 非 1 的版本号也认（不写死 /v1）
+  ["/openai/v1", "/openai/v1"], // 网关路径前缀 + 版本段：前缀保留
+  ["/gw/openai", "/gw/openai/v1"], // 网关路径前缀但无版本段：前缀保留并补 /v1
+];
+
+test("openai：baseUrl 带/不带版本段都拼出正确的 chat/completions 路径", async () => {
+  const { server, paths } = await startPathRecorder();
+  const port = server.address().port;
+  try {
+    for (const [suffix, expectPrefix] of VERSION_SEGMENT_CASES) {
+      paths.length = 0;
+      const text = await providers.chat({
+        providerCfg: {
+          id: "local",
+          type: "openai",
+          baseUrl: `http://127.0.0.1:${port}${suffix}`,
+          apiKey: "sk-test",
+          model: "m",
+        },
+        messages: [{ role: "user", content: "你好" }],
+        timeoutMs: 5000,
+      });
+      assert.strictEqual(text, "ok", suffix);
+      assert.deepStrictEqual(
+        paths,
+        [`${expectPrefix}/chat/completions`],
+        `baseUrl 后缀「${suffix}」`
+      );
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("anthropic：baseUrl 版本段判定与 openai 完全同口径", async () => {
+  const { server, paths } = await startPathRecorder();
+  const port = server.address().port;
+  try {
+    for (const [suffix, expectPrefix] of VERSION_SEGMENT_CASES) {
+      paths.length = 0;
+      const text = await providers.chat({
+        providerCfg: {
+          id: "local",
+          type: "anthropic",
+          baseUrl: `http://127.0.0.1:${port}${suffix}`,
+          apiKey: "sk-test",
+          model: "m",
+        },
+        messages: [{ role: "user", content: "你好" }],
+        timeoutMs: 5000,
+      });
+      assert.strictEqual(text, "ok", suffix);
+      assert.deepStrictEqual(
+        paths,
+        [`${expectPrefix}/messages`],
+        `baseUrl 后缀「${suffix}」`
+      );
+    }
+  } finally {
+    await closeServer(server);
+  }
+});

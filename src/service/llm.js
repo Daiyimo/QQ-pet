@@ -5,7 +5,29 @@ const { extractJsonObject } = _require("./llm/jsonParse.js");
 const DEFAULT_MODEL = "deepseek-chat";
 const LEGACY_BASE_URL = "https://api.deepseek.com/v1";
 const MAX_QUEUE = 3;
-const TIMEOUT_MS = 8000;
+// 台词链超时：原值 8000 与本文件的 512 max_tokens 预算自相矛盾——512 的依据正是
+// "推理模型的 thinking 也吃输出额度"，而推理模型 8 秒内几乎出不完 thinking + 正文，
+// 结果是服务端已生成并计费、客户端一律掐断降级。取 30000 与 llm/providers.js 的
+// DEFAULT_TIMEOUT_MS、perception/loop.js 的感知超时同值（不引入第三个量级）：
+// 台词是预取/异步、失败即离线兜底，不阻塞 UI；且 _pending 互斥保证同一 tolkName
+// 最多一条在途，拉长超时不会堆积请求。
+const TIMEOUT_MS = 30000;
+// 台词字段长度上限：提示词要求 tolk ≤15 字、submitText ≤5 字，这里留约 3~4 倍余量
+// 只兜住"模型跑飞写出长篇"，正常输出不会被截。气泡正文与按钮宽度都有限。
+const MAX_TOLK_LEN = 60;
+const MAX_SUBMIT_LEN = 10;
+
+// —— 连续失败退避（Key 失效 / 欠费 / 断网时的止损）——
+// 此前无退避：待机、喂食、清洁、升级、上线每个触发点都各打一次请求，每次刷一条完整堆栈。
+// 阈值 3 与 perception/loop.js 的 PERCEPTION_FAILURE_NOTIFY_THRESHOLD 同值：
+// 足以滤掉单次网络抖动，又能快速识别"必然失败"的配置错误。
+const FAILURE_THRESHOLD = 3;
+// 冷却 5 分钟：用户发现台词变离线 → 打开设置页改配置的典型耗时量级；
+// 冷却到期后放一次请求探活（不清零计数），恢复后首次成功即完全复位，无需重启。
+const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+// 日志节流，与 loop.js 的 PERCEPTION_FAILURE_LOG_EVERY 同值：首次 + 进入冷却时各一条，
+// 之后每 10 次一条（配合 5 分钟冷却≈每 50 分钟一条，足够确认故障仍在持续又不刷屏）。
+const FAILURE_LOG_EVERY = 10;
 
 const SYSTEM_PROMPT = (petInfo) => {
   const info = petInfo?.info || {};
@@ -65,9 +87,24 @@ function resolveProvider() {
   return providers.getChatProvider();
 }
 
+// 台词字段归一化：模型偶发把本该是字符串的字段写成 {"text":"…"} 或 ["…"]
+// （temperature 0.9 + 15 字硬约束下确实会发生），String() 会得到 "[object Object]"
+// 并被调用方直接塞进气泡正文 / 按钮文案。与 perception/loop.js 的 str() 同口径
+// （对象/数组一律判空 + trim + 限长）；那里的弹幕曾因此上屏，本文件当时漏改。
+// 说明：本函数没有做成 llm/jsonParse.js 里的共用导出（那才是两处该共用的落点），
+// 原因是本次改动被限定在 llm.js / providers.js 内，见交付说明。
+function normSpeakField(value, limit) {
+  if (value == null) return "";
+  if (typeof value === "object") return "";
+  return String(value).trim().slice(0, limit);
+}
+
 // 走统一提供商层发起单轮对话，并解析 {tolk,submitText} JSON 契约。
 // 解析走 llm/jsonParse.js 的健壮实现（模型带前置解释文字 / markdown 围栏 / 被截断都能救回），
 // 与 perception/loop.js 共用同一套标准。
+// 解析出的字段还要过一层类型/长度归一：tolk 归一后为空即视为本次生成失败（抛错 → 调用方
+// 走离线兜底），submitText 归一后为空则交给调用方既有的 `|| "嗯"` 兜底——
+// 只是按钮文案缺失，没必要让整条台词作废。
 function callLLM(providerCfg, messages) {
   return providers
     .chat({
@@ -77,12 +114,60 @@ function callLLM(providerCfg, messages) {
       temperature: 0.9,
       timeoutMs: TIMEOUT_MS,
     })
-    .then((content) => extractJsonObject(content, "台词模型"));
+    .then((content) => {
+      const raw = extractJsonObject(content, "台词模型");
+      const tolk = normSpeakField(raw.tolk, MAX_TOLK_LEN);
+      if (!tolk) {
+        throw new Error(
+          "台词模型的 tolk 字段不是非空字符串: " +
+            JSON.stringify(raw).slice(0, 200)
+        );
+      }
+      return {
+        ...raw,
+        tolk,
+        submitText: normSpeakField(raw.submitText, MAX_SUBMIT_LEN),
+      };
+    });
 }
 
 class LLMService {
   _queues = {};
   _pending = {};
+  // 连续失败计数与冷却截止时间戳（0 表示未冷却）；跨 tolkName/promptType 共享，
+  // 因为主因（Key 失效 / 欠费 / 断网）是全局的，按触发点分别计数只会把请求数乘以触发点数量。
+  _failCount = 0;
+  _cooldownUntil = 0;
+
+  _inCooldown() {
+    return this._cooldownUntil > Date.now();
+  }
+
+  _noteSuccess() {
+    this._failCount = 0;
+    this._cooldownUntil = 0;
+  }
+
+  // 失败记账 + 日志节流。降级行为不变（调用方继续用离线台词），
+  // 只是不再每次都刷一条完整堆栈，并在连续失败达阈值后停止发请求。
+  _noteFailure(label, e) {
+    this._failCount += 1;
+    const n = this._failCount;
+    const entering = n === FAILURE_THRESHOLD;
+    if (n >= FAILURE_THRESHOLD) {
+      this._cooldownUntil = Date.now() + FAILURE_COOLDOWN_MS;
+    }
+    if (n === 1 || entering || n % FAILURE_LOG_EVERY === 0) {
+      console.error(
+        `[llm] ${label}失败（连续第 ${n} 次${
+          entering
+            ? `，已进入 ${FAILURE_COOLDOWN_MS / 60000} 分钟冷却，期间直接用离线台词`
+            : ""
+        }），已降级为离线台词:`,
+        e && e.stack ? e.stack : e
+      );
+    }
+  }
 
   dequeue(tolkName) {
     return this._queues[tolkName]?.shift() || null;
@@ -92,6 +177,7 @@ class LLMService {
     if (!getSys("llmEnabled")) return;
     const providerCfg = resolveProvider();
     if (!providerCfg) return;
+    if (this._inCooldown()) return;
     if (!this._queues[tolkName]) this._queues[tolkName] = [];
     if (this._queues[tolkName].length >= MAX_QUEUE || this._pending[tolkName]) return;
     this._pending[tolkName] = true;
@@ -102,14 +188,12 @@ class LLMService {
     ])
       .then((r) => {
         if (r?.tolk) this._queues[tolkName].push(r);
+        this._noteSuccess();
       })
       .catch((e) => {
-        // 降级行为不变（本次预取作废，调用方继续用离线台词），但必须留下完整堆栈：
-        // Key 失效 / 欠费 / 断网 / 模型返回非 JSON 都在这里，静默吞掉会让问题不可观测
-        console.error(
-          `[llm] 台词预取失败（tolkName=${tolkName}），本次跳过:`,
-          e && e.stack ? e.stack : e
-        );
+        // 降级行为不变（本次预取作废，调用方继续用离线台词）；
+        // Key 失效 / 欠费 / 断网 / 模型返回非 JSON 都在这里，日志与冷却统一由 _noteFailure 管
+        this._noteFailure(`台词预取（tolkName=${tolkName}）`, e);
       })
       .finally(() => {
         this._pending[tolkName] = false;
@@ -156,6 +240,7 @@ class LLMService {
     if (!getSys("llmEnabled")) return Promise.resolve(null);
     const providerCfg = resolveProvider();
     if (!providerCfg) return Promise.resolve(null);
+    if (this._inCooldown()) return Promise.resolve(null);
     const builder = DYNAMIC_PROMPTS[promptType];
     const userPrompt = builder
       ? builder(contextData)
@@ -165,13 +250,14 @@ class LLMService {
       { role: "system", content: SYSTEM_PROMPT(petInfo) },
       { role: "user", content: userPrompt },
     ])
-      .then((r) => (r?.tolk ? r : null))
+      .then((r) => {
+        if (!r?.tolk) return null;
+        this._noteSuccess();
+        return r;
+      })
       .catch((e) => {
-        // 降级为 null（调用方走离线兜底台词），但必须留完整堆栈
-        console.error(
-          `[llm] 台词生成失败（promptType=${promptType}），已降级为离线台词:`,
-          e && e.stack ? e.stack : e
-        );
+        // 降级为 null（调用方走离线兜底台词）；日志与冷却统一由 _noteFailure 管
+        this._noteFailure(`台词生成（promptType=${promptType}）`, e);
         return null;
       });
   }
@@ -179,5 +265,15 @@ class LLMService {
 
 global.llmService = new LLMService();
 global.LLM_MAX_CLIPBOARD_LEN = MAX_CLIPBOARD_LEN;
-// SYSTEM_PROMPT 仅暴露给单元测试校验量纲/字段（生产代码不要引用）
-module.exports = { __SYSTEM_PROMPT: SYSTEM_PROMPT };
+// 以下仅暴露给单元测试（校验提示词量纲/字段归一/退避常量），生产代码不要引用
+module.exports = {
+  __SYSTEM_PROMPT: SYSTEM_PROMPT,
+  __LLMService: LLMService,
+  __normSpeakField: normSpeakField,
+  __TIMEOUT_MS: TIMEOUT_MS,
+  __MAX_TOLK_LEN: MAX_TOLK_LEN,
+  __MAX_SUBMIT_LEN: MAX_SUBMIT_LEN,
+  __FAILURE_THRESHOLD: FAILURE_THRESHOLD,
+  __FAILURE_COOLDOWN_MS: FAILURE_COOLDOWN_MS,
+  __FAILURE_LOG_EVERY: FAILURE_LOG_EVERY,
+};

@@ -136,6 +136,21 @@ test("openLocalHost：端口全被占用时回调收到 null（不再永不触�
   });
 });
 
+// 上面那条断言是「相对常量」的：它保护的是"真的按 LISTEN_MAX_ATTEMPTS 试了这么多次"这个行为，
+// 但把常量从 5 改成 6 它照样全绿。下面这条是「值锁」，两件事，都要有。
+test("LISTEN_MAX_ATTEMPTS 值锁：改这个数字要走评审", async () => {
+  await withRoot([], ({ root }) => {
+    assert.equal(
+      root.LISTEN_MAX_ATTEMPTS,
+      5,
+      "LISTEN_MAX_ATTEMPTS 被改动了。改这个数字需要评审：它决定端口被占用时最多试几个端口" +
+        "（33385..33385+N-1），直接决定用户可感知的启动失败等待时长——每次尝试都要等一个 TCP 绑定" +
+        "往返，试满才回调 null 弹降级提示。调大 = 用户干等更久，调小 = 端口冲突时更容易直接失败。" +
+        "若确实要调，请连同本断言与 README 的端口说明一并改，别只把测试数字对齐。"
+    );
+  });
+});
+
 test("绑定地址恒为 127.0.0.1（README 声称：不对局域网暴露 src/）", async () => {
   await withRoot([BASE_PORT, BASE_PORT + 1], async ({ attempts, openLocalHost }) => {
     await openOnce(openLocalHost);

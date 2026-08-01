@@ -5,7 +5,7 @@
  * 涉及文件均为 webpack 压缩单行产物，按项目惯例做结构断言：接入点被误删即红。
  */
 
-const { test } = require("node:test");
+const { test, mock } = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -70,18 +70,124 @@ test("悬浮展开控制条：控制窗接入 onControlHover 信号", () => {
   );
 });
 
-test("controlBarHover 模块行为：1500ms 延迟、对象形式 changeState、降级不炸", () => {
+/**
+ * 给已加载的 control 单例装 changeState spy 并接管 setTimeout，跑完复原。
+ * 纯 node 下 control/main.js 能加载但 state 为 undefined，因此必须在测试侧直接把
+ * state 赋成 "hide"/"menu"/"active"，否则 controlBarHover 的两处 state 判断永远不成立、
+ * changeState 一次都不会被调用（此前本文件的行为测试就是这样假绿的）。
+ * @param {string|undefined} state 假定的控制条状态
+ * @param {(ctx:{control:object,calls:object[],tick:(ms:number)=>void})=>void} fn
+ * @param {Function} [changeStateImpl] 覆写 changeState 实现（测降级路径用）
+ */
+function withControlSpy(state, fn, changeStateImpl) {
+  const hover = require(path.join(ROOT, "src/windows/util/controlBarHover.js"));
+  const control = require(path.join(ROOT, "src/windows/popups/control/main.js"));
+  const origChangeState = control.changeState;
+  const origState = control.state;
+  const calls = [];
+  control.changeState = (o) => {
+    calls.push(o);
+    if (changeStateImpl) changeStateImpl(o);
+  };
+  control.state = state;
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    fn({ hover, control, calls, tick: (ms) => mock.timers.tick(ms) });
+  } finally {
+    hover.onControlHover(true); // 清掉可能仍挂着的 hideTimer，避免污染后续测试
+    mock.timers.reset();
+    control.changeState = origChangeState;
+    control.state = origState;
+  }
+  return calls;
+}
+
+test("悬浮宠物本体：收起态控制条展开为菜单态", () => {
+  const calls = withControlSpy("hide", ({ hover }) => hover.onPetHover(true));
+  assert.deepStrictEqual(
+    calls,
+    [{ type: "menu" }],
+    'state==="hide" 时 onPetHover(true) 应立即 changeState({type:"menu"})'
+  );
+});
+
+test("悬浮宠物本体：二级面板展开态（active）不被改写，避免打断操作", () => {
+  const calls = withControlSpy("active", ({ hover }) => hover.onPetHover(true));
+  assert.deepStrictEqual(calls, [], 'active 态不应被 hover 改成 menu（只有 "hide" 才展开）');
+});
+
+test("鼠标离开宠物：满 1500ms 才收起菜单态控制条，不到点不收", () => {
   const hover = require(path.join(ROOT, "src/windows/util/controlBarHover.js"));
   assert.strictEqual(hover.HOVER_HIDE_DELAY_MS, 1500, "收起延迟应对齐官方 1.2.5 的 1500ms");
-  assert.strictEqual(typeof hover.onPetHover, "function");
-  assert.strictEqual(typeof hover.onControlHover, "function");
-  // 无 Electron 环境下 control 模块加载失败，调用应安全降级而不是抛异常
-  assert.doesNotThrow(() => {
-    hover.onPetHover(true);
-    hover.onPetHover(false);
-    hover.onControlHover(true);
-    hover.onControlHover(false);
+  withControlSpy("menu", ({ hover: h, calls, tick }) => {
+    h.onPetHover(false);
+    tick(hover.HOVER_HIDE_DELAY_MS - 1);
+    assert.deepStrictEqual(calls, [], "1499ms 时不应收起");
+    tick(1);
+    assert.deepStrictEqual(
+      calls,
+      [{ type: "hide" }],
+      'state==="menu" 且满 1500ms 应 changeState({type:"hide"})'
+    );
+    tick(5000);
+    assert.deepStrictEqual(calls, [{ type: "hide" }], "收起只应发生一次（计时器不重排）");
   });
+});
+
+test("鼠标离开宠物：菜单态以外（hide/active）到点也不收起", () => {
+  for (const state of ["hide", "active"]) {
+    const calls = withControlSpy(state, ({ hover, tick }) => {
+      hover.onPetHover(false);
+      tick(2000);
+    });
+    assert.deepStrictEqual(calls, [], `state==="${state}" 不应被自动收起`);
+  }
+});
+
+test("鼠标离开宠物后又移回控制条：取消本次自动收起", () => {
+  const calls = withControlSpy("menu", ({ hover, tick }) => {
+    hover.onPetHover(false); // 离开宠物，排定 1500ms 后收起
+    tick(1000);
+    hover.onControlHover(true); // 中途移到控制条按钮上
+    tick(5000);
+  });
+  assert.deepStrictEqual(calls, [], "计时期间收到 inside 信号必须作废收起，否则用户点按会被收走");
+});
+
+test("离开控制条同样触发 1500ms 收起（两个窗口信号等价）", () => {
+  const calls = withControlSpy("menu", ({ hover, tick }) => {
+    hover.onControlHover(false);
+    tick(1500);
+  });
+  assert.deepStrictEqual(calls, [{ type: "hide" }], "onControlHover(false) 应与 onPetHover(false) 同语义");
+});
+
+test("changeState 抛异常时悬浮信号安全降级，不打炸主进程", () => {
+  const calls = withControlSpy(
+    "hide",
+    ({ hover }) => {
+      assert.doesNotThrow(() => hover.onPetHover(true), "changeState 抛错必须被 try/catch 吞掉并记日志");
+    },
+    () => {
+      throw new Error("control 窗口未就绪");
+    }
+  );
+  assert.deepStrictEqual(calls, [{ type: "menu" }], "应确实走进了抛异常的 changeState 调用");
+});
+
+test("收起前复核 lastHoverInside 守卫仍在（防止鼠标移回控制条却被收起）", () => {
+  // 该守卫是 clearHideTimer 之外的第二道防线：单线程下任何 inside 信号都会先清掉计时器，
+  // 所以它在导出 API 层面不可达，行为测试无法覆盖，只能对源码结构断言把它钉住。
+  const src = readSource("src/windows/util/controlBarHover.js");
+  const body = src.slice(src.indexOf("function scheduleHide"), src.indexOf("function onPetHover"));
+  assert.ok(
+    /if \(lastHoverInside\) return;/.test(body),
+    "scheduleHide 的定时器回调必须保留 lastHoverInside 复核"
+  );
+  assert.ok(
+    body.indexOf("if (lastHoverInside) return;") < body.indexOf("changeState"),
+    "lastHoverInside 复核必须在 changeState 之前，否则形同虚设"
+  );
 });
 
 test("controlBarHover 模块不使用字符串形式 changeState（既有 bug 不照抄）", () => {

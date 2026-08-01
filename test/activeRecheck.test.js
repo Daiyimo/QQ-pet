@@ -2,6 +2,8 @@
 // 运行：node --test test/activeRecheck.test.js
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const { canDoActive } = require("../src/windows/util/activeRecheck.js");
 
@@ -99,6 +101,34 @@ test("TOCTOU：确认前放行、确认时状态已变则必须拒绝（同一 p
   assert.equal(canDoActive(confirmed, okState({ trip: { id: 9 } })).reason, "busy");
   // 中途死亡
   assert.equal(canDoActive(confirmed, okState({ ill: { type: "dead" } })).reason, "dead");
+});
+
+test("TOCTOU：复检必须发生在 activeIt 早退之前（control/main.js 压缩区调用顺序）", () => {
+  // 上一条只验证纯函数本身，无法发现"复检被挪到 if(!i.activeIt) 之后"——那样二次确认路径
+  // 会绕过复检，8 条纯函数断言仍全绿。这里按项目惯例（见 pinkDiamond125.test.js）对压缩
+  // 产物做结构断言，把调用顺序钉死：整段连续文本必须原样存在。
+  const src = fs.readFileSync(
+    path.join(__dirname, "..", "src/windows/popups/control/main.js"),
+    "utf8"
+  );
+  for (const type of ["work", "study"]) {
+    const frag =
+      `if("${type}"==i.type){const _c=_canDoActive(i,_readActiveState());` +
+      `if(!_c.ok)return i.activeIt&&console.warn("[control] ${type} 二次确认复检未通过，已拦截:",_c.reason),` +
+      `void t.webContents.send("control_bus-html_setActiveData",{data:{msg:_c.msg},type:"err"});` +
+      `if(!i.activeIt)return`;
+    assert.ok(
+      src.includes(frag),
+      `${type} 分支必须先 _canDoActive(i,_readActiveState()) 复检并在 !ok 时 return，` +
+        `再走 if(!i.activeIt) 的首次确认早退；顺序被调换或复检被删即视为回归`
+    );
+  }
+  // 防止"顺序对了但又在别处补了一次调用"的伪修复：全文只应有 work/study 两处复检
+  assert.equal(
+    src.split("_canDoActive(i,_readActiveState())").length - 1,
+    2,
+    "_canDoActive 复检应只出现在 work / study 两个分支"
+  );
 });
 
 test("入参/状态缺失时不抛异常，按拒绝或安全默认处理", () => {

@@ -30,8 +30,11 @@ const FALLBACK = {
 
 // 2026-08-01 10:00:00 本地时间：白天，保证深夜劝睡不会混进其他用例
 const DAYTIME = new Date(2026, 7, 1, 10, 0, 0).getTime();
-const at = (hour, minute = 0, day = 1) =>
-  new Date(2026, 7, day, hour, minute, 0).getTime();
+const at = (hour, minute = 0, day = 1, month = 7) =>
+  new Date(2026, month, day, hour, minute, 0).getTime();
+// 生产代码里"本晚已劝过"的持久化键名（src/service/focusGuard.js 的 LATE_NIGHT_SYS_KEY）；
+// 键名是存档兼容契约的一部分，改名必须来改这里。
+const LATE_NIGHT_SYS_KEY = "focusLateNightDoneNight";
 
 /** 假 Date：new Date() 与 Date.now() 都读 clock.now，其余用法保持原生行为 */
 function installClock(clock) {
@@ -63,6 +66,8 @@ function makeEnv(opts = {}) {
     speaks: [],
     llmCalls: [],
     errors: [],
+    sysWrites: [],
+    sysWriteError: null,
     clock: { now: opts.now === undefined ? DAYTIME : opts.now },
     sys: {
       focusEnabled: true,
@@ -96,12 +101,20 @@ function makeEnv(opts = {}) {
 
   const saved = {
     getSys: global.getSys,
+    setSys: global.setSys,
     openSpeak: global.openSpeak,
     llmService: global.llmService,
     getPetInfo: global.getPetInfo,
     error: console.error,
   };
   global.getSys = (k) => env.sys[k];
+  // 与 src/ini/pet.js 的真 setSys 同签名（{name, value}）且同语义：写内存 sys 再落盘。
+  // env.sysWrites 是落盘流水，用来精确断言"每晚只写一次去重标记"。
+  global.setSys = ({ name, value } = {}) => {
+    if (env.sysWriteError) throw env.sysWriteError;
+    env.sys[name] = value;
+    env.sysWrites.push({ name, value });
+  };
   global.openSpeak = (payload) => env.speaks.push(payload);
   global.getPetInfo = () => ({ info: { name: "小狗" } });
   console.error = (...args) => env.errors.push(args.join(" "));
@@ -111,6 +124,8 @@ function makeEnv(opts = {}) {
     restoreClock();
     console.error = saved.error;
     global.getSys = saved.getSys;
+    if (saved.setSys === undefined) delete global.setSys;
+    else global.setSys = saved.setSys;
     global.openSpeak = saved.openSpeak;
     global.getPetInfo = saved.getPetInfo;
     if (saved.llmService === undefined) delete global.llmService;
@@ -342,28 +357,119 @@ test("护眼冷却边界：满 20 分钟冷却前差 1 毫秒不提醒，到点�
   });
 });
 
-test("深夜劝睡按 60 分钟冷却复发，没有「每晚只劝一次」的跨天去重", () => {
+// 深夜劝睡改为"每晚只劝一次"（旧行为是 60 分钟冷却无上限、且无跨天去重，熬到 4 点被劝 6 次）
+const ONLY_LATE_NIGHT = {
+  sys: { focusEyeReminder: false, focusSedentaryReminder: false },
+};
+
+test("深夜劝睡每晚只劝一次：22:00 劝过后 22:30 / 23:00 / 次日 03:59 都不再劝", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    env.clock.now = at(22, 30);
+    env.tick(0, 1);
+    env.clock.now = at(23, 0); // 旧实现在这里满 60 分钟冷却，会劝第二次
+    env.tick(0, 1);
+    env.clock.now = at(3, 59, 2); // 同一晚的凌晨侧
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    // 去重标记只写一次盘，值是这一晚的标识（22:00 那侧用当天日期）
+    assert.deepEqual(env.sysWrites, [
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-01" },
+    ]);
+  });
+});
+
+test("深夜劝睡跨午夜同属一晚：23:50 劝过后 00:10 与 03:59 都不再劝", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(23, 50) }, (env) => {
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    env.clock.now = at(0, 10, 2); // 跨过午夜，日期变了，但还是同一晚
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    env.clock.now = at(3, 59, 2);
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    assert.deepEqual(env.sysWrites, [
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-01" },
+    ]);
+  });
+});
+
+test("深夜劝睡跨月同属一晚：08-31 23:00 劝过后 09-01 00:30 不再劝", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(23, 0, 31, 7) }, (env) => {
+    env.tick(0, 1);
+    env.clock.now = at(0, 30, 1, 8); // 9 月 1 日凌晨：夜晚标识要回退到 8 月 31 日
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    assert.deepEqual(env.sysWrites, [
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-31" },
+    ]);
+  });
+});
+
+test("深夜劝睡下一晚恢复：第一晚劝过后，第二晚 22:00 再劝一次", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(23, 0) }, (env) => {
+    env.tick(0, 1);
+    env.clock.now = at(2, 0, 2); // 同一晚凌晨：不劝
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    env.clock.now = at(22, 0, 2); // 第二晚：换了夜晚标识，恢复提醒
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight, FALLBACK.lateNight]);
+    assert.deepEqual(env.sysWrites, [
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-01" },
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-02" },
+    ]);
+  });
+});
+
+test("深夜劝睡去重跨进程重启生效：sys 里已有本晚标识时凌晨启动不再劝", () => {
   withEnv(
     {
-      sys: { focusEyeReminder: false, focusSedentaryReminder: false },
-      now: at(22, 0),
+      sys: {
+        ...ONLY_LATE_NIGHT.sys,
+        [LATE_NIGHT_SYS_KEY]: "2026-08-01", // 上次进程在 08-01 23:00 劝过并落盘
+      },
+      now: at(1, 0, 2), // 重启后是次日凌晨 01:00，仍属 08-01 那一晚
     },
     (env) => {
       env.tick(0, 1);
-      env.clock.now = at(22, 30);
-      env.tick(0, 1); // 冷却未满
-      assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
-      env.clock.now = at(23, 0);
-      env.tick(0, 1); // 冷却满 60 分钟，再劝一次
-      env.clock.now = at(22, 0, 2); // 第二天同一时刻：照样劝，不存在跨天抑制
-      env.tick(0, 1);
-      assert.deepEqual(env.texts(), [
-        FALLBACK.lateNight,
-        FALLBACK.lateNight,
-        FALLBACK.lateNight,
-      ]);
+      assert.deepEqual(env.texts(), []);
+      assert.deepEqual(env.sysWrites, []);
     }
   );
+});
+
+test("深夜劝睡去重标记落盘失败时仍只劝一次，并记带堆栈的错误日志", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    env.sysWriteError = new Error("存档写盘失败");
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    assert.equal(env.errors.length, 1);
+    assert.match(env.errors[0], /\[focusGuard\].*落盘失败.*仅本进程内存生效/);
+    assert.match(env.errors[0], /存档写盘失败/);
+    env.clock.now = at(23, 30); // 内存镜像仍在：本晚不再劝
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    env.guard.stop();
+    env.guard.start(); // 落盘失败后又关开一次守护：内存镜像必须活过 start()
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+  });
+});
+
+test("关掉再打开专注守护不会重新劝睡：start() 清冷却记录但保留本晚已劝标记", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    env.guard.stop();
+    env.guard.start(); // 用户在设置里关掉又打开
+    assert.deepEqual(env.guard.lastReminders, {});
+    env.clock.now = at(23, 0);
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+  });
 });
 
 test("离开 5 分钟以上清零护眼计时，10 分钟以上才清零久坐计时", () => {

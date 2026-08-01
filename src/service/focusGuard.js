@@ -5,12 +5,21 @@ const providers = _require("./llm/providers.js");
 const TICK_INTERVAL_MS = 30 * 1000;
 const ACTIVE_THRESHOLD_SEC = 60;
 
+// 深夜劝睡时段：22:00 起，到次日 04:00 前（04:00 起算清晨，不再劝）。
+// 与旧实现的 `hour >= 22 || hour < 4` 判定等价，只是把两个魔法数字提成常量。
+const LATE_NIGHT_START_HOUR = 22;
+const LATE_NIGHT_END_HOUR = 4;
+// "本晚已劝过"的持久化键（存 sys）。值是 _nightId() 生成的夜晚标识（"YYYY-MM-DD"），
+// 单键覆盖写：不累积历史记录，因此无需任何清理逻辑，占用恒为一个短字符串。
+// sys 不在 storeCache 的 DEBOUNCED_KEYS 里（写穿立即落盘），但本键每晚最多写一次，
+// 一晚一次同步写盘的成本可忽略。
+const LATE_NIGHT_SYS_KEY = "focusLateNightDoneNight";
+
 const DEFAULTS = {
   focusEyeMin: 25,
   focusEyeCooldownMin: 20,
   sedentaryMin: 50,
   sedentaryCooldownMin: 30,
-  lateNightCooldownMin: 60,
   welcomeBackThresholdMin: 15,
   welcomeBackCooldownMin: 30,
   activeResetIdleMin: 5,
@@ -33,6 +42,10 @@ class FocusGuard {
     this.lastReminders = {};
     // 每次 start()/stop() 自增：_fireReminder 里在途的 LLM 台词靠它判断"自己是否已过期"
     this._epoch = 0;
+    // 最近一次深夜劝睡的"夜晚标识"（内存镜像，权威值在 sys[LATE_NIGHT_SYS_KEY]）。
+    // 刻意**不**在 start() 里清空：用户关掉再打开专注守护、或换个开关折腾一圈，
+    // 都不该换来第二次劝睡。
+    this._lateNightNightId = "";
   }
 
   start() {
@@ -72,6 +85,42 @@ class FocusGuard {
 
   _markReminded(type) {
     this.lastReminders[type] = Date.now();
+  }
+
+  /**
+   * 把时刻映射成"夜晚标识"（"YYYY-MM-DD"）：
+   *   · 22:00-23:59 → 当天日期
+   *   · 00:00-03:59 → **前一天**日期
+   * 为什么不能直接用当天日期做去重键：深夜时段跨午夜，1 月 1 日 23:50 与 1 月 2 日 00:10
+   * 属于同一晚，用当天日期会落到两个不同的键 —— 等于"每晚一次"退化成"每晚两次"。
+   * 前移一天后同一晚的午夜两侧共用同一个标识，跨月/跨年由 Date.setDate(-1) 自然处理。
+   */
+  _nightId(now) {
+    const d = new Date(now.getTime());
+    if (now.getHours() < LATE_NIGHT_END_HOUR) d.setDate(d.getDate() - 1);
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${month}-${day}`;
+  }
+
+  /** 这一晚是否已经劝过：内存镜像优先，其次读 sys（覆盖"进程重启后"的情形） */
+  _lateNightDone(nightId) {
+    if (this._lateNightNightId === nightId) return true;
+    return getSys(LATE_NIGHT_SYS_KEY) === nightId;
+  }
+
+  _markLateNightDone(nightId) {
+    // 先写内存镜像：落盘失败时至少本进程内不会反复唠叨
+    this._lateNightNightId = nightId;
+    if (typeof setSys !== "function") return;
+    try {
+      setSys({ name: LATE_NIGHT_SYS_KEY, value: nightId });
+    } catch (e) {
+      console.error(
+        "[focusGuard] 深夜劝睡去重标记落盘失败，本晚去重降级为仅本进程内存生效（重启后可能再劝一次）:",
+        e && e.stack ? e.stack : e
+      );
+    }
   }
 
   _tick() {
@@ -131,13 +180,19 @@ class FocusGuard {
         this.continuousSedentarySec = 0;
       }
 
-      const hour = new Date().getHours();
+      const now = new Date();
+      const hour = now.getHours();
       if (
         getSys("focusLateNightReminder") &&
-        (hour >= 22 || hour < 4) &&
-        this._canRemind("lateNight", DEFAULTS.lateNightCooldownMin * 60)
+        (hour >= LATE_NIGHT_START_HOUR || hour < LATE_NIGHT_END_HOUR)
       ) {
-        this._fireReminder("lateNight", { hour });
+        // 每晚只劝一次（产品决策）：去重键是"夜晚标识"而不是自然日，也不再用时间冷却
+        // ——熬到 4 点被劝 6 次是原实现的真实行为，冷却只能控制间隔、控不了总次数。
+        const nightId = this._nightId(now);
+        if (!this._lateNightDone(nightId)) {
+          this._markLateNightDone(nightId);
+          this._fireReminder("lateNight", { hour });
+        }
       }
     } else {
       if (idleSec > DEFAULTS.activeResetIdleMin * 60) {

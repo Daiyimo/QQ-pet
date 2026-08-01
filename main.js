@@ -53,7 +53,7 @@ try {
 const createWindow = async () => {
   try {
     require("./src/ini/init.js");
-    app.setAppUserModelId("pet");
+    app.setAppUserModelId("com.qqlocal.desktop");
 
     if (gotTheLock) {
       if (useTool) {

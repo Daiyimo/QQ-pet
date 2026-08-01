@@ -20,8 +20,8 @@
  * - onControlHover(true) ：清隐藏计时器（用户正在操作控制条，不收起）
  * - onControlHover(false)：同 onPetHover(false)
  * 只有 state==="menu" 才自动收起：active（二级面板展开）状态不动，避免打断用户操作；
- * changeState 一律传对象形式 {type:"menu"|"hide"}（main 窗 blur 处现存的
- * changeState("hide") 字符串调用是疑似既有 bug，不要照抄）。
+ * changeState 一律传对象形式 {type:"menu"|"hide"}（main 窗 blur 处此前曾误传字符串
+ * "hide" 导致收起失效，已修为对象形式，新代码不要退回字符串调用）。
  *
  * ## 时序说明
  * 1500ms 延迟窗口同时吸收两种空档/抖动：

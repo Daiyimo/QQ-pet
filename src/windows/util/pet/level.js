@@ -143,13 +143,14 @@ class pinkDiamondFn {
       level,
     };
   }
-  hour = 1000 * 60 * 60 * 24;
+  // 一天的毫秒数（历史命名 hour 名不副实，是一天不是一小时）
+  dayMs = 1000 * 60 * 60 * 24;
   isExpirationDate(pinkDiamondOPt) {
     let opt = { growth: pinkDiamondOPt.growth || 0 };
     if (pinkDiamondOPt.pinkDiamondExpirationDate) {
       //如果有粉钻到期时间
       //计算需不需要加成长值 - 有过期时间一定保证有开始时间
-      //过期时间 - 开始时间 一定是天的倍数 hour * n
+      //过期时间 - 开始时间 一定是天的倍数 dayMs * n
       // 判定是否过期
       let cutTime = 0,
         nowTime = new Date().getTime();
@@ -170,7 +171,7 @@ class pinkDiamondFn {
         cutTime = nowTime - pinkDiamondOPt.pinkDiamondBeginDate;
       }
 
-      let dayNum = (cutTime / this.hour) | 0;
+      let dayNum = (cutTime / this.dayMs) | 0;
       if (dayNum > 0) {
         if (nowTime < pinkDiamondOPt.pinkDiamondExpirationDate) {
           //未过期情况下 说明过了天数 把开始时间减去计算了的时间
@@ -184,7 +185,6 @@ class pinkDiamondFn {
       opt.pinkDiamondLevel = lev.level;
       opt.growthValue_next = lev.nextGrowth || 100;
     }
-    console.log("opt", opt);
     return opt;
   }
   toChangeOtherDatas(pinkDiamondOPt) {

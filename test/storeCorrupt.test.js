@@ -14,7 +14,14 @@ const os = require("node:os");
 const path = require("node:path");
 const Module = require("node:module");
 
-const STORE_PATH = require.resolve("../src/ini/store.js");
+/* 被测源码路径。可用 QQ_INI_STORE_SRC 覆盖，专为"变异测试/回滚验证"准备：
+   把修复回滚后的版本写进临时文件，再
+   `QQ_INI_STORE_SRC=<临时文件> node --test test/storeCorrupt.test.js`，
+   即可验证这些用例真的会红——无需改动仓库里的 src/。
+   与 test/storeBagCache.test.js 的 QQ_STORE_SRC 同一套约定。 */
+const STORE_PATH = process.env.QQ_INI_STORE_SRC
+  ? path.resolve(process.env.QQ_INI_STORE_SRC)
+  : require.resolve("../src/ini/store.js");
 const CONFIG_NAME = "config-qq-local.json";
 
 function withTempUserData(fn) {
@@ -99,6 +106,7 @@ function makeFakeStoreClass(behaviour = {}) {
  * @param {object} [opts]
  * @param {object} [opts.fs] 覆盖真实 fs 的部分方法（模拟 renameSync EPERM 等）
  * @param {string[]} [opts.dialogs] 收集 dialog.showErrorBox 的正文
+ * @param {(store:any)=>void} [opts.while] 在注入仍生效期间执行的回调
  */
 function loadStore(userData, FakeStore, opts = {}) {
   delete require.cache[STORE_PATH];
@@ -121,6 +129,9 @@ function loadStore(userData, FakeStore, opts = {}) {
   };
   try {
     require(STORE_PATH);
+    // opts.while 里的代码在注入仍生效时运行：store.js 的 _require 是加载时捕获的
+    // 模块级 require，还原后再调 _require("electron") 会 MODULE_NOT_FOUND。
+    if (opts.while) opts.while(global.$Store);
     return global.$Store;
   } finally {
     Module.prototype.require = orig;
@@ -334,7 +345,7 @@ test("存档正常时：不产生隔离文件，数据原样可读", () => {
   });
 });
 
-test("getItem 读取异常：记录完整堆栈并按空值降级（原来是裸 catch(e){}）", () => {
+test("getItem 读取异常：记录完整堆栈后向上抛（原来是记日志后按空值降级 {}）", () => {
   withTempUserData((dir) => {
     const FakeStore = makeFakeStoreClass({ userData: dir });
     const logs = captureConsole(() => {
@@ -345,12 +356,57 @@ test("getItem 读取异常：记录完整堆栈并按空值降级（原来是裸
           throw new Error("boom-get");
         },
       };
-      assert.deepEqual(store.getItem("pet"), {}, "读失败应返回空对象而不是崩溃");
+      // 静默返回 {} 会让 doMain 把老存档误判成新宠物并覆盖落盘，异常必须上抛
+      assert.throws(() => store.getItem("pet"), /boom-get/);
       // 断言在 captureConsole 之外统一做
     });
     const hit = logs.error.find((m) => m.includes("读取配置项失败"));
     assert.ok(hit, "读取失败必须留日志");
     assert.ok(hit.includes("key=pet"), "日志要能定位到具体配置键");
     assert.ok(hit.includes("boom-get") && hit.includes("at "), "必须打完整堆栈");
+  });
+});
+
+// isolateBrokenConfig 的两种模式必须泾渭分明：
+//   默认（真损坏的隔离，createStore 用）—— 允许破坏原路径，因为要让下一次 new Store 成功；
+//   backupOnly（启动读失败，handleStartupReadError 用）—— 读失败可能只是杀软瞬时占用，
+//   存档本身或许完好，而且这条路径反正要 app.exit(1)，破坏原文件纯属净损失。
+test("isolateBrokenConfig 默认模式：rename 隔离原文件（真损坏路径保持破坏性行为）", () => {
+  withTempUserData((dir) => {
+    const original = '{"pet":{"info":{"yb":7}}}';
+    fs.writeFileSync(path.join(dir, CONFIG_NAME), original);
+    const FakeStore = makeFakeStoreClass({ userData: dir });
+    let ret;
+    captureConsole(() => {
+      loadStore(dir, FakeStore, { while: (store) => (ret = store.isolateBrokenConfig()) });
+    });
+    assert.equal(ret.method, "rename");
+    assert.equal(fs.existsSync(path.join(dir, CONFIG_NAME)), false, "默认模式应把原文件改名走");
+    const backups = corruptFiles(dir);
+    assert.equal(backups.length, 1);
+    assert.equal(fs.readFileSync(path.join(dir, backups[0]), "utf8"), original);
+  });
+});
+
+test("isolateBrokenConfig({backupOnly:true})：只复制副本，原文件既不改名也不覆盖", () => {
+  withTempUserData((dir) => {
+    const original = '{"pet":{"info":{"yb":7}}}';
+    fs.writeFileSync(path.join(dir, CONFIG_NAME), original);
+    const FakeStore = makeFakeStoreClass({ userData: dir });
+    let ret;
+    captureConsole(() => {
+      loadStore(dir, FakeStore, {
+        while: (store) => (ret = store.isolateBrokenConfig({ backupOnly: true })),
+      });
+    });
+    assert.equal(ret.method, "backup-only", "backupOnly 模式要有独立的 method 标识");
+    assert.equal(
+      fs.readFileSync(path.join(dir, CONFIG_NAME), "utf8"),
+      original,
+      "backupOnly 绝不能改名或把原文件覆盖成 {}"
+    );
+    const backups = corruptFiles(dir);
+    assert.equal(backups.length, 1, "但仍须留一份可人工排查的副本");
+    assert.equal(fs.readFileSync(path.join(dir, backups[0]), "utf8"), original);
   });
 });

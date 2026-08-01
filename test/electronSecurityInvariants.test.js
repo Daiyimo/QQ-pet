@@ -69,6 +69,31 @@ const WEB_SECURITY_OPT_OUT = [
   "src/windows/popups/smallGame/main.js",
 ];
 
+/**
+ * `sandbox:false` 的 opt-out 白名单——**必须恰好是主宠窗这 1 个**。
+ *
+ * 工厂默认已从 `sandbox:false` 收紧为 `sandbox:true`（本文件早先刻意不断言这条默认值，
+ * 注释里写的是「那是 preload 用 Node 的既定设计，断言它等于给未来收紧上锁」——
+ * 现在收紧已经做完，那条理由不再成立，改为正面钉死新状态）。
+ *
+ * 收紧的依据（Electron 28.3.3 实测，不是抄文档）：
+ *   - 沙箱化 preload 由 `runPreloadScript` 包进
+ *     `(function(require, process, Buffer, global, setImmediate, clearImmediate, exports, module){...})`，
+ *     `require` 是**函数形参**，所以本仓 webpack 双模探针写法 `eval("require")`（直接 eval，
+ *     沿词法作用域链解析）在沙箱下**仍然拿得到** require，返回受限的 preloadRequire；
+ *   - 该受限 require 的白名单是 electron / electron-common / electron-renderer / events / timers / url，
+ *     而 18 个非主宠窗 preload 只 `require("electron")`，且只用 contextBridge + ipcRenderer，
+ *     二者都在沙箱版 electron 模块列表里 → 沙箱化对它们零影响；
+ *   - 只有 main 的 preload 需要 fs / path / iconv-lite / __dirname（resolveSkinAsset 解析皮肤素材，
+ *     经 src/windows/util/pathGuard.js 校验），这些在沙箱下会抛 `module not found: fs`、
+ *     `__dirname` 为 undefined，故主宠窗必须 opt-out。
+ *
+ * 新增 opt-out = 又一个渲染进程脱离 OS 沙箱：一个 Chromium/Ruffle-WASM 渲染器漏洞即为
+ * 用户权限代码执行，contextIsolation 挡不住这一层。请在此登记并说明该窗口的 preload
+ * 到底需要哪个 Node 模块、为何不能改走 IPC 让主进程代劳。
+ */
+const SANDBOX_OPT_OUT = ["src/windows/main/main.js"];
+
 /** 允许 new BrowserWindow 的位置——每新增一处都必须单独审查 webPreferences。 */
 const BROWSER_WINDOW_CREATORS = [WINDOW_FACTORY, BARRAGE, URL_WINDOW];
 
@@ -277,7 +302,7 @@ function parseCspDirectives(rel) {
 // 1. 窗口工厂默认值
 // ---------------------------------------------------------------------------
 
-test("窗口工厂默认值：nodeIntegration 必须关、contextIsolation 必须开、webSecurity 默认必须开", () => {
+test("窗口工厂默认值：nodeIntegration 必须关、contextIsolation 必须开、webSecurity 与 sandbox 默认必须开", () => {
   const wp = defaultWebPreferences();
   const where = `${WINDOW_FACTORY} defaultOption.webPreferences`;
 
@@ -301,6 +326,15 @@ test("窗口工厂默认值：nodeIntegration 必须关、contextIsolation 必�
       `显式传 webPreferences:{webSecurity:!1} opt-out，并登记进本文件的 WEB_SECURITY_OPT_OUT，` +
       `绝不能把默认值改掉——那会一次性给所有窗口关掉同源策略。`
   );
+  assert.equal(
+    readBooleanFlag(wp, "sandbox", where),
+    true,
+    `${where}: sandbox 的**默认值**必须为 true。关掉它，渲染进程就脱离 OS 层沙箱，` +
+      `一个 Chromium 或 Ruffle-WASM 渲染器漏洞直接等于用户权限代码执行——contextIsolation 挡的是` +
+      `JS 世界，挡不住这一层；受影响面包括加载第三方皮肤 SWF 的主宠窗与承载 http iframe 的钓鱼/密室。\n` +
+      `确需 Node 能力的窗口应在自己的 open() 里显式传 webPreferences:{sandbox:!1} opt-out 并登记进` +
+      ` SANDBOX_OPT_OUT，绝不能改默认值——那会一次性把 19 个窗口全部移出沙箱。`
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -322,6 +356,28 @@ test("webSecurity 的 opt-out 窗口清单必须恰好是登记过的 4 个", ()
       `多出来的窗口=该窗口失去同源策略保护：若确有必要新增 opt-out，请把文件路径加进本文件的` +
       ` WEB_SECURITY_OPT_OUT 并在那里写明理由（哪个功能需要、为什么没有别的办法）；\n` +
       `少了的窗口=收紧成功，同样请更新清单，并跑 test/ruffleSmoke/ 确认 SWF 播放与钓鱼 iframe 没坏。`
+  );
+});
+
+test("sandbox 的 opt-out 窗口清单必须恰好是主宠窗 1 个", () => {
+  /* 工厂自身写的是 sandbox:!0（默认值），只有显式 opt-out 的窗口才会出现 sandbox:!1。 */
+  const found = listSources("src/windows", [".js"]).filter((rel) =>
+    /[{,]\s*sandbox\s*:\s*(!1|false)\s*(?=[,}])/.test(
+      stripComments(readSource(rel))
+    )
+  );
+  assert.deepEqual(
+    found,
+    [...SANDBOX_OPT_OUT].sort(),
+    `sandbox:false 的窗口集合发生变化。\n` +
+      `实测: ${JSON.stringify(found)}\n` +
+      `登记: ${JSON.stringify([...SANDBOX_OPT_OUT].sort())}\n` +
+      `多出来的窗口=该渲染进程脱离 OS 沙箱。绝大多数 preload 只 require("electron")，` +
+      `contextBridge/ipcRenderer 在沙箱下都可用，通常**不需要**这个 opt-out；\n` +
+      `确有必要请把路径加进 SANDBOX_OPT_OUT，并在那里写明该 preload 到底要哪个 Node 模块、` +
+      `为什么不能改成走 IPC 让主进程代劳。\n` +
+      `少了的窗口=收紧成功（说明主宠窗 preload 已不再需要 fs/path/iconv-lite/__dirname），` +
+      `请同步清单，并真机确认换肤与 Ruffle 播放没坏。`
   );
 });
 
@@ -456,6 +512,89 @@ test("窗口工厂：will-navigate 守卫存在且是「只允许停在 app.html
   );
 });
 
+test("窗口工厂：ipcMain 注册必须过发送方校验（窗口身份 + 顶层帧 + app.html），且拒绝时留日志", () => {
+  const src = stripComments(readSource(WINDOW_FACTORY));
+
+  /* 1) 守卫函数存在。 */
+  const at = src.indexOf("function _guardIpc(");
+  assert.notEqual(
+    at,
+    -1,
+    `${WINDOW_FACTORY}: 找不到 _guardIpc。全仓 ipcMain.handle 为 0 个、约 70 条通道全部注册成全局` +
+      ` ipcMain.on，主进程本身无法区分「哪个窗口发来的」；_guardIpc 就是补这层纵深防御的唯一位置。` +
+      `若已改名请同步本测试，不要直接删断言。`
+  );
+  const guard = src.slice(at, at + 1600);
+
+  /* 2) 三层校验都在：窗口身份（对象比对，不比 URL 字符串）、顶层帧、app.html basename。 */
+  assert.match(
+    guard,
+    /event\.sender\s*!==\s*win\.webContents/,
+    `${WINDOW_FACTORY}: _guardIpc 缺少「发送方 WebContents 必须就是注册该通道的窗口」这层比对。` +
+      `这是唯一精确且不碰字符串编码的一层，别用 URL 比对替代它。`
+  );
+  assert.match(
+    guard,
+    /frame\.parent/,
+    `${WINDOW_FACTORY}: _guardIpc 缺少子框架判定（senderFrame.parent）。钓鱼/密室的 http iframe 是子框架，` +
+      `它们与顶层帧共用同一个 WebContents，只比对窗口身份拦不住。`
+  );
+  assert.match(
+    guard,
+    /"app\.html"/,
+    `${WINDOW_FACTORY}: _guardIpc 缺少 app.html 判定。所有壳窗都 loadFile(app.html)，顶层文档不是它即为异常。`
+  );
+
+  /* 3) 反向断言：**不许**退化成完整 URL 字符串相等比对。
+     productName 是「QQ宠物离线+AI版」，安装目录含中文与 '+'，senderFrame.url 是 percent-encoded 的
+     file:// URL（实测形如 QQ%E5%AE%A0...+AI%E7%89%88%20test/...）。完整路径比对会受中文/空格/'+'
+     的编码差异、盘符大小写、正反斜杠影响，在干净的测试路径下全绿、到真机上全线失败。
+     正确做法是只对 pathname 取末段再 decodeURIComponent。 */
+  assert.doesNotMatch(
+    guard,
+    /pathToFileURL[^;]{0,80}===|===[^;]{0,40}pathToFileURL/,
+    `${WINDOW_FACTORY}: _guardIpc 里出现了「拼出期望 URL 再整串相等比对」的写法。` +
+      `安装目录含中文与 '+'，percent-encoding 差异会让它在真机上把所有 IPC 全拒掉，而测试仍然全绿。` +
+      `只比 pathname 末段（decodeURIComponent 后与 "app.html" 比），不要比完整 URL。`
+  );
+  assert.match(
+    guard,
+    /decodeURIComponent/,
+    `${WINDOW_FACTORY}: _guardIpc 取 basename 后必须 decodeURIComponent——` +
+      `否则含中文/空格的安装路径下末段比对同样会失配。`
+  );
+
+  /* 4) 拒绝路径必须留日志。这个仓库刚为两个「功能突然没反应且零线索」的 P0 付过代价，
+        校验一旦写错，没有日志就等于不可诊断。三条拒绝分支各要一条 console.warn。 */
+  const warns = [...guard.matchAll(/console\.warn\("\[window\] 已拒绝 IPC/g)];
+  assert.ok(
+    warns.length >= 3,
+    `${WINDOW_FACTORY}: _guardIpc 的拒绝分支只有 ${warns.length} 条 console.warn（要求 >= 3，` +
+      `窗口身份 / 子框架 / 非 app.html 各一条）。静默 return 会让「某个功能突然没反应」查无线索。`
+  );
+  assert.match(
+    guard,
+    /console\.warn\("\[window\] 已拒绝 IPC[^"]*:",\s*channel/,
+    `${WINDOW_FACTORY}: 拒绝日志必须带上通道名（channel），否则不知道是哪条 IPC 被拦。`
+  );
+
+  /* 5) 注册处真的用了守卫——光有函数没接上等于没写。同时校验存进 option.preloads 的是
+        **包装后**的处理器：removePreload 用 option.preloads 去 removeListener，
+        存原始函数会导致窗口关闭时摘不掉监听（监听器泄漏 + 通道残留）。 */
+  assert.match(
+    src,
+    /preloads:\s*n\s*=>\s*\{[\s\S]{0,160}?_guardIpc\(/,
+    `${WINDOW_FACTORY}: created 回调的 preloads 注册没有过 _guardIpc，约 70 条通道仍是裸 ipcMain.on。`
+  );
+  const reg = src.slice(src.indexOf("preloads:n=>{"), src.indexOf("preloads:n=>{") + 220);
+  assert.match(
+    reg,
+    /e\.option\.preloads\s*=\s*_w/,
+    `${WINDOW_FACTORY}: option.preloads 必须存包装后的处理器（_w）。removePreload 是拿 option.preloads` +
+      `逐个 ipcMain.removeListener 的，存原始函数会摘不掉包装后的监听器——窗口关了通道还活着。`
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 5. 危险开关零命中
 // ---------------------------------------------------------------------------
@@ -523,7 +662,7 @@ test("urlWindow 远程子窗：sandbox 开 / webSecurity 不关 / 隔离开 / �
     readBooleanFlag(wp, "sandbox", where),
     true,
     `${where}: sandbox 必须为 true。这是唯一加载任意远程网页的窗口，` +
-      `渲染进程必须待在 OS 沙箱里（工厂默认的 sandbox:false 是为了 preload 用 Node，远程窗不适用）。`
+      `渲染进程必须待在 OS 沙箱里（工厂默认现在也已是 sandbox:true，这里是显式重申，不是特例）。`
   );
   assert.equal(
     readBooleanFlag(wp, "webSecurity", where),

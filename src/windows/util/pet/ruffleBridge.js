@@ -1,7 +1,7 @@
 /**
  * ruffleBridge.js —— Ruffle 播放桥（替代已不存在的 Flash ActiveX/NPAPI 大驼峰帧 API）
  *
- * ## 背景（P0 bug：关闭桌宠必卡 30 秒）
+ * ## 背景（P0 bug：关闭桌宠必卡满生产硬兜底才被强杀）
  *
  * swfPet.js 的 StateWatcher 以 24fps 轮询 Flash ActiveX 老接口
  * `IsPlaying()` / `CurrentFrame()` / `TotalFrames()` / `PercentLoaded()`，
@@ -9,7 +9,9 @@
  * 项目内置 Ruffle（0.2.0-nightly.2026.4.6，src/windows/js/ruffle/ruffle.js）**只**保留了
  * `PercentLoaded()` 一个大驼峰方法，其余全部不存在 → 四次调用全部抛 TypeError →
  * 被 `catch{return null}` 静默吞 → 状态恒为 null → setState 里所有帧驱动分支恒 false →
- * `finish` 回调永不触发 → main/main.js 的 before-quit 只能等 30s 兜底 app.exit()。
+ * `finish` 回调永不触发 → main/main.js 的 before-quit 只能等硬兜底 app.exit()。
+ * 该硬兜底的**唯一真值**是下面的 `EXIT_FALLBACK_MS`（当前 15000ms，与 main/main.js 里的
+ * `setTimeout(...,15e3)` / 日志「finish 回调未在 15s 内触发」一致，由测试跨引用断言钉死）。
  *
  * ## Ruffle 实际提供的能力（已在 ruffle.js / wasm 中核实）
  *
@@ -56,9 +58,43 @@
   const DEFAULT_FRAME_RATE = 12;
 
   /**
+   * swfPet.js StateWatcher 的轮询间隔（ms）——`defaultSystem.interval = 1000/24`。
+   * 这里只用于"采样间隔未知时"的乐观估计（见 tailWalkBudgetMs）。
+   */
+  const POLL_INTERVAL_MS = 1000 / 24;
+
+  /**
+   * **退场硬兜底（ms）：本模块及其测试的单一真值。**
+   *
+   * 依据：src/windows/main/main.js 的 before-quit 里
+   *   `setTimeout(()=>{console.warn("[退出] finish 回调未在 15s 内触发…");app.exit(0)}, 15e3)`
+   * ——finish 回调若未在这个时间内触发，进程被强杀，用户观感就是"关闭桌宠卡住"（本仓库最初的 P0）。
+   *
+   * main/main.js 是 webpack 压缩单行产物，无法 require 主进程模块共享常量，因此按本项目既有手法
+   * （参考 test/fishingBalance.test.js 的价格口径互校、test/pinkDiamond125.test.js 的压缩区源码断言）
+   * 允许存在第二份字面量，但由 test/ruffleBridge.test.js 的跨引用断言读取 main.js 源码把两侧钉死：
+   * 任何一侧被改动而另一侧没跟上，测试立刻红。
+   */
+  const EXIT_FALLBACK_MS = 15000;
+
+  /**
+   * finish 必须提前于硬兜底触发的安全余量（ms）。
+   *
+   * 取值依据（三项相加约 2.5s，取 3000 收整）：
+   *   1. 生产的 15s 计时起点是 before-quit，而本模块的计时起点是 setDom（元素已创建/开始加载），
+   *      两者之间还有 changeSwf 建元素 + Ruffle 起播的时间（test/ruffleSmoke/report.md 实测 ≤500ms）；
+   *   2. finish 回调之后主进程仍要存档、销毁窗口，再走 app.quit；
+   *   3. 一次采样的调度抖动（隐藏窗口下 rAF 被节流到约 1fps，单次可达 1s）。
+   */
+  const EXIT_FINISH_SAFETY_MARGIN_MS = 3000;
+
+  /** 虚拟时间轴必须让 finish 判定点出现的最晚时刻（ms，自 setDom 起算） */
+  const EXIT_FINISH_DEADLINE_MS = EXIT_FALLBACK_MS - EXIT_FINISH_SAFETY_MARGIN_MS;
+
+  /**
    * metadata 等待上限（ms）。超过即判定加载失败，启用兜底虚拟时间轴，保证 finish 仍会触发。
    * 依据：素材是本地文件，Ruffle 冒烟测试（test/ruffleSmoke/report.md）中 load() 均在 500ms 内 resolve，
-   * 2s 已留足 4 倍余量；同时远小于 main/main.js 的 30s 硬兜底，不会先被兜底抢走。
+   * 2s 已留足 4 倍余量；同时远小于 EXIT_FALLBACK_MS，不会先被硬兜底抢走。
    */
   const METADATA_TIMEOUT_MS = 2000;
 
@@ -77,9 +113,43 @@
    *   cut 即 lastTimeCut，素材配置中最大为 5（bury）。取 8 覆盖 cut ≤ 6 并留余量。
    * 中段帧号对逻辑无影响（只有不等式判定），因此中段允许"追赶式"跳号，
    * 这样即使采样被拖慢（窗口隐藏时 rAF 会被 Chromium 降到约 1fps，实测 30s 仅 31 次采样），
-   * 也能在有限时间内走到尾段并触发 finish，而不是被 30s 硬兜底截断。
+   * 也能在有限时间内走到尾段并触发 finish，而不是被 EXIT_FALLBACK_MS 硬兜底截断。
    */
   const TAIL_FORCE_FRAMES = 8;
+
+  /**
+   * 走完尾段最坏需要的时间（ms）。
+   *
+   * 尾段每次采样最多 +1 帧（语义要求，见 TAIL_FORCE_FRAMES），所以耗时 = 尾段帧数 × 采样间隔，
+   * 与素材帧率无关，只受采样被节流的程度影响。
+   *
+   * @param {number} [sampleGapMs] 已观测到的最大采样间隔（ms）；未知时按 24fps 轮询乐观估计
+   * @returns {number} 尾段预算（ms）
+   */
+  function tailWalkBudgetMs(sampleGapMs) {
+    const gap = Number(sampleGapMs);
+    const safe = Number.isFinite(gap) && gap > 0 ? Math.min(gap, MAX_SAMPLE_GAP_MS) : POLL_INTERVAL_MS;
+    return TAIL_FORCE_FRAMES * safe;
+  }
+
+  /**
+   * 中段最晚必须交棒给尾段的时刻（ms，自 setDom 起算）。
+   *
+   * 这是"finish 一定早于生产硬兜底"这条不变量的落点：中段是唯一会随素材帧数线性变长的部分
+   * （numFrames-8 帧 ÷ frameRate 秒），素材一换长就会把 finish 推到 EXIT_FALLBACK_MS 之后
+   * ——正是本仓库最初 P0 的复活路径。因此给中段设一个**与素材无关**的硬截止：
+   *   中段截止 = finish 截止 − 尾段预算。
+   * 到点仍在中段就直接跳到尾段起点（中段帧号不参与任何等值判定，跳号无害）。
+   *
+   * 代价（诚实记录）：单个动画时长超过该截止时，其尾段会被提前，观感上动画被截短。
+   * 这是刻意取舍——退出卡死是 P0，动画少播几帧是观感问题。
+   *
+   * @param {number} [sampleGapMs] 已观测到的最大采样间隔（ms）
+   * @returns {number} 中段截止时刻（ms），最小为 0（采样太慢时立即交棒）
+   */
+  function midSectionDeadlineMs(sampleGapMs) {
+    return Math.max(0, EXIT_FINISH_DEADLINE_MS - tailWalkBudgetMs(sampleGapMs));
+  }
 
   /**
    * 单次采样计入虚拟时间轴的最大时长（ms）。
@@ -126,6 +196,8 @@
    *   - 尾段（最后 TAIL_FORCE_FRAMES 帧）：按时间逐帧 +1，**绝不跳号**，走到末帧后回卷到 0；
    *   - 中段：允许追赶到时间对应的帧（帧号不参与等值判定，跳号无害），保证采样被降频时
    *     仍能在有限时间内抵达尾段；
+   *   - 中段停留时间越过 midSectionDeadlineMs(sampleGapMs) 时**强制**交棒到尾段起点，
+   *     这样 finish 触发时刻与素材帧数解耦，恒早于 EXIT_FALLBACK_MS（不变量，见该函数注释）；
    *   - 若本轮已播过尾段起点（含 target 已回卷），直接落到尾段起点再逐帧走完。
    *
    * @param {object} opt
@@ -133,6 +205,8 @@
    * @param {number} opt.numFrames  总帧数
    * @param {number} opt.frameRate  帧率（fps）
    * @param {number} opt.lastFrame  上一次输出的帧号（首次传 -1）
+   * @param {number} [opt.elapsedMs]   自 setDom 起的**墙钟**时长（ms）；缺省则不启用中段硬截止
+   * @param {number} [opt.sampleGapMs] 已观测到的最大采样间隔（ms），用于估算尾段预算
    * @returns {number} 新的当前帧号（0 基，范围 [0, numFrames-1]）
    */
   function nextVirtualFrame(opt) {
@@ -149,6 +223,9 @@
       if (target === lastFrame) return lastFrame;
       return lastFrame >= numFrames - 1 ? 0 : lastFrame + 1;
     }
+    // 中段硬截止：再留在中段就来不及在硬兜底前走完尾段（素材帧数无关的保底）
+    const elapsedMs = Number(opt.elapsedMs);
+    if (Number.isFinite(elapsedMs) && elapsedMs >= midSectionDeadlineMs(opt.sampleGapMs)) return tailStart;
     // 已播到尾段（或采样太慢导致 target 回卷）→ 从尾段起点开始逐帧走
     if (target >= tailStart || target < lastFrame) return tailStart;
     return Math.max(lastFrame, target);
@@ -236,6 +313,8 @@
       this._lastFrame = -1;
       this._playedMs = 0;
       this._lastSampleMs = 0;
+      /** 本条时间轴上观测到的最大采样间隔（ms），用于估算尾段预算；0 表示还没有可用观测 */
+      this._maxSampleGapMs = 0;
       this._attachedMs = this.now();
       this._metadataFromEvent = null;
     }
@@ -382,6 +461,12 @@
       const playing = this._domIsPlaying();
       const delta = nowMs - this._lastSampleMs;
       this._lastSampleMs = nowMs;
+      if (delta > 0) {
+        // 采样间隔取"历史最大值"而非最近值：只能高估不能低估，否则尾段预算被算小、
+        // 中段截止被算晚，就又可能来不及在硬兜底前走完尾段。
+        const gap = Math.min(delta, MAX_SAMPLE_GAP_MS);
+        if (gap > this._maxSampleGapMs) this._maxSampleGapMs = gap;
+      }
       if (playing && delta > 0) {
         this._playedMs += Math.min(delta, MAX_SAMPLE_GAP_MS);
       }
@@ -390,6 +475,9 @@
         numFrames: this._numFrames,
         frameRate: this._frameRate,
         lastFrame: this._lastFrame,
+        // 墙钟口径：即使播放器报"没在播"，也不能让 finish 拖过生产硬兜底
+        elapsedMs: nowMs - this._attachedMs,
+        sampleGapMs: this._maxSampleGapMs,
       });
       this.state = {
         frame: this._numFrames,
@@ -526,6 +614,10 @@
 
   // 常量与纯函数挂到类上，便于单测与线上诊断
   RuffleBridge.DEFAULT_FRAME_RATE = DEFAULT_FRAME_RATE;
+  RuffleBridge.POLL_INTERVAL_MS = POLL_INTERVAL_MS;
+  RuffleBridge.EXIT_FALLBACK_MS = EXIT_FALLBACK_MS;
+  RuffleBridge.EXIT_FINISH_SAFETY_MARGIN_MS = EXIT_FINISH_SAFETY_MARGIN_MS;
+  RuffleBridge.EXIT_FINISH_DEADLINE_MS = EXIT_FINISH_DEADLINE_MS;
   RuffleBridge.METADATA_TIMEOUT_MS = METADATA_TIMEOUT_MS;
   RuffleBridge.FALLBACK_NUM_FRAMES = FALLBACK_NUM_FRAMES;
   RuffleBridge.MAX_SAMPLE_GAP_MS = MAX_SAMPLE_GAP_MS;
@@ -534,9 +626,22 @@
   RuffleBridge.animationDurationMs = animationDurationMs;
   RuffleBridge.nextVirtualFrame = nextVirtualFrame;
   RuffleBridge.isFinishFrame = isFinishFrame;
+  RuffleBridge.tailWalkBudgetMs = tailWalkBudgetMs;
+  RuffleBridge.midSectionDeadlineMs = midSectionDeadlineMs;
 
   global.RuffleBridge = RuffleBridge;
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { RuffleBridge, frameIntervalMs, animationDurationMs, nextVirtualFrame, isFinishFrame };
+    module.exports = {
+      RuffleBridge,
+      frameIntervalMs,
+      animationDurationMs,
+      nextVirtualFrame,
+      isFinishFrame,
+      tailWalkBudgetMs,
+      midSectionDeadlineMs,
+      EXIT_FALLBACK_MS,
+      EXIT_FINISH_DEADLINE_MS,
+      EXIT_FINISH_SAFETY_MARGIN_MS,
+    };
   }
 })(typeof window !== "undefined" ? window : globalThis);

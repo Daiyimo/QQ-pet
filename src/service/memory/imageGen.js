@@ -37,7 +37,11 @@ function redact(value, secret) {
   return secret ? String(value).split(secret).join("[redacted]") : String(value);
 }
 
-// endpoint：baseUrl 必须是绝对 http(s) URL 且不含凭据；自动补 /images/edits
+// endpoint：baseUrl 必须是绝对 http(s) URL 且不含凭据；自动补 /images/edits。
+// http:// 明文只放行回环地址：非回环 http 会把 Authorization: Bearer <apiKey>、
+// 参考图与日记正文明文发给远端。回环判定复用 llm/providers.js 的 isLoopbackHost
+// （唯一实现，不在此复制第二份）；惰性 require 与本文件 generateDailyImage 中
+// 取 providers 的方式一致，不引入模块加载期耦合。
 function buildEndpoint(baseUrl) {
   const value = String(baseUrl || "").trim().replace(/\/+$/, "");
   let u;
@@ -51,6 +55,13 @@ function buildEndpoint(baseUrl) {
   }
   if (u.username || u.password) {
     throw new Error("image API base URL must not contain credentials");
+  }
+  if (u.protocol === "http:" && !_require("../llm/providers.js").isLoopbackHost(u.hostname)) {
+    // 文案与 llm/providers.js 的 postJson 对齐，避免两个设置标签页给出两种说法
+    throw new Error(
+      `图像 API 地址使用 http:// 明文协议仅限本机回环地址（127.x.x.x / localhost / [::1]），` +
+        `已拒绝：${u.hostname}。云端服务商请改用 https://`
+    );
   }
   return value.endsWith("/images/edits") ? value : value + "/images/edits";
 }

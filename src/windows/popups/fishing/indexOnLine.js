@@ -712,24 +712,33 @@ window.addEventListener("load", (event) => {
   player = document.getElementById("hlyg");
   console.log("load");
   getUpLoad();
-  // if (await getUpLoad()) {
-  //   console.log("window.getPetInfoFromMain");
-  //   setInterval(() => {
-  //     console.log("get 1");
-  //     window.getPetInfoFromMain();
-  //     console.log("get");
-  //   }, 100);
-  //   try {
-  //   } catch (error) {
-  //     console.log("error", error);
-  //   }
-  //   // loadIframe();
-  // }
 });
+
+// selfeLoad / getPetInfoFromMain 由宿主页（src/windows/popups/fishing/index.js）在 iframe
+// 的 load 回调里挂到本 window 上，本文件无法感知注入时机，只能轮询等待。
+// 间隔 10ms 是「肉眼无感 + 不空转 CPU」的经验值；两个常数相乘才是等待总时长
+// （1000 × 10ms = 10s），改任一个都会改变总时长，必须一起看。
+// 10s 上限的依据：宿主注入排在 iframe load 之后的 setTimeout(0)，正常在几十毫秒内完成，
+// 10s 已覆盖慢机冷启动；再等下去也只是让用户对着死界面干等。
+const SELFE_LOAD_POLL_INTERVAL_MS = 10;
+const SELFE_LOAD_POLL_MAX_TRIES = 1000;
+const SELFE_LOAD_TIMEOUT_MS =
+  SELFE_LOAD_POLL_MAX_TRIES * SELFE_LOAD_POLL_INTERVAL_MS;
 
 let getupI = 0;
 const getUpLoad = () => {
-  if (getupI++ > 1000) return;
+  if (getupI++ > SELFE_LOAD_POLL_MAX_TRIES) {
+    // 放弃前必须留痕：宿主注入没到，getPetInfoFromMain 永远不会被调用，
+    // 界面会停在无数据状态。渲染层没有可复用的用户可见通道（宿主只注入了
+    // getPetInfoFromMain / saveInfoData / close_game，且本文件把 window.alert
+    // 改成了只打日志），所以只能降级为日志。
+    console.warn(
+      "[fishing/html] 等待宿主注入 selfeLoad 超过 " +
+        SELFE_LOAD_TIMEOUT_MS +
+        "ms，已放弃轮询：不会再请求宠物数据，钓鱼界面将停在无数据状态，需关闭窗口重开"
+    );
+    return;
+  }
   console.log(
     "window?.selfeLoad",
     window?.selfeLoad,
@@ -738,11 +747,8 @@ const getUpLoad = () => {
   if (window?.selfeLoad) {
     console.log("ok");
     window.getPetInfoFromMain();
-    // return true;
   } else {
-    setTimeout(() => {
-      return getUpLoad();
-    }, 10);
+    setTimeout(getUpLoad, SELFE_LOAD_POLL_INTERVAL_MS);
   }
 };
 //错误处理

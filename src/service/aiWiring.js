@@ -12,7 +12,9 @@
   const { perceptionLoop, startPerception, stopPerception } = require("./perception/index.js");
   const { captureScreen } = require("./perception/capture.js");
   const aiChat = require("../windows/popups/aiChat/main.js");
-  const petMain = require("../windows/main/main.js");
+  // 桌宠主窗口的显隐统一由 travel.js 的 requestMainWindowVisible 代理（见 pet-hide/pet-show
+  // 接线处注释）：它维护 petMain.show 标志并做旅游态优先仲裁，故这里不再直接持有主窗口。
+  const { requestMainWindowVisible } = require("./travel.js");
 
   // ---- 感知 → 记忆 / 课程 ----
   perceptionLoop.on("activity", (payload) => {
@@ -73,16 +75,20 @@
   }
 
   // ---- 游戏场景：隐藏桌宠（弹幕接管），退出游戏恢复 ----
+  // 显隐一律走 travel.js 的统一入口 requestMainWindowVisible：它同时维护 petMain.show
+  // 标志（原先这里直接 window.show()/hide() 不改标志，isStop/托盘/贴边逻辑会按"隐藏"
+  // 处理一个可见的窗口），并做旅游态优先的仲裁（旅游期间拒绝显示，否则
+  // "旅游中 → 进游戏场景 → 用户关掉屏幕感知"会把还在外旅游的宠物放回桌面）。
   perceptionLoop.on("pet-hide", () => {
     try {
-      if (petMain.window && !petMain.window.isDestroyed()) petMain.window.hide();
+      requestMainWindowVisible(false, "感知进入 game 场景");
     } catch (e) {
       console.error("[aiWiring] 隐藏桌宠窗口失败:", e && e.stack ? e.stack : e);
     }
   });
   perceptionLoop.on("pet-show", () => {
     try {
-      if (petMain.window && !petMain.window.isDestroyed()) petMain.window.show();
+      requestMainWindowVisible(true, "感知退出 game 场景/感知已关闭");
     } catch (e) {
       console.error("[aiWiring] 恢复桌宠窗口失败:", e && e.stack ? e.stack : e);
     }

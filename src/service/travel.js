@@ -59,6 +59,10 @@ const REWARD_YB = 15; // 回家奖励：元宝
 // 窗口操作必须等窗口就绪，否则静默 no-op
 const MAIN_WINDOW_POLL_MS = 500; // 轮询间隔
 const MAIN_WINDOW_WAIT_MS = 30000; // 等待上限，超时后按窗口缺失降级执行
+// setTimeout 的延迟上限（2^31-1 ms ≈ 24.8 天，Node 用 32 位有符号整数存延迟）：
+// 超过该值 Node 会打 TimeoutOverflowWarning 并把延迟**坍缩成 1ms**（等于立即触发）。
+// init() 恢复旅行时的剩余时间来自不可信存档，必须以此为硬上界，见 init() 注释。
+const MAX_TIMEOUT_MS = 2147483647;
 
 // 前置校验：状态位 -> 拒绝文案（[host] 为气泡占位符，与既有 openSpeak 习惯一致）
 // 关于 die：全库没有任何代码给 activeOption.die 赋真值，死亡态实际存放在 activeOption.ill
@@ -86,6 +90,9 @@ class TravelService {
     this.hideTimer = null; // exit 动画后隐藏窗口的定时器
     this.inited = false;
     this.saveDirty = false; // 上次收集进度落盘是否失败（失败则下次结算时重试）
+    // 上一次 _getPetInfo() 是否真的读到了档案。_trip() 以档案为权威，但"读失败"
+    // 不能等同于"档案里没有 trip"，否则一次瞬时读失败会把进行中的旅行白白吞掉。
+    this._petInfoReadable = true;
     this._epoch = 0; // 取消令牌（同 perception/loop.js 的 _epoch 模式）：旅行被取消/结算时 +1，
     // 让 init() 挂起的"等主窗口就绪"回调失效
   }
@@ -111,8 +118,11 @@ class TravelService {
   _getPetInfo() {
     const fn = this.deps.getPetInfo || global.getPetInfo;
     try {
-      return fn ? fn() || {} : {};
+      const info = fn ? fn() || {} : {};
+      this._petInfoReadable = !!fn;
+      return info;
     } catch (e) {
+      this._petInfoReadable = false;
       this._warn("_getPetInfo", e);
       return {};
     }
@@ -185,6 +195,39 @@ class TravelService {
       }
     } catch (e) {
       this._warn("_showMain", e);
+    }
+  }
+
+  // ---- 主窗口显隐的统一入口（含仲裁）----
+  // 主窗口可见性此前有两个主人且互不知情：旅游走 _hideMain/_showMain（**同时**维护
+  // mw.show 标志），而感知的 pet-hide/pet-show 在 aiWiring 里直接 window.hide()/show()
+  // 且不改 mw.show。于是"旅游中 → 感知判定进入 game 场景 → 用户关掉屏幕感知
+  //（stop() → _restoreFromGame() → pet-show）"会把还在旅游的宠物放回桌面，而 mw.show
+  // 仍是 false（isStop / 托盘 / 贴边逻辑继续按隐藏处理）。
+  // 仲裁规则：**旅游态优先**——旅游期间任何来源的"显示"请求都被拒绝，直到结算/召回；
+  // 显隐一律经此入口，show 标志与窗口真实状态同进同退。
+  // 返回是否真的执行了请求（false = 被仲裁拒绝，或窗口不可用）。
+  setMainWindowVisible(visible, reason = "") {
+    try {
+      const mw = this._mainWindow();
+      const win = mw && mw.window;
+      if (!win || (win.isDestroyed && win.isDestroyed())) return false;
+      if (!visible) {
+        this._hideMain();
+        return true;
+      }
+      if (this._trip()) {
+        console.warn(
+          "[travel] 旅游期间拒绝显示主窗口（旅游态优先于感知场景恢复），宠物保持在外:",
+          reason || "unknown"
+        );
+        return false;
+      }
+      this._showMain();
+      return true;
+    } catch (e) {
+      this._warn(`setMainWindowVisible(visible=${visible})`, e);
+      return false;
     }
   }
 
@@ -310,11 +353,32 @@ class TravelService {
     this._epoch += 1; // 旅行结束：作废 init() 挂起的窗口就绪回调
   }
 
-  // 当前旅行（内存优先，档案兜底）
+  // 当前旅行。**档案 activeOption.trip 是唯一权威，内存 currentTrip 只是缓存。**
+  // 依据：activeOption 由多方写入——State.js 的病情/死亡分支（doActive 的 ill 分支）
+  // 会在生病时把 trip 清空并播"我不能旅游了~"。原先内存优先，于是那次取消被撤销：
+  // finishTimer 到点仍从内存拿到 currentTrip，照样收集省份 + mood/yb 奖励（可刷）。
+  // 档案里没有 trip 而内存里有 → 旅行已被外部终止：清回家/隐藏定时器、作废缓存与
+  // init() 挂起的窗口就绪回调。两者都在但不一致时，同样以档案为准（缓存对齐）。
   _trip() {
-    if (this.currentTrip) return this.currentTrip;
-    const activeOption = this._getPetInfo().activeOption || {};
-    return activeOption.trip || null;
+    const petInfo = this._getPetInfo();
+    // 档案读不到（getPetInfo 抛错 / 环境里没有 getPetInfo）时不做"已被取消"判定
+    if (!this._petInfoReadable) return this.currentTrip || null;
+    const stored = (petInfo.activeOption || {}).trip || null;
+    if (!stored) {
+      if (this.currentTrip) {
+        console.warn(
+          "[travel] 档案里的 activeOption.trip 已被外部清除（生病/死亡/停止状态），" +
+            "按旅行终止处理：清理回家定时器、不收集省份、不发放奖励:",
+          `place=${this.currentTrip.place}`
+        );
+        this._clearTimers();
+        this.currentTrip = null;
+        this._epoch += 1; // 作废 init() 挂起的窗口就绪回调
+      }
+      return null;
+    }
+    this.currentTrip = stored;
+    return stored;
   }
 
   _provinceOf(trip) {
@@ -330,6 +394,10 @@ class TravelService {
 
   // 开始旅游。返回 { ok, province?, duration?, reason? }
   startTravel() {
+    // 先清残留定时器：上一趟旅行若被非 travelService 的路径终止（State.js 生病清 trip、
+    // 或档案被外部改动），finishTimer/hideTimer 可能还挂着。不清就直接覆盖字段会丢掉
+    // 句柄：旧 finishTimer 一到点就结算**新**行程 → 秒完成、白拿省份与元宝，且可循环。
+    this._clearTimers();
     const petInfo = this._getPetInfo();
     const activeOption = petInfo.activeOption || {};
     // 前置校验：有 ill/work/study/trip 任一状态则拒绝。死亡态存放在 activeOption.ill
@@ -438,15 +506,17 @@ class TravelService {
     return status;
   }
 
-  // 提前召回：清 trip、窗口恢复，无奖励、不收集
-  cancelTravel() {
+  // 提前召回：清 trip、窗口恢复，无奖励、不收集。
+  // silent=true 时不播"旅行取消啦"气泡——供 State.js 的生病/死亡分支调用：那边紧接着
+  // 会播"我生病了，我不能旅游了~"，两条气泡互相覆盖，只留后者语义更清楚。
+  cancelTravel({ silent = false } = {}) {
     const trip = this._trip();
     if (!trip) return { ok: false, reason: "not_traveling" };
     this._clearTimers();
     this._clearTripState();
     this._showMain();
     this._playActive("enter");
-    this._openSpeak("[host]，旅行取消啦，我回来咯~");
+    if (!silent) this._openSpeak("[host]，旅行取消啦，我回来咯~");
     return { ok: true };
   }
 
@@ -464,7 +534,28 @@ class TravelService {
       return { resumed: false };
     }
     this.currentTrip = trip;
-    const remainingMs = trip.startTime + trip.duration - this._now();
+    const now = this._now();
+    // startTime / duration 都来自不可信的历史存档（系统时钟被回拨、NTP 纠偏跑偏的机器、
+    // 用户手改日期、存档被手改），剩余时间必须钳制，否则有两种真实故障：
+    //   ① 时间回拨 1 天 → remainingMs≈24h：主窗口保持隐藏、行程 24 小时不结束，
+    //      用户看不到宠物，只会以为程序坏了；
+    //   ② 回拨超过 MAX_TIMEOUT_MS（≈24.8 天）→ Node 打 TimeoutOverflowWarning 并把
+    //      延迟坍缩成 1ms → 立即结算，白拿省份 + 元宝，且可反复。
+    // 规则：startTime 晚于当前时间即存档异常，按"旅行已结束"立即结算（不能傻等一个
+    // 永远追不上的未来时刻）；否则剩余时间钳在 [0, min(duration, MAX_TIMEOUT_MS)]——
+    // 剩余时间不可能超过行程自身的总时长，而总时长本身也可能被改坏，故再套一层硬上界。
+    const clockAnomaly = trip.startTime > now;
+    if (clockAnomaly) {
+      console.warn(
+        "[travel] 存档里的旅行开始时间晚于当前时间（系统时钟被回拨或存档被改），" +
+          "按旅行已结束立即结算，不再等待:",
+        `startTime=${trip.startTime} now=${now} duration=${trip.duration}`
+      );
+    }
+    const cap = Math.min(Math.max(0, +trip.duration || 0), MAX_TIMEOUT_MS);
+    const remainingMs = clockAnomaly
+      ? 0
+      : Math.min(Math.max(0, trip.startTime + trip.duration - now), cap);
     if (remainingMs > 0) {
       // 宠物还没回家：保持窗口隐藏（等主窗口就绪后执行），继续倒计时
       this._whenMainWindowReady(() => this._hideMain(), "恢复旅行隐藏主窗口");
@@ -485,10 +576,17 @@ class TravelService {
 
 // 默认单例（主进程使用）；测试用 createTravelService 注入桩
 const travelService = new TravelService();
+// 挂 global：State.js（webpack 压缩产物，无 require 通道）的病情/死亡分支要在清 trip 前
+// 通知本服务真正终止旅行，同 loop.js 的 global.perceptionLoop 做法。
+global.travelService = travelService;
 
 module.exports = travelService;
 module.exports.TravelService = TravelService;
 module.exports.PROVINCES = PROVINCES;
 module.exports.MAIN_WINDOW_POLL_MS = MAIN_WINDOW_POLL_MS;
 module.exports.MAIN_WINDOW_WAIT_MS = MAIN_WINDOW_WAIT_MS;
+module.exports.MAX_TIMEOUT_MS = MAX_TIMEOUT_MS;
+// 主窗口显隐的统一入口（供 aiWiring 的 pet-hide/pet-show 使用，旅游态优先仲裁）
+module.exports.requestMainWindowVisible = (visible, reason) =>
+  travelService.setMainWindowVisible(visible, reason);
 module.exports.createTravelService = (deps) => new TravelService(deps);

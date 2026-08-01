@@ -36,6 +36,15 @@ const MAX_EXPORTED_COURSES = 30;
 // 响应体截到 500 字符拼进 message，整段写进 state.json 会淹没其他字段、也会灌进导出稿；
 // 300 字符足够看清 "HTTP 429" / "缺少 API Key" 这类根因。
 const SUMMARY_ERROR_LIMIT = 300;
+// —— 启动恢复（崩溃/断电遗留的 finalizing 会话、总结失败的会话）——
+// 延迟依据：courses/index.js 在 doMain 启动链里被同步 require，恢复要跑 LLM
+//（每次调用上限 CHAT_TIMEOUT_MS=120s），绝不能压在启动路径上；20 秒足够窗口首帧与
+// 感知循环拉起，又远小于用户开始上一节课的时间尺度。
+const STARTUP_RECOVERY_DELAY_MS = 20 * 1000;
+// 单次启动最多恢复的会话数。依据：每个会话恢复要重跑整条分块总结（N 次 LLM 调用），
+// 积压到 repo.MAX_SESSION_COUNT=20 个时全量恢复会一次打出上百次请求、把主进程占住数分钟；
+// 3 个覆盖"崩溃前后 1~2 节课"的现实情形，其余留给下次启动或用户手动重试。
+const MAX_RECOVERY_PER_STARTUP = 3;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -79,14 +88,17 @@ function speakBubble(text) {
 }
 
 class CourseManager extends EventEmitter {
-  // opts.now / setInterval / clearInterval / desktopDir 仅测试注入
-  //（看门狗定时链 + 导出根目录，避免单测写进用户真实桌面），生产走全局/desktopPath()
+  // opts.now / setInterval / clearInterval / setTimeout / desktopDir 仅测试注入
+  //（看门狗定时链 + 启动恢复定时器 + 导出根目录，避免单测写进用户真实桌面），
+  // 生产走全局/desktopPath()；autoRecover=false 也只给测试用（关掉启动恢复调度）。
   constructor({
     repo,
     now,
     setInterval: setIntervalFn,
     clearInterval: clearIntervalFn,
+    setTimeout: setTimeoutFn,
     desktopDir,
+    autoRecover,
   } = {}) {
     super();
     this.repo = repo || new CourseRepo();
@@ -94,6 +106,7 @@ class CourseManager extends EventEmitter {
     this._nowFn = now || (() => Date.now());
     this._setIntervalFn = setIntervalFn || ((fn, ms) => setInterval(fn, ms));
     this._clearIntervalFn = clearIntervalFn || ((t) => clearInterval(t));
+    this._setTimeoutFn = setTimeoutFn || ((fn, ms) => setTimeout(fn, ms));
     this.currentSession = null; // 当前录制中的 state 快照（含 manual 标记）
     this._lastTranscript = ""; // 上一轮全量转写（增量提取基准）
     this._lastNote = ""; // 上一条入库笔记（连续去重）
@@ -104,6 +117,116 @@ class CourseManager extends EventEmitter {
     this._nonCourseStartedAt = 0;
     this._lastCourseSignalAt = 0; // 最近一次课程感知信号时间（看门狗基准）
     this._watchdog = null; // 无课程信号看门狗定时器（仅自动会话）
+    this._recoveryStarted = false; // 启动恢复的幂等闸门：一个进程只跑一次
+    this._exportOverflowNotified = false; // 桌面导出目录超限只对用户提示一次（本进程内）
+    if (autoRecover !== false) this._scheduleStartupRecovery();
+  }
+
+  // ---- 启动恢复：把崩溃遗留的会话重新结稿（唯一的 repo.recoverable() 调用者）----
+  // 只挂一个 unref 定时器，启动路径上零同步工作；恢复内部的任何失败都不向外冒泡。
+  _scheduleStartupRecovery() {
+    const timer = this._setTimeoutFn(() => {
+      this.recoverPending().catch((e) => {
+        console.error(
+          "[courses/manager] 启动恢复流程异常退出，本次启动不再恢复（重启或手动结稿仍可重试）:",
+          (e && e.stack) || e
+        );
+      });
+    }, STARTUP_RECOVERY_DELAY_MS);
+    if (timer && timer.unref) timer.unref(); // 恢复定时器不得拖住进程退出
+    return timer;
+  }
+
+  // 恢复可恢复会话（finalizing / failed / complete+summary_error）。
+  // 幂等三重保证：① _recoveryStarted 闸门，同一进程只执行一次；
+  // ② 逐个走 finishSession(id)——它对"complete 且无 summary_error"直接返回，
+  //    重复调用不会重复导出、也不会重复调 LLM；
+  // ③ 恢复成功的会话自动离开 recoverable()，下次启动只会再看到仍然坏着的那些。
+  // 上界 MAX_RECOVERY_PER_STARTUP，串行执行（不并发打 LLM），未处理的留日志。
+  async recoverPending() {
+    const result = { recovered: 0, retried: 0, skipped: 0 };
+    if (this._recoveryStarted) return result;
+    this._recoveryStarted = true;
+    let pending;
+    try {
+      pending = this.repo.recoverable();
+    } catch (e) {
+      console.error(
+        "[courses/manager] 列举可恢复会话失败，本次启动跳过恢复:",
+        (e && e.stack) || e
+      );
+      return result;
+    }
+    const targets = (pending || []).filter(
+      (s) => s && s.id && !(this.currentSession && this.currentSession.id === s.id)
+    );
+    if (!targets.length) return result; // 正常启动的常态：不留任何日志
+    // 需要重跑总结的会话才吃 LLM；"只差导出"的（finalizing/failed 且无 summary_error）
+    // 沿用已有 summary 直接重导，未配置提供商也照样能恢复
+    const needsSummary = (s) => s.status === "recording" || !!s.summary_error;
+    const summarizerReady = targets.some(needsSummary) ? this._hasSummarizer() : true;
+    const batch = [];
+    const overBound = [];
+    const noProvider = [];
+    for (const session of targets) {
+      if (needsSummary(session) && !summarizerReady) {
+        noProvider.push(session.id);
+      } else if (batch.length >= MAX_RECOVERY_PER_STARTUP) {
+        overBound.push(session.id);
+      } else {
+        batch.push(session);
+      }
+    }
+    if (noProvider.length) {
+      // 只一条提示，不逐会话刷屏：未配置提供商时重跑总结必然失败
+      console.warn(
+        `[courses/manager] 尚未配置 LLM 提供商，${noProvider.length} 个待重跑总结的会话本次跳过` +
+          `（${noProvider.join(", ")}）：配置后重启或手动结稿即会重试`
+      );
+    }
+    if (overBound.length) {
+      console.warn(
+        `[courses/manager] 单次启动最多恢复 ${MAX_RECOVERY_PER_STARTUP} 个会话，` +
+          `本次剩余 ${overBound.length} 个留待下次启动（${overBound.join(", ")}）`
+      );
+    }
+    const stillBroken = [];
+    for (const session of batch) {
+      result.retried += 1;
+      let state = null;
+      try {
+        state = await this.finishSession(session.id);
+      } catch (e) {
+        // finishSession 内部已兜住绝大多数异常；这里防它自身的编程错误拖垮整批恢复
+        console.error(
+          `[courses/manager] 恢复会话 ${session.id} 时发生意外异常，跳过该会话继续恢复:`,
+          (e && e.stack) || e
+        );
+      }
+      if (state && state.status === "complete" && !state.summary_error) result.recovered += 1;
+      else stillBroken.push(session.id);
+    }
+    result.skipped = noProvider.length + overBound.length;
+    console.warn(
+      `[courses/manager] 启动恢复完成：尝试 ${result.retried} 个、成功 ${result.recovered} 个、` +
+        `仍失败 ${stillBroken.length} 个（${stillBroken.join(", ") || "无"}）、` +
+        `跳过 ${result.skipped} 个`
+    );
+    return result;
+  }
+
+  // 恢复前的 LLM 门禁：未配置提供商时重跑总结必然失败（每个会话都会写一次 summary_error
+  // 并留一条 warn），所以整批跳过并只提示一次。配置读取本身失败按"未配置"降级。
+  _hasSummarizer() {
+    try {
+      return !!providers.hasChatProvider();
+    } catch (e) {
+      console.error(
+        "[courses/manager] 查询 LLM 提供商配置失败，按未配置降级（本次跳过需重跑总结的会话）:",
+        (e && e.stack) || e
+      );
+      return false;
+    }
   }
 
   // 开始录制；已有录制中的会话时直接复用（幂等）
@@ -353,6 +476,7 @@ class CourseManager extends EventEmitter {
         empty.summary_error = null;
         this.repo.saveState(id, empty);
       }
+      this.repo.clearSummaryChunkCache(id); // 无内容可总结 → 陈旧块缓存没有留存意义
       return;
     }
     try {
@@ -361,9 +485,26 @@ class CourseManager extends EventEmitter {
       if (chunks.length === 1) {
         source = chunks[0];
       } else {
+        // 块级结果逐块落盘暂存：任一块遇 429/超时/Key 失效时，重试跳过已成功的块，
+        // 不再把前 N-1 块的钱和时间重花一遍。缓存缺失（老会话）等价于全部重跑。
+        const cache = this.repo.readSummaryChunkCache(id, chunks.length);
         const extracted = [];
-        for (const chunk of chunks) {
-          extracted.push(await this._askSummarizer(prompts.buildCourseChunkPrompt(chunk)));
+        let reused = 0;
+        for (let i = 0; i < chunks.length; i++) {
+          const cached = this.repo.cachedChunkSummary(cache, i, chunks[i]);
+          if (cached) {
+            extracted.push(cached);
+            reused += 1;
+            continue;
+          }
+          const part = await this._askSummarizer(prompts.buildCourseChunkPrompt(chunks[i]));
+          this.repo.saveSummaryChunk(cache, id, i, chunks[i], part);
+          extracted.push(part);
+        }
+        if (reused) {
+          console.warn(
+            `[courses/manager] 会话 ${id} 复用了 ${reused}/${chunks.length} 块上次已成功的分块提取结果`
+          );
         }
         source = extracted.filter(Boolean).join("\n");
       }
@@ -383,6 +524,8 @@ class CourseManager extends EventEmitter {
       state.summary = summary.slice(0, SUMMARY_LIMIT);
       state.summary_error = null; // 重试成功后必须清掉失败标记
       this.repo.saveState(id, state);
+      // 终稿已落盘 → 块级缓存使命结束，立刻删除（不让它成为第 4 个只增不减的写入）
+      this.repo.clearSummaryChunkCache(id);
     } catch (e) {
       // 总结失败不阻断导出，但绝不能静默：summary-failed 事件目前没有监听者，
       // 只发事件等于失败消失（导出稿缺"课程总结"小节、state 却是 complete）。
@@ -508,6 +651,17 @@ class CourseManager extends EventEmitter {
         `[courses] 桌面 QQ-Courses 已有 ${count} 个课程目录（超过提示上限 ` +
           `${MAX_EXPORTED_COURSES}），请自行清理不再需要的导出以释放磁盘`
       );
+      // 只 console.warn 等于没有护栏（用户看不到日志）。这里复用课程互动已在用的
+      // openSpeak 气泡——本模块唯一现成的用户可见通道，不新造机制。
+      // 每进程只提示一次：每次导出都弹会变成骚扰（一节课结束就导出一次）；
+      // 重启后允许再提示一次，正好覆盖"用户一直没清理"的情形。
+      if (!this._exportOverflowNotified) {
+        this._exportOverflowNotified = true;
+        speakBubble(
+          `桌面的 QQ-Courses 里已经堆了 ${count} 个课程记录啦，` +
+            "有空清理一下不需要的吧～（我不会自己删你的桌面文件哦）"
+        );
+      }
     }
     return count;
   }
@@ -517,4 +671,9 @@ class CourseManager extends EventEmitter {
   }
 }
 
-module.exports = { CourseManager };
+module.exports = {
+  CourseManager,
+  STARTUP_RECOVERY_DELAY_MS,
+  MAX_RECOVERY_PER_STARTUP,
+  MAX_EXPORTED_COURSES,
+};

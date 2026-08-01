@@ -10,7 +10,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { CourseManager } = require("../src/service/courses/manager.js");
+const {
+  CourseManager,
+  STARTUP_RECOVERY_DELAY_MS,
+  MAX_RECOVERY_PER_STARTUP,
+  MAX_EXPORTED_COURSES,
+} = require("../src/service/courses/manager.js");
 const { CourseRepo } = require("../src/service/courses/repo.js");
 
 const SILENCE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -49,6 +54,7 @@ function makeWorld(opt = {}) {
   const repo = makeRepo();
   const mgr = new CourseManager({
     repo,
+    autoRecover: false, // 本组只测看门狗定时链，关掉启动恢复调度（另有专测）
     now: () => now,
     setInterval: (fn, ms) => {
       const t = { fn, ms, cleared: false };
@@ -200,6 +206,7 @@ function makeRealWorld(root, { summarize } = {}) {
   const mgr = new CourseManager({
     repo,
     desktopDir: path.join(root, "desktop"),
+    autoRecover: false, // 恢复流程由专门的用例显式驱动 recoverPending()
     now: () => now,
     setInterval: (fn, ms) => {
       const t = { fn, ms, cleared: false };
@@ -400,5 +407,278 @@ test("看门狗触发的结稿即使总结失败也不会形成重试风暴", as
     assert.equal(w.asks.length, 1, "总结失败不得被看门狗反复重试（只应调用一次）");
     assert.equal(w.repo.getState(started.id).status, "complete", "总结失败仍完成导出");
     assert.equal(w.mgr.currentSession, null);
+  });
+});
+
+// ===========================================================================
+// 启动恢复（repo.recoverable() 原本零调用者：崩溃留下的 finalizing 会话永久滞留）、
+// 多块总结的部分成功保留、桌面导出目录上界对用户可见——三项的回归测试。
+// 依旧只替换 _askSummarizer / _hasSummarizer（云端调用层与配置门禁）与时钟、定时器。
+// ===========================================================================
+
+// 造一个"崩溃遗留"的会话：写好转写后把 status 直接改成目标状态（模拟进程被杀）
+function makeStrandedSession(repo, { id, status, summaryError = null, text = "遗留的转写" }) {
+  repo.createSession({ title: `遗留课程 ${id}`, sessionId: id });
+  if (text) repo.appendTranscript(id, text);
+  const state = repo.getState(id);
+  state.status = status;
+  state.summary_error = summaryError;
+  return repo.saveState(id, state);
+}
+
+test("启动恢复：构造时只挂 unref 延迟定时器，不在启动路径上做任何同步恢复", async () => {
+  await withTempWorkspace(async (root) => {
+    const repo = new CourseRepo(path.join(root, "sessions"));
+    // finalizing 且无 summary_error = 只差导出，恢复不需要 LLM
+    makeStrandedSession(repo, { id: "auto-strand1", status: "finalizing" });
+    let recoverableCalls = 0;
+    const listRecoverable = repo.recoverable.bind(repo);
+    repo.recoverable = () => {
+      recoverableCalls += 1;
+      return listRecoverable();
+    };
+    const timers = [];
+    const mgr = new CourseManager({
+      repo,
+      desktopDir: path.join(root, "desktop"),
+      setTimeout: (fn, ms) => {
+        const t = {
+          fn,
+          ms,
+          unrefed: false,
+          unref() {
+            this.unrefed = true;
+          },
+        };
+        timers.push(t);
+        return t;
+      },
+    });
+
+    assert.equal(timers.length, 1, "构造时应恰好挂一个恢复定时器");
+    assert.equal(timers[0].ms, STARTUP_RECOVERY_DELAY_MS, "恢复必须延迟到启动之后");
+    assert.equal(timers[0].unrefed, true, "恢复定时器必须 unref，不能拖住进程退出");
+    assert.equal(recoverableCalls, 0, "启动路径上不得同步列举会话（更不能同步恢复）");
+    assert.equal(repo.getState("auto-strand1").status, "finalizing", "定时器未到点前不动会话");
+
+    const logs = await captureConsole(async () => {
+      timers[0].fn(); // 定时器到点
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    });
+
+    assert.equal(recoverableCalls, 1, "到点后恰好列举一次");
+    const recovered = repo.getState("auto-strand1");
+    assert.equal(recovered.status, "complete", "崩溃遗留的 finalizing 会话必须被恢复成 complete");
+    assert.equal(fs.existsSync(recovered.output_path), true, "恢复应产出导出稿");
+    assert.deepEqual(listRecoverable(), [], "恢复成功的会话自动离开 recoverable()");
+    assert.ok(
+      logs.warn.some((m) => m.includes("启动恢复完成：尝试 1 个、成功 1 个")),
+      "恢复了什么必须留日志"
+    );
+
+    // 幂等：同进程再调一次既不重新列举、也不重新导出
+    const again = await mgr.recoverPending();
+    assert.deepEqual(again, { recovered: 0, retried: 0, skipped: 0 });
+    assert.equal(recoverableCalls, 1, "幂等闸门必须在列举之前就拦住第二次恢复");
+  });
+});
+
+test("启动恢复有上界：一次最多恢复 3 个会话，其余留待下次启动并留日志", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, {
+      summarize: async () => "### 课程概览\n补跑的总结\n\n### 知识点\n- 恢复成功",
+    });
+    w.mgr._hasSummarizer = () => true; // 只替换配置门禁，分块/落盘/导出全走真实实现
+    const ids = ["auto-r1", "auto-r2", "auto-r3", "auto-r4", "auto-r5"];
+    for (const id of ids) {
+      makeStrandedSession(w.repo, {
+        id,
+        status: "complete",
+        summaryError: "Error: openai HTTP 429",
+      });
+    }
+
+    let result;
+    const logs = await captureConsole(async () => {
+      result = await w.mgr.recoverPending();
+    });
+
+    assert.equal(MAX_RECOVERY_PER_STARTUP, 3);
+    assert.deepEqual(result, { recovered: 3, retried: 3, skipped: 2 });
+    assert.equal(w.asks.length, 3, "上界必须真的挡住 LLM 调用：5 个会话只允许 3 次总结");
+    assert.deepEqual(
+      w.mgr.recoverable().map((s) => s.id),
+      ["auto-r4", "auto-r5"],
+      "超出上界的会话保持可恢复，留待下次启动"
+    );
+    assert.equal(
+      logs.warn.filter((m) => m.includes("本次剩余 2 个留待下次启动")).length,
+      1,
+      "跳过了什么必须留且只留一条日志"
+    );
+    assert.equal(
+      logs.warn.filter((m) => m.includes("启动恢复完成：尝试 3 个、成功 3 个")).length,
+      1
+    );
+    for (const id of ["auto-r1", "auto-r2", "auto-r3"]) {
+      assert.equal(w.repo.getState(id).summary_error, null, `${id} 的总结应已补上`);
+    }
+  });
+});
+
+test("未配置 LLM 提供商时：需重跑总结的会话跳过且只提示一次，只差导出的照常恢复", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, {
+      summarize: async () => {
+        throw new Error("未配置提供商时不该发起任何 LLM 调用");
+      },
+    });
+    w.mgr._hasSummarizer = () => false; // 等价于 providers.hasChatProvider() 为假
+    makeStrandedSession(w.repo, {
+      id: "auto-n1",
+      status: "complete",
+      summaryError: "Error: 缺少 API Key",
+    });
+    makeStrandedSession(w.repo, {
+      id: "auto-n2",
+      status: "failed",
+      summaryError: "Error: 缺少 API Key",
+    });
+    makeStrandedSession(w.repo, { id: "auto-n3", status: "finalizing" }); // 只差导出
+
+    let result;
+    const logs = await captureConsole(async () => {
+      result = await w.mgr.recoverPending();
+    });
+
+    assert.equal(w.asks.length, 0, "未配置提供商时一次 LLM 都不该打");
+    assert.deepEqual(result, { recovered: 1, retried: 1, skipped: 2 });
+    assert.equal(
+      w.repo.getState("auto-n3").status,
+      "complete",
+      "只差导出的会话不吃 LLM，未配置提供商也必须恢复"
+    );
+    assert.equal(
+      logs.warn.filter((m) => m.includes("尚未配置 LLM 提供商")).length,
+      1,
+      "降级提示只出现一次，不逐会话刷屏"
+    );
+    assert.equal(logs.error.length, 0, "未配置提供商是可预期环境问题，不该记 error");
+    assert.deepEqual(
+      w.mgr.recoverable().map((s) => s.id),
+      ["auto-n1", "auto-n2"],
+      "被跳过的会话保持可恢复"
+    );
+  });
+});
+
+test("列举可恢复会话失败时启动恢复只记 error 不抛错（不阻断启动）", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, { summarize: async () => "不该被调用" });
+    w.repo.recoverable = () => {
+      throw new Error("EACCES: permission denied, scandir sessions");
+    };
+    let result;
+    const logs = await captureConsole(async () => {
+      result = await w.mgr.recoverPending();
+    });
+    assert.deepEqual(result, { recovered: 0, retried: 0, skipped: 0 });
+    assert.equal(w.asks.length, 0);
+    const errors = logs.error.filter((m) => m.includes("列举可恢复会话失败"));
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /\n\s+at /, "意外异常必须带堆栈");
+  });
+});
+
+// —— 多块总结的部分成功保留 ——
+const CHUNK_A_LINE = "甲".repeat(2000); // 每行 2000 字符 → splitTranscript(limit=3200) 切成两块
+const CHUNK_B_LINE = "乙".repeat(2000);
+
+test("多块总结：第 2 块失败后重试跳过已成功的第 1 块，成功后块缓存被清理", async () => {
+  await withTempWorkspace(async (root) => {
+    let failChunkB = true;
+    const w = makeRealWorld(root, {
+      summarize: async (instruction) => {
+        if (instruction.includes("甲甲甲")) return "第一块的提取结果";
+        if (instruction.includes("乙乙乙")) {
+          if (failChunkB) throw new Error("openai HTTP 429: rate limited");
+          return "第二块的提取结果";
+        }
+        return "### 课程概览\n拼接终稿\n\n### 知识点\n- 两块都在";
+      },
+    });
+    const started = w.mgr.startSession({ title: "两块课程", manual: true });
+    w.repo.appendTranscript(started.id, CHUNK_A_LINE);
+    w.repo.appendTranscript(started.id, CHUNK_B_LINE);
+    const cachePath = path.join(root, "sessions", started.id, "summary-chunks.json");
+
+    await captureConsole(() => w.mgr.finishSession());
+
+    assert.equal(w.asks.length, 2, "第一次：第 1 块成功 + 第 2 块失败即中止，共两次调用");
+    assert.match(w.repo.getState(started.id).summary_error, /HTTP 429/);
+    assert.equal(fs.existsSync(cachePath), true, "已成功的块必须落盘暂存，不能随失败一起丢掉");
+    const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    assert.deepEqual(Object.keys(cached.parts), ["0"], "只缓存已成功的第 1 块");
+    assert.equal(cached.parts["0"].text, "第一块的提取结果");
+
+    failChunkB = false;
+    const retryLogs = await captureConsole(() => w.mgr.finishSession(started.id));
+
+    assert.equal(w.asks.length, 4, "重试只补跑第 2 块与终稿（2 + 2），不重跑第 1 块");
+    assert.equal(
+      w.asks.filter((a) => a.includes("甲甲甲")).length,
+      1,
+      "第 1 块的 LLM 调用全程只发生一次（部分成功真的被保留）"
+    );
+    assert.equal(
+      retryLogs.warn.filter((m) => m.includes("复用了 1/2 块")).length,
+      1,
+      "复用了几块必须留日志"
+    );
+    const state = w.repo.getState(started.id);
+    assert.equal(state.summary_error, null);
+    assert.match(state.summary, /拼接终稿/);
+    assert.equal(fs.existsSync(cachePath), false, "总结成功后块缓存必须被清理，不留第 4 个增长点");
+    assert.match(fs.readFileSync(state.output_path, "utf8"), /### 知识点/);
+  });
+});
+
+// —— 桌面导出目录上界对用户可见 ——
+test("桌面导出目录超限：气泡对用户提示一次，且绝不删除桌面文件", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, {
+      summarize: async () => "### 课程概览\n短课\n\n### 知识点\n- 一个点",
+    });
+    fs.mkdirSync(w.coursesRoot, { recursive: true });
+    for (let i = 0; i < MAX_EXPORTED_COURSES; i++) {
+      fs.mkdirSync(path.join(w.coursesRoot, `old-${i}`));
+    }
+    const bubbles = [];
+    const prevSpeak = global.openSpeak;
+    global.openSpeak = (opt) => bubbles.push(opt && opt.data && opt.data.data);
+    try {
+      const first = w.mgr.startSession({ title: "第一节", manual: true });
+      w.repo.appendTranscript(first.id, "第一节的转写");
+      const logs = await captureConsole(() => w.mgr.finishSession());
+
+      assert.equal(bubbles.length, 1, "超过上限必须对用户可见一次，而不是只写日志");
+      assert.match(bubbles[0], /QQ-Courses/);
+      assert.match(bubbles[0], /清理/);
+      assert.equal(logs.warn.filter((m) => m.includes("超过提示上限")).length, 1);
+
+      const second = w.mgr.startSession({ title: "第二节", manual: true });
+      w.repo.appendTranscript(second.id, "第二节的转写");
+      await captureConsole(() => w.mgr.finishSession());
+      assert.equal(bubbles.length, 1, "同一进程内不得每次导出都弹");
+
+      assert.equal(
+        fs.readdirSync(w.coursesRoot).length,
+        MAX_EXPORTED_COURSES + 2,
+        "桌面导出目录一个都不许自动删除"
+      );
+    } finally {
+      if (prevSpeak === undefined) delete global.openSpeak;
+      else global.openSpeak = prevSpeak;
+    }
   });
 });

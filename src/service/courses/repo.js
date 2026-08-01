@@ -20,6 +20,27 @@ const FRAMES_MAX_TOTAL_BYTES = 24 * 1024 * 1024;
 // 单会话 transcript.md 字节上限。依据：课程感知约 2 秒一轮、每轮追加约 100 字节
 // → 约 180 KB/小时，2 MiB 约覆盖 11 小时连续录制，超限后停止追加并告警。
 const TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024;
+// —— recording 会话 state 的落盘节流（appendTranscript 热路径）——
+// 依据：课程感知约 2 秒一轮、manager 每轮最多调 2 次 appendTranscript → 1 小时网课
+// 720~3600 次；原实现每次都 readFileSync + JSON.parse（含最多 40 条 keyframes）再全量
+// 原子重写 state.json（fsync + rename），而这条路径上 saveState 的唯一语义变更只是把
+// updated_at 往前推——全仓没有任何读者依赖它（仅 created_at 参与裁剪排序、
+// 看门狗用的是 manager 内存里的 _lastCourseSignalAt）。
+// 取"每 20 次追加或每 30 秒"落一次：20 次 ≈ 40 秒感知，30 秒与看门狗检查间隔同量级，
+// 1 小时 state.json 写入 ≤180 次（原 720~3600 次，降幅 ≥95%）。
+// 代价：崩溃丢失最后 ≤30 秒的 updated_at 漂移；转写正文仍逐次 fsync，内容不丢。
+const STATE_FLUSH_EVERY_APPENDS = 20;
+const STATE_FLUSH_INTERVAL_MS = 30 * 1000;
+// —— 终稿总结的块级结果缓存（summary-chunks.json）——
+// 多块总结是串行 N 次 LLM 调用，第 N 块失败原本会连带丢掉前 N-1 块的提取结果。
+// 单独成文件而不塞进 state.json：state.json 在录课热路径与 listSessions()/recoverable()
+// 里被反复读写，掺进上千字符的块提取结果会把这些路径一起拖慢。
+// 上界依据：转写上限 2 MiB / 每块 3200 字符 ≈ 650 块，全缓存可达数 MiB；
+// 取 80 块 × 4000 字符 ≈ 320 KiB/会话（80 块 ≈ 4 小时课程的块数，够覆盖真实重试场景），
+// 会话目录本身受 MAX_SESSION_COUNT 裁剪 → 全局上界 ≈ 6 MiB；总结成功即删除。
+const SUMMARY_CHUNK_CACHE_MAX_PARTS = 80;
+const SUMMARY_CHUNK_CACHE_PART_LIMIT = 4000;
+const SUMMARY_CHUNK_CACHE_VERSION = 1;
 
 function isoNow() {
   return new Date().toISOString(); // 形如 2026-07-28T09:05:56.230Z
@@ -78,6 +99,25 @@ class CourseRepo {
       options.framesMaxTotalBytes > 0 ? options.framesMaxTotalBytes : FRAMES_MAX_TOTAL_BYTES;
     this.transcriptMaxBytes =
       options.transcriptMaxBytes > 0 ? options.transcriptMaxBytes : TRANSCRIPT_MAX_BYTES;
+    this.stateFlushEveryAppends =
+      options.stateFlushEveryAppends > 0
+        ? options.stateFlushEveryAppends
+        : STATE_FLUSH_EVERY_APPENDS;
+    this.stateFlushIntervalMs =
+      options.stateFlushIntervalMs > 0 ? options.stateFlushIntervalMs : STATE_FLUSH_INTERVAL_MS;
+    this.summaryChunkCacheMaxParts =
+      options.summaryChunkCacheMaxParts > 0
+        ? options.summaryChunkCacheMaxParts
+        : SUMMARY_CHUNK_CACHE_MAX_PARTS;
+    this._nowFn = options.now || (() => Date.now()); // 仅测试注入（落盘节流的时间基准）
+    // recording 会话 state 的进程内缓存（本进程是 state.json 的唯一写者）。
+    // 结构：{ id, state, transcriptBytes, appendsSinceFlush, lastFlushMs }
+    // 失效策略：① id 不匹配（换了会话）；② saveState(id) 被调用——状态迁移、关键帧入库
+    // 都走它，磁盘上的那份才是权威，缓存必须让位；③ 读到的 state 不是 recording 时不建缓存。
+    // 由此 finishSession 把 status 置 finalizing 后，下一次 appendTranscript 必然缓存未命中
+    // → 从磁盘读到 finalizing → 照旧抛 "session is not recording"，
+    // 绝不会把缓存里的 recording 状态写回去覆盖 finalizing（僵尸收养防线不受影响）。
+    this._recordingState_cache = null;
     fs.mkdirSync(this.root, { recursive: true });
   }
 
@@ -187,6 +227,11 @@ class CourseRepo {
   saveState(id, state) {
     state.updated_at = isoNow();
     atomicJson(this._statePath(id), state);
+    // 磁盘上刚写下的这份才是权威：同一会话的 recording 缓存整体失效
+    //（状态迁移 recording→finalizing 必须立刻被 appendTranscript 看到）
+    if (this._recordingState_cache && this._recordingState_cache.id === id) {
+      this._recordingState_cache = null;
+    }
     return state;
   }
 
@@ -236,20 +281,27 @@ class CourseRepo {
     return total;
   }
 
-  // 追加转写文本：保证换行结尾，写后立即 fsync 落盘。
+  // 追加转写文本：保证换行结尾，写后立即 fsync 落盘（转写正文的持久性不打折）。
+  // state.json 不再逐次重写：命中 _recordingState_cache 时省掉 readFileSync + JSON.parse，
+  // 并按 stateFlushEveryAppends / stateFlushIntervalMs 节流落盘（见缓存注释的取舍论证）。
   // 超过 transcriptMaxBytes 后丢弃本次追加并告警——录制不该因为文本超长而中断。
   appendTranscript(id, deltaText) {
-    const state = this.getState(id);
+    const cache =
+      this._recordingState_cache && this._recordingState_cache.id === id
+        ? this._recordingState_cache
+        : null;
+    const state = cache ? cache.state : this.getState(id);
     if (state.status !== "recording") {
       throw new Error("session is not recording");
     }
     let text = String(deltaText || "");
     if (text && !text.endsWith("\n")) text += "\n";
     const transcriptPath = this._transcriptPath(id);
-    if (
-      this._fileBytes(transcriptPath) + Buffer.byteLength(text, "utf8") >
-      this.transcriptMaxBytes
-    ) {
+    const incoming = Buffer.byteLength(text, "utf8");
+    // 已占用字节也进缓存：本进程是 transcript.md 的唯一写者，追加成功即可自行累加，
+    // 上界判定精度不变（缓存失效后回落到 statSync 重新取真值）
+    let used = cache ? cache.transcriptBytes : this._fileBytes(transcriptPath);
+    if (used + incoming > this.transcriptMaxBytes) {
       console.warn(
         `[courses/repo] 会话 ${id} 的 transcript.md 已达 ${this.transcriptMaxBytes} 字节上限，` +
           "本次追加已丢弃"
@@ -263,7 +315,36 @@ class CourseRepo {
     } finally {
       fs.closeSync(fd);
     }
-    return this.saveState(id, state);
+    used += incoming;
+    const nowMs = this._nowFn();
+    if (cache) {
+      cache.transcriptBytes = used;
+      cache.appendsSinceFlush += 1;
+    }
+    const pending = cache ? cache.appendsSinceFlush : 1;
+    const lastFlushMs = cache ? cache.lastFlushMs : nowMs;
+    if (
+      pending >= this.stateFlushEveryAppends ||
+      nowMs - lastFlushMs >= this.stateFlushIntervalMs
+    ) {
+      this.saveState(id, state); // 落盘顺带清掉缓存，下面立即以已落盘的 state 续上
+      this._recordingState_cache = {
+        id,
+        state,
+        transcriptBytes: used,
+        appendsSinceFlush: 0,
+        lastFlushMs: nowMs,
+      };
+    } else if (!cache) {
+      this._recordingState_cache = {
+        id,
+        state,
+        transcriptBytes: used,
+        appendsSinceFlush: 1,
+        lastFlushMs: nowMs,
+      };
+    }
+    return state;
   }
 
   // 关键帧入库：PNG 原字节写入 frames/，文件名 {序号:06d}-{timestamp_ms:012d}.png
@@ -335,6 +416,105 @@ class CourseRepo {
         (s.status === "complete" && !!s.summary_error)
     );
   }
+
+  // ==== 块级总结缓存（多块总结的部分成功保留，见文件头常量注释的上界依据）====
+
+  _summaryChunkCachePath(id) {
+    return path.join(this._sessionDir(id), "summary-chunks.json");
+  }
+
+  // 块指纹：只认块自身内容。转写在两次尝试之间增长/被裁时分块边界会变，
+  // 指纹不一致即视为未命中，绝不把别的段落的提取结果拼进终稿。
+  _chunkFingerprint(text) {
+    return crypto.createHash("sha1").update(String(text), "utf8").digest("hex").slice(0, 16);
+  }
+
+  // 读块级缓存；文件不存在（所有旧会话/旧 state 都是这种情况）或内容损坏都按"无缓存"降级，
+  // 只影响多花一次重跑，绝不阻断总结。chunkTotal 给定时顺带丢掉越界的旧块。
+  readSummaryChunkCache(id, chunkTotal) {
+    const empty = { version: SUMMARY_CHUNK_CACHE_VERSION, parts: {} };
+    let raw;
+    try {
+      raw = fs.readFileSync(this._summaryChunkCachePath(id), "utf8");
+    } catch (e) {
+      if (e && e.code !== "ENOENT") {
+        console.error(
+          `[courses/repo] 读取会话 ${id} 的块级总结缓存失败，按无缓存重跑全部分块:`,
+          e.stack || e
+        );
+      }
+      return empty;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.warn(
+        `[courses/repo] 会话 ${id} 的块级总结缓存损坏，按无缓存重跑全部分块:`,
+        e.message || e
+      );
+      return empty;
+    }
+    const source = parsed && parsed.parts && typeof parsed.parts === "object" ? parsed.parts : {};
+    const parts = {};
+    for (const key of Object.keys(source)) {
+      const index = Number(key);
+      if (!Number.isInteger(index) || index < 0) continue;
+      if (Number.isInteger(chunkTotal) && index >= chunkTotal) continue; // 转写变短，旧块作废
+      const part = source[key];
+      if (part && typeof part.hash === "string" && typeof part.text === "string" && part.text) {
+        parts[String(index)] = { hash: part.hash, text: part.text };
+      }
+    }
+    return { version: SUMMARY_CHUNK_CACHE_VERSION, parts };
+  }
+
+  // 取某一块已缓存的提取结果；无缓存或指纹不符返回 null（调用方重跑该块）
+  cachedChunkSummary(cache, index, chunkText) {
+    const part = cache && cache.parts ? cache.parts[String(index)] : null;
+    if (!part || !part.text) return null;
+    return part.hash === this._chunkFingerprint(chunkText) ? part.text : null;
+  }
+
+  // 记下一块的提取结果并立即原子落盘（每块一次原子写，相对一次 LLM 调用可忽略）；
+  // 超过 summaryChunkCacheMaxParts 后不再缓存新块（只影响重试要重跑这些块），必须告警。
+  saveSummaryChunk(cache, id, index, chunkText, text) {
+    const parts = (cache && cache.parts) || {};
+    const key = String(index);
+    if (!parts[key] && Object.keys(parts).length >= this.summaryChunkCacheMaxParts) {
+      if (!cache._capWarned) {
+        cache._capWarned = true; // 只警告一次：块数上千时逐块告警本身就是刷屏
+        console.warn(
+          `[courses/repo] 会话 ${id} 的块级总结缓存已达 ${this.summaryChunkCacheMaxParts} 块上限，` +
+            "其后的块不再缓存（重试时需重跑这些块）"
+        );
+      }
+      return cache;
+    }
+    parts[key] = {
+      hash: this._chunkFingerprint(chunkText),
+      text: String(text || "").slice(0, SUMMARY_CHUNK_CACHE_PART_LIMIT),
+    };
+    // 只落 version/parts：cache 上的 _capWarned 等运行期标记不进磁盘
+    atomicJson(this._summaryChunkCachePath(id), {
+      version: SUMMARY_CHUNK_CACHE_VERSION,
+      parts,
+    });
+    return cache;
+  }
+
+  // 清理块级缓存：总结成功或确认无需总结时调用，避免它变成又一处只增不减的写入
+  clearSummaryChunkCache(id) {
+    try {
+      fs.rmSync(this._summaryChunkCachePath(id), { force: true });
+    } catch (e) {
+      // 删不掉只是留一个陈旧缓存文件（下次总结按指纹校验后覆盖），不影响正确性
+      console.warn(
+        `[courses/repo] 清理会话 ${id} 的块级总结缓存失败:`,
+        e && e.message ? e.message : e
+      );
+    }
+  }
 }
 
 module.exports = {
@@ -345,4 +525,7 @@ module.exports = {
   MAX_KEYFRAMES_PER_SESSION,
   FRAMES_MAX_TOTAL_BYTES,
   TRANSCRIPT_MAX_BYTES,
+  STATE_FLUSH_EVERY_APPENDS,
+  STATE_FLUSH_INTERVAL_MS,
+  SUMMARY_CHUNK_CACHE_MAX_PARTS,
 };

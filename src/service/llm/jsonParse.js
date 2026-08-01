@@ -47,4 +47,21 @@ function extractJsonObject(text, label = "模型") {
   return value;
 }
 
-module.exports = { tryExtractJsonObject, extractJsonObject, isPlainObject };
+// 模型输出字段归一（全项目唯一实现）：把"本该是字符串"的字段收成安全的短字符串。
+// 模型偶发把字段写成 {"text":"…"} 或 ["…"]（temperature 高 + 硬长度约束下确实会发生），
+// String() 会得到 "[object Object]" 并被直接塞进气泡正文 / 按钮文案 / 弹幕（曾真实上屏），
+// 因此对象与数组一律判空；数字/布尔按其字面值转字符串（模型把 confidence 之类写成数字时可用）。
+// limit 省略时不截断（slice(0, undefined) 返回整串），便于只做类型归一的场景。
+// 此前 llm.js 的 normSpeakField 与 perception/loop.js 的 str() 是同口径的两份实现，现收敛到此处。
+function normField(value, limit) {
+  if (value == null) return "";
+  if (typeof value === "object") return "";
+  return String(value).trim().slice(0, limit);
+}
+
+module.exports = {
+  tryExtractJsonObject,
+  extractJsonObject,
+  isPlainObject,
+  normField,
+};

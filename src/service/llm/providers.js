@@ -327,11 +327,31 @@ function hasApiVersionSegment(base) {
   return API_VERSION_SEGMENT_RE.test(base);
 }
 
+// 各协议的完整 endpoint 末段：用户把服务商文档里的**整条请求地址**粘进设置页
+// （https://api.x.com/v1/chat/completions）时，若还按 base 处理就会拼成
+// …/chat/completions/v1/chat/completions（旧逻辑同样坏，只是形态不同：裸拼成
+// …/chat/completions/chat/completions）。这两条常量是"已经是完整 endpoint"的判定依据。
+const ENDPOINT_SUFFIX = {
+  openai: "/chat/completions",
+  anthropic: "/messages",
+};
+
+// baseUrl → 实际请求 URL。两条协议分支共用这一个函数（本文件反复吃过"同一口径多份
+// 实现"的亏），三段优先级：
+//   1. 末段已是本协议的完整 endpoint → 原样使用（不再追加任何路径）；
+//   2. 末段是版本段（/v1、/v2…）→ 直接拼 endpoint；
+//   3. 其余（含网关路径前缀）→ 补 /v1 再拼 endpoint。
+// 大小写不敏感地判定末段，但返回值保留用户原文（路径大小写由服务商决定，不擅自改写）。
+function resolveEndpoint(baseUrl, type) {
+  const suffix = ENDPOINT_SUFFIX[type] || ENDPOINT_SUFFIX.openai;
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  if (base.toLowerCase().endsWith(suffix)) return base;
+  if (hasApiVersionSegment(base)) return base + suffix;
+  return base + "/v1" + suffix;
+}
+
 async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
-  const base = String(cfg.baseUrl || "").replace(/\/+$/, "");
-  const url = hasApiVersionSegment(base)
-    ? base + "/chat/completions"
-    : base + "/v1/chat/completions";
+  const url = resolveEndpoint(cfg.baseUrl, "openai");
   const payload = {
     model: cfg.model,
     messages: mergeImagesOpenAI(messages, images),
@@ -371,10 +391,9 @@ async function chatOpenAI(cfg, { messages, images, maxTokens, temperature, timeo
 }
 
 async function chatAnthropic(cfg, { messages, images, maxTokens, temperature, timeoutMs, signal }) {
-  const base = (cfg.baseUrl || "https://api.anthropic.com").replace(/\/+$/, "");
-  // baseUrl 已带版本段时（如 Step Plan 的 .../step_plan/v1）直接拼 /messages，
-  // 否则补 /v1/messages（如 https://api.anthropic.com）；判定见 hasApiVersionSegment
-  const url = hasApiVersionSegment(base) ? base + "/messages" : base + "/v1/messages";
+  // 判定与 openai 分支完全同口径（同一个 resolveEndpoint）：完整 endpoint 原样用、
+  // 带版本段（如 Step Plan 的 .../step_plan/v1）拼 /messages、都没有则补 /v1/messages
+  const url = resolveEndpoint(cfg.baseUrl || "https://api.anthropic.com", "anthropic");
   const { system, messages: conv } = convertMessagesAnthropic(messages, images);
   const payload = {
     model: cfg.model,
@@ -539,11 +558,28 @@ function hasChatProvider() {
   return !!(cfg && cfg.apiKey);
 }
 
-// 感知专用视觉提供商；未单独配置时回退到对话提供商
-function getVisionProvider() {
+// 感知专用视觉提供商解析（带诊断信息）：未单独配置 visionProvider 时回退到对话提供商。
+// 回退本身是刻意保留的便利（多数对话模型也支持图片），但**回退且该模型不支持图片**时
+// 感知会每轮 400 —— 调用方（perception/loop.js）需要在启动时就知道自己处于回退态，
+// 因此这里除 cfg 之外还回报 fallback / reason，避免"静默回退 + 每轮失败"。
+// reason: "vision" 单独配置的视觉提供商 | "fallback-chat" 回退到对话提供商
+//       | "missing-vision" 配了 visionProvider 但列表里查不到 | "no-provider" 一个都没配
+//       | "no-key" 查到了但 apiKey 为空/不可解密
+function resolveVisionProvider() {
   ensureLegacyMigrated();
   const vid = sysGet("visionProvider");
-  return vid ? getProvider(vid) : getChatProvider();
+  const fallback = !vid;
+  const cfg = vid ? getProvider(vid) : getChatProvider();
+  let reason;
+  if (!cfg) reason = fallback ? "no-provider" : "missing-vision";
+  else if (!cfg.apiKey) reason = "no-key";
+  else reason = fallback ? "fallback-chat" : "vision";
+  return { cfg, fallback, reason };
+}
+
+// 感知专用视觉提供商；未单独配置时回退到对话提供商
+function getVisionProvider() {
+  return resolveVisionProvider().cfg;
 }
 
 // 设置页保存入口：apiKey 加密后落盘。
@@ -579,6 +615,8 @@ module.exports = {
   getChatProvider,
   hasChatProvider,
   getVisionProvider,
+  resolveVisionProvider,
+  resolveEndpoint,
   saveProviders,
   encryptApiKey,
   decryptApiKey,

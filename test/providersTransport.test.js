@@ -346,3 +346,101 @@ test("anthropic：baseUrl 版本段判定与 openai 完全同口径", async () =
     await closeServer(server);
   }
 });
+
+// —— 用户把"完整 endpoint"填进 baseUrl 的兼容（两条协议同口径）——
+// 修复前：末段已是 /chat/completions 时仍按 base 处理，拼成
+// …/chat/completions/v1/chat/completions（旧旧实现则是 …/chat/completions/chat/completions），
+// 用户按服务商文档整条粘贴地址必然 404。
+// 对照表：[baseUrl 后缀, openai 期望路径, anthropic 期望路径]
+const ENDPOINT_CASES = [
+  ["/v1", "/v1/chat/completions", "/v1/messages"], // 带版本段
+  ["", "/v1/chat/completions", "/v1/messages"], // 不带版本段：补 /v1
+  ["/", "/v1/chat/completions", "/v1/messages"], // 只有尾斜杠
+  ["/v2", "/v2/chat/completions", "/v2/messages"], // /v2 也认
+  ["/gw/openai", "/gw/openai/v1/chat/completions", "/gw/openai/v1/messages"], // 网关前缀无版本段
+  ["/openai/v1", "/openai/v1/chat/completions", "/openai/v1/messages"], // 网关前缀 + 版本段
+  // 完整 endpoint：本协议的末段原样使用；另一协议的末段仍按 base 处理（它对该协议不是 endpoint）
+  [
+    "/v1/chat/completions",
+    "/v1/chat/completions",
+    "/v1/chat/completions/v1/messages",
+  ],
+  ["/v1/messages", "/v1/messages/v1/chat/completions", "/v1/messages"],
+  // 完整 endpoint + 尾斜杠 / 无版本段的完整 endpoint
+  ["/v1/chat/completions/", "/v1/chat/completions", "/v1/chat/completions/v1/messages"],
+  ["/chat/completions", "/chat/completions", "/chat/completions/v1/messages"],
+  ["/messages", "/messages/v1/chat/completions", "/messages"],
+];
+
+test("resolveEndpoint：完整 endpoint / 版本段 / 尾斜杠 / 网关前缀 的输入→输出对照", () => {
+  for (const [suffix, expectOpenai, expectAnthropic] of ENDPOINT_CASES) {
+    const base = `https://api.example.com${suffix}`;
+    assert.strictEqual(
+      providers.resolveEndpoint(base, "openai"),
+      `https://api.example.com${expectOpenai}`,
+      `openai：baseUrl 后缀「${suffix}」`
+    );
+    assert.strictEqual(
+      providers.resolveEndpoint(base, "anthropic"),
+      `https://api.example.com${expectAnthropic}`,
+      `anthropic：baseUrl 后缀「${suffix}」`
+    );
+  }
+});
+
+test("resolveEndpoint：两条协议共用同一判定（同一 baseUrl 只有末段不同）", () => {
+  // 口径一致性：对任意 baseUrl，"是否补 /v1" 的决定必须与协议无关
+  for (const [suffix] of ENDPOINT_CASES) {
+    const base = `https://api.example.com${suffix}`;
+    const openai = providers.resolveEndpoint(base, "openai");
+    const anthropic = providers.resolveEndpoint(base, "anthropic");
+    const openaiIsFull = base.replace(/\/+$/, "").endsWith("/chat/completions");
+    const anthropicIsFull = base.replace(/\/+$/, "").endsWith("/messages");
+    if (openaiIsFull || anthropicIsFull) continue; // 完整 endpoint 场景天然只对一方成立
+    assert.strictEqual(
+      openai.replace("/chat/completions", ""),
+      anthropic.replace("/messages", ""),
+      `baseUrl 后缀「${suffix}」在两条协议上得到了不同的前缀`
+    );
+  }
+});
+
+test("填完整 endpoint 时真实请求打到原地址，不再重复拼接路径", async () => {
+  const { server, paths } = await startPathRecorder();
+  const port = server.address().port;
+  try {
+    for (const [type, suffix, expect] of [
+      ["openai", "/v1/chat/completions", "/v1/chat/completions"],
+      ["anthropic", "/v1/messages", "/v1/messages"],
+    ]) {
+      paths.length = 0;
+      const text = await providers.chat({
+        providerCfg: {
+          id: "local",
+          type,
+          baseUrl: `http://127.0.0.1:${port}${suffix}`,
+          apiKey: "sk-test",
+          model: "m",
+        },
+        messages: [{ role: "user", content: "你好" }],
+        timeoutMs: 5000,
+      });
+      assert.strictEqual(text, "ok", `${type} ${suffix}`);
+      assert.deepStrictEqual(paths, [expect], `${type}：baseUrl 填了完整 endpoint`);
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("anthropic 未填 baseUrl 时仍走官方地址（默认值不被新判定改坏）", () => {
+  assert.strictEqual(
+    providers.resolveEndpoint("https://api.anthropic.com", "anthropic"),
+    "https://api.anthropic.com/v1/messages"
+  );
+  assert.strictEqual(
+    providers.resolveEndpoint("", "anthropic"),
+    "/v1/messages",
+    "空 baseUrl 由 chatAnthropic 用官方默认值兜底，resolveEndpoint 本身不猜"
+  );
+});

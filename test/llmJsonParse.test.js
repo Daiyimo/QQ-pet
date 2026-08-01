@@ -168,3 +168,45 @@ test("台词生成失败时降级为离线台词但必须记录完整堆栈（�
     else global.getSys = prevGetSys;
   }
 });
+
+// —— 字段归一 normField：llm.js（台词）与 perception/loop.js（感知字段）的唯一共用实现 ——
+// 修复前这份逻辑在两个文件里各写了一遍（llm.js 的 normSpeakField / loop.js 的 str），
+// 口径一致但改一处漏一处的风险实打实（loop.js 先修好、llm.js 当时漏改，气泡曾落 [object Object]）。
+test("normField：对象/数组判空、null/undefined 判空、trim + 限长", () => {
+  const { normField } = require("../src/service/llm/jsonParse.js");
+  assert.strictEqual(normField({ text: "结构不对" }, 30), "");
+  assert.strictEqual(normField(["也不该是数组"], 30), "");
+  assert.strictEqual(normField(null, 30), "");
+  assert.strictEqual(normField(undefined, 30), "");
+  assert.strictEqual(normField("  主人我饿了  ", 30), "主人我饿了");
+  assert.strictEqual(normField("长".repeat(50), 10), "长".repeat(10));
+  assert.strictEqual(normField(42, 30), "42"); // 数字按字面值（模型把数值字段写成 number）
+  assert.strictEqual(normField(true, 30), "true");
+  assert.strictEqual(normField(" 不限长 "), "不限长"); // limit 省略时不截断
+});
+
+test("llm.js 与 perception/loop.js 引用的是同一份 normField（不存在第二份实现）", () => {
+  const { normField } = require("../src/service/llm/jsonParse.js");
+  const { __normSpeakField } = require("../src/service/llm.js");
+  const loopSrc = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../src/service/perception/loop.js"),
+    "utf8"
+  );
+  const llmSrc = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../src/service/llm.js"),
+    "utf8"
+  );
+  assert.strictEqual(__normSpeakField, normField, "llm.js 必须直接复用共用实现");
+  // 两个文件里都不该再有本地的归一函数定义（同口径第二份实现是这仓库反复吃亏的来源）
+  assert.strictEqual(/function\s+str\s*\(/.test(loopSrc), false, "loop.js 不该残留本地 str()");
+  assert.strictEqual(
+    /function\s+normSpeakField\s*\(/.test(llmSrc),
+    false,
+    "llm.js 不该残留本地 normSpeakField()"
+  );
+  assert.strictEqual(
+    /String\(value\)\.trim\(\)\.slice/.test(loopSrc + llmSrc),
+    false,
+    "归一实现只应存在于 llm/jsonParse.js"
+  );
+});

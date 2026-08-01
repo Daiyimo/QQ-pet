@@ -1,6 +1,6 @@
 const _require = eval("require");
 const providers = _require("./llm/providers.js");
-const { extractJsonObject } = _require("./llm/jsonParse.js");
+const { extractJsonObject, normField } = _require("./llm/jsonParse.js");
 
 const DEFAULT_MODEL = "deepseek-chat";
 const LEGACY_BASE_URL = "https://api.deepseek.com/v1";
@@ -87,17 +87,8 @@ function resolveProvider() {
   return providers.getChatProvider();
 }
 
-// 台词字段归一化：模型偶发把本该是字符串的字段写成 {"text":"…"} 或 ["…"]
-// （temperature 0.9 + 15 字硬约束下确实会发生），String() 会得到 "[object Object]"
-// 并被调用方直接塞进气泡正文 / 按钮文案。与 perception/loop.js 的 str() 同口径
-// （对象/数组一律判空 + trim + 限长）；那里的弹幕曾因此上屏，本文件当时漏改。
-// 说明：本函数没有做成 llm/jsonParse.js 里的共用导出（那才是两处该共用的落点），
-// 原因是本次改动被限定在 llm.js / providers.js 内，见交付说明。
-function normSpeakField(value, limit) {
-  if (value == null) return "";
-  if (typeof value === "object") return "";
-  return String(value).trim().slice(0, limit);
-}
+// 台词字段归一化统一走 llm/jsonParse.js 的 normField（对象/数组判空 + trim + 限长）：
+// 与 perception/loop.js 的感知字段归一同一份实现，此前本文件与 loop.js 各有一份同口径代码。
 
 // 走统一提供商层发起单轮对话，并解析 {tolk,submitText} JSON 契约。
 // 解析走 llm/jsonParse.js 的健壮实现（模型带前置解释文字 / markdown 围栏 / 被截断都能救回），
@@ -116,7 +107,7 @@ function callLLM(providerCfg, messages) {
     })
     .then((content) => {
       const raw = extractJsonObject(content, "台词模型");
-      const tolk = normSpeakField(raw.tolk, MAX_TOLK_LEN);
+      const tolk = normField(raw.tolk, MAX_TOLK_LEN);
       if (!tolk) {
         throw new Error(
           "台词模型的 tolk 字段不是非空字符串: " +
@@ -126,7 +117,7 @@ function callLLM(providerCfg, messages) {
       return {
         ...raw,
         tolk,
-        submitText: normSpeakField(raw.submitText, MAX_SUBMIT_LEN),
+        submitText: normField(raw.submitText, MAX_SUBMIT_LEN),
       };
     });
 }
@@ -269,7 +260,7 @@ global.LLM_MAX_CLIPBOARD_LEN = MAX_CLIPBOARD_LEN;
 module.exports = {
   __SYSTEM_PROMPT: SYSTEM_PROMPT,
   __LLMService: LLMService,
-  __normSpeakField: normSpeakField,
+  __normSpeakField: normField, // 兼容旧导出名；实现已收敛到 llm/jsonParse.js 的 normField
   __TIMEOUT_MS: TIMEOUT_MS,
   __MAX_TOLK_LEN: MAX_TOLK_LEN,
   __MAX_SUBMIT_LEN: MAX_SUBMIT_LEN,

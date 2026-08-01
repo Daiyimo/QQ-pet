@@ -3,6 +3,18 @@
 
 <head>
     <meta charset="utf-8" />
+    <!-- CSP：所有经 window.js 走 loadFile(app.html) 的本地窗口共用。
+         - 'unsafe-eval'：vue.global.js 完整版在运行时编译模板（new Function），executeJavaScript 注入也走 eval 通道；
+         - 'unsafe-inline'(script)：下方 RufflePlayer.config 内联脚本；
+         - 'wasm-unsafe-eval'：Ruffle 的 WebAssembly；
+         - connect-src file:：Ruffle 经 fetch 读本地 SWF（opt-out 窗口 webSecurity:false 才发得起，CSP 这里也要放行）；
+         - frame-src http://127.0.0.1:*：fishing/backRoom 壳内的本地服务 iframe（子框架文档不受本 CSP 约束）；
+         - style 'unsafe-inline'：大量 :style 绑定与 insertCSS。
+         收紧任何一条前请先跑 test/ruffleSmoke/ 的 CSP 冒烟验证 SWF 播放与钓鱼 iframe。 -->
+    <meta
+        http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: blob: http://127.0.0.1:*; font-src 'self' data:; connect-src 'self' file: data: blob: http://127.0.0.1:* ws://127.0.0.1:*; frame-src http://127.0.0.1:*; worker-src 'self' blob:; object-src 'self'; media-src 'self' data: blob:; base-uri 'none'; form-action 'none'"
+    />
     <title>pet</title>
     <!-- <script src="../service/config.js"></script> -->
     <!-- <script src="./js/init.js"></script> -->

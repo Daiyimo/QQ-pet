@@ -5,6 +5,14 @@ const _require = eval("require");
 // 试 5 个端口足够；再多只会拖长用户点按到窗口出现的等待。
 const LISTEN_MAX_ATTEMPTS = 5;
 
+// 本机静态服务的默认起始端口。
+// 依据：沿用 1.2.5 官方客户端 flash 页面引入所用的 33385（见 windows/main/indexOnline.html
+// 里残留的 http://<ip>:33385/u/... 资源路径），换端口不影响功能但会让老截图/日志对不上。
+// 修复前这个数字在本文件里散落 4 份（含一份写死在错误消息文案里），改端口必漏；
+// doMain.js 调用 createMain 时也传了同一个字面量，两侧一致性由
+// test/rootListen.test.js 的跨文件断言钉死。
+const DEFAULT_PORT = 33385;
+
 // 本机静态服务只暴露实际被访问的子目录（修复前整个 src/ 被挂载，虽只绑
 // 127.0.0.1，本机任意进程仍可读到源码与存档相关文件）。当前仅三处走该服务：
 // - windows/popups/fishing  池塘钓鱼 indexOnLine.html 及其 swf / pet / legacy_124 资源
@@ -62,43 +70,23 @@ const listenWithRetry = (expressApp, basePort, host, onListening, onGiveUp) => {
       onGiveUp(error);
     });
   };
-  tryPort(Number.isFinite(start) ? start : 33385, 1);
+  tryPort(Number.isFinite(start) ? start : DEFAULT_PORT, 1);
 };
 
 // 本机无法进行js与flash交互有安全机制问题， 通过开端口形式进行flash页面引入
-const createMain = (fn, post, ip, fileName, none) => {
-  if (none) {
-    fn(post, ip, fileName);
-    return;
-  }
-  const express = _require("express");
-  const app = express();
-  const path = _require("path");
-  app.get("/", function (req, res) {
-    // res.render('index');
-    res.send("this is the Homepage");
-  });
-  // fileName = 'u'
-  mountStatic(app, fileName, express, path);
-  // 离线本地版：只绑定 127.0.0.1，不对局域网暴露 src/ 静态目录
-  listenWithRetry(
-    app,
-    post,
-    ip || "127.0.0.1",
-    function (server) {
-      var host = server.address().address;
-      var port = server.address().port;
-      fn(port, host, fileName);
-      console.log("express at http://%s:%s/%s", host, port, fileName);
-    },
-    function () {
-      // 端口全被占用：把 null 交给调用方降级，不能让回调永不触发
-      console.error(
-        `[ini/root] 本机静态服务启动失败（${LISTEN_MAX_ATTEMPTS} 个端口均不可用），依赖它的窗口将无法加载`
-      );
-      fn(null, null, fileName);
-    }
-  );
+//
+// 本函数只剩"直通"语义：把 (post, ip, fileName) 原样交给启动回调。
+// 修复前它还有一整段 express 引导（express() → path → "/" 首页桩 → mountStatic →
+// listenWithRetry），与下方 global.openLocalHost 里的 5 步逐行同构，但那是生产死代码——
+// 唯一调用方 src/ini/doMain.js 恒传第 5 个参数 none=!0，命中直通提前返回，express 分支
+// 只被测试撑着。两份同构代码的实际危害是：改端口 / 改挂载目录时只改活的那份也能全绿。
+// 删除而非抽公共函数，是因为给一份永不执行的代码做抽象只是把死代码藏得更深。
+//
+// 注：doMain.js 仍传第 5 个参数（none），此处刻意不再声明——它已无分支可选。
+// 真的需要本机静态服务时请用 global.openLocalHost（唯一活着的那份引导），
+// 不要在这里把 express 分支加回来。
+const createMain = (fn, post, ip, fileName) => {
+  fn(post, ip, fileName);
 };
 
 // 本文件已删除的死代码（git 历史可查）：
@@ -106,69 +94,27 @@ const createMain = (fn, post, ip, fileName, none) => {
 // - getLocalIP：唯一的两个调用点是 createMain / openLocalHost 里未被使用的
 //   `let aotuIp = getLocalIP()`，随本轮监听重构一并删除后即成死代码（59 行，含一段
 //   注释掉的 readline 选 IP 交互）。本地版只绑 127.0.0.1，不需要枚举网卡。
+// - createMain 的 express 引导分支：与 openLocalHost 逐行同构，而唯一调用方 doMain.js
+//   恒传 none=!0，生产中永不执行（详见 createMain 上方注释）。
+// - 一段 57 行的 ActionScript 鼠标坐标片段（sad / happy peaceful / prostrate / upset 四种
+//   情绪各一份 mouseX/mouseY 钳制 + ExternalInterface.call("API.GetCursorPositionHtml")）：
+//   反编译宠物 SWF 时贴进来的草稿，与本文件的 express 引导毫无关系。该 API 的协议说明与
+//   实现落在 src/windows/util/pet/petExternalApi.js（那里 GetCursorPositionHtml 是 noop，
+//   本批素材不调用）。原文见 `git show 22cf878:src/ini/root.js` 的 114-170 行。
 // 用 typeof 判定替代原来的 `try{...}catch(error){}`：module 缺失是可预期分支，
 // 不该用裸 catch 表达（裸 catch 会顺手吞掉真正的赋值异常）。
 if (typeof module !== "undefined" && module) {
-  module.exports = { createMain, listenWithRetry, LISTEN_MAX_ATTEMPTS };
+  module.exports = { createMain, listenWithRetry, LISTEN_MAX_ATTEMPTS, DEFAULT_PORT };
 }
-/**
- * 
-sad
-var mx:int = this.mouseX;
-         var my:int = this.mouseY;
-         ExternalInterface.call("API.GetCursorPositionHtml",mx,my);
-         if(mx < -30)
-         {
-            mx = 34;
-         }
-         if(my < -79)
-         {
-            my = 0;
-         }
-         return new Point(mx,my);
-happy peaceful
-var mx:int = this.mouseX;
-         var my:int = this.mouseY;
-         ExternalInterface.call("API.GetCursorPositionHtml",mx,my);
-         if(mx < -70)
-         {
-            mx = 0;
-         }
-         if(my < -70)
-         {
-            my = 0;
-         }
-         return new Point(mx,my);
 
-prostrate
-var mx:int = this.mouseX;
-         var my:int = this.mouseY;
-         ExternalInterface.call("API.GetCursorPositionHtml",mx,my);
-         if(mx < -33)
-         {
-            mx = 35;
-         }
-         if(my < -83)
-         {
-            my = 21;
-         }
-         return new Point(mx,my);
-upset
-var mx:int = this.mouseX;
-         var my:int = this.mouseY;
-         ExternalInterface.call("API.GetCursorPositionHtml",mx,my);
-         if(mx < -38)
-         {
-            mx = 29;
-         }
-         if(my < -68)
-         {
-            my = 24;
-         }
-         return new Point(mx,my);
-
- */
-
+// 随机 URL 路径段的字符表：openLocalHost 里 upDownArr(shuffleArr(fileNames)).join("")
+// 把整个数组打乱 + 随机大小写后拼成一个 37 字符的段（如 /aQb_KcJ.../），让本机静态服务的
+// 挂载前缀每次启动都不同，外部进程猜不到。
+// 关于 A–J 出现两次（共 37 项而非 27 项）：因为是"整表 join"而非"随机取一项"，重复
+// 并不构成任何权重，唯一效果是段长 37 而非 27、且 A–J 各出现两次（大小写独立随机）。
+// 看着像复制粘贴残留，但无注释佐证、也无法从行为上反推作者意图，故保留原样——
+// 改动需谨慎：src/ini/doMain.js 里有一份完全相同的副本（变量名 fileName），
+// 只改一边会让两处路径段长度悄悄分叉。
 let fileNames = [
   "A",
   "B",
@@ -253,7 +199,7 @@ global.openLocalHost = (fn) => {
   let fileName = upDownArr(shuffleArr(fileNames)).join("");
   // fileName = 'u'
   mountStatic(app, fileName, express, path);
-  let post = "33385";
+  let post = DEFAULT_PORT;
   // 离线本地版：只绑定 127.0.0.1
   listenWithRetry(
     app,
@@ -274,7 +220,7 @@ global.openLocalHost = (fn) => {
       // 端口全占用：回调收到 null，调用方必须按"打不开"降级并提示用户，
       // 绝不能像修复前那样让回调永不触发、窗口静默不出现。
       console.error(
-        `[ini/root] 本机静态服务启动失败（33385 起 ${LISTEN_MAX_ATTEMPTS} 个端口均被占用），Flash/Ruffle 窗口无法加载`
+        `[ini/root] 本机静态服务启动失败（${DEFAULT_PORT} 起 ${LISTEN_MAX_ATTEMPTS} 个端口均被占用），Flash/Ruffle 窗口无法加载`
       );
       flushPending(null);
     }

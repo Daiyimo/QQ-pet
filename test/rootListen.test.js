@@ -12,7 +12,11 @@ const Module = require("node:module");
 const { EventEmitter } = require("node:events");
 
 const ROOT_PATH = require.resolve("../src/ini/root.js");
+const DOMAIN_PATH = require.resolve("../src/ini/doMain.js");
+// root.js 导出的 DEFAULT_PORT 才是真值，下面有断言把这个常量与它钉死
 const BASE_PORT = 33385;
+
+const readRootSource = () => require("node:fs").readFileSync(ROOT_PATH, "utf8");
 
 /**
  * express 替身：busyPorts 里的端口一律以 EADDRINUSE 失败。
@@ -123,6 +127,12 @@ test("openLocalHost：端口全被占用时回调收到 null（不再永不触�
       errors.some((m) => m.includes("本机静态服务启动失败")),
       "放弃时必须留一条汇总错误日志"
     );
+    assert.ok(
+      errors.some(
+        (m) => m.includes("本机静态服务启动失败") && m.includes(String(root.DEFAULT_PORT))
+      ),
+      "汇总日志里的起始端口必须由 DEFAULT_PORT 插值而来，不能是写死的文案（否则改端口后日志会误导排查者）"
+    );
   });
 });
 
@@ -154,25 +164,80 @@ test("重试期间连点多次：只起一个 express 实例，所有回调都�
   });
 });
 
-test("createMain：端口全占用时以 fn(null) 降级，不让调用方无限等待", async () => {
-  const busy = [0, 1, 2, 3, 4].map((i) => BASE_PORT + i);
-  await withRoot(busy, async ({ root }) => {
+test("createMain：不再自带 express 引导，任何参数下都只做 (post, ip, fileName) 直通", async () => {
+  await withRoot([], async ({ root, attempts, instances }) => {
+    // 不传第 5 个参数（旧 none），修复前会走 express 分支并真的去 listen
     const got = await new Promise((resolve) => {
       root.createMain((port, host, fileName) => resolve({ port, host, fileName }), BASE_PORT, 0, "u");
     });
-    assert.equal(got.port, null);
-    assert.equal(got.host, null);
-    assert.equal(got.fileName, "u", "降级时也要把 fileName 回传，调用方才能给出提示");
+    assert.deepEqual(got, { port: BASE_PORT, host: 0, fileName: "u" });
+    assert.equal(attempts.length, 0, "createMain 不应再触发任何 listen（express 分支已删）");
+    assert.equal(instances.length, 0, "createMain 不应再创建 express 实例");
   });
 });
 
-test("createMain：none=true 时不起服务（doMain 现有用法保持不变）", async () => {
+test("createMain：doMain 现有用法（第 5 个参数 !0）行为不变", async () => {
   await withRoot([], async ({ root, attempts }) => {
     const got = await new Promise((resolve) => {
-      root.createMain((port, host, fileName) => resolve({ port, host, fileName }), "33385", 0, "u", true);
+      root.createMain(
+        (port, host, fileName) => resolve({ port, host, fileName }),
+        String(BASE_PORT),
+        0,
+        "u",
+        true
+      );
     });
-    assert.deepEqual(got, { port: "33385", host: 0, fileName: "u" });
+    assert.deepEqual(got, { port: String(BASE_PORT), host: 0, fileName: "u" });
     assert.equal(attempts.length, 0, "none=true 不应触发任何 listen");
+  });
+});
+
+test("createMain 源码里不再残留 express 引导（与 openLocalHost 同构的死代码）", async () => {
+  const src = readRootSource();
+  const body = src.slice(src.indexOf("const createMain ="), src.indexOf("if (typeof module"));
+  for (const token of ["_require(\"express\")", "mountStatic", "listenWithRetry"]) {
+    assert.ok(
+      !body.split("\n").some((line) => !line.trim().startsWith("//") && line.includes(token)),
+      `createMain 内又出现了 ${token}：express 引导只应有 openLocalHost 一份`
+    );
+  }
+});
+
+test("DEFAULT_PORT 是本文件唯一真值：源码里不得再出现裸 33385 字面量", async () => {
+  await withRoot([], ({ root }) => {
+    assert.equal(root.DEFAULT_PORT, BASE_PORT, "本测试的 BASE_PORT 应与导出的默认端口一致");
+    const src = readRootSource();
+    const lines = src.split("\n");
+    const declarations = [];
+    lines.forEach((line, i) => {
+      if (!line.includes(String(root.DEFAULT_PORT))) return;
+      const trimmed = line.trim();
+      if (trimmed.startsWith("//")) return; // 注释里说明来源是允许的
+      assert.match(
+        trimmed,
+        /^const DEFAULT_PORT = \d+;$/,
+        `root.js:${i + 1} 又把默认端口写成了字面量，应改用 DEFAULT_PORT: ${trimmed}`
+      );
+      declarations.push(trimmed);
+    });
+    assert.equal(declarations.length, 1, "默认端口应恰好只在一处声明");
+  });
+});
+
+test("跨文件：doMain.js 传给 createMain 的端口字面量必须等于 root.js 的 DEFAULT_PORT", async () => {
+  await withRoot([], ({ root }) => {
+    const doMainSrc = require("node:fs").readFileSync(DOMAIN_PATH, "utf8");
+    // doMain.js 是压缩产物，这里锚定整个调用尾部：createMain(回调, "端口", 0, 随机段, !0)
+    const call = /,"(\d+)",0,upDownArr\(shuffleArr\(fileName\)\)\.join\(""\),!0\)/.exec(doMainSrc);
+    assert.ok(
+      call,
+      "没在 doMain.js 里匹配到 createMain 的调用尾部：调用形状变了，请同步本断言与 root.js 的注释"
+    );
+    assert.equal(
+      Number(call[1]),
+      root.DEFAULT_PORT,
+      `doMain.js 传入 ${call[1]}，root.js DEFAULT_PORT 是 ${root.DEFAULT_PORT}：两侧必须一致，否则改端口只改一半`
+    );
   });
 });
 
@@ -181,9 +246,9 @@ test("openWS 死代码已删除，nodejs-websocket 不再被引用", async () =>
     assert.equal(root.openWS, undefined, "openWS 应已删除");
     assert.deepEqual(
       Object.keys(root).sort(),
-      ["LISTEN_MAX_ATTEMPTS", "createMain", "listenWithRetry"].sort()
+      ["LISTEN_MAX_ATTEMPTS", "DEFAULT_PORT", "createMain", "listenWithRetry"].sort()
     );
-    const src = require("node:fs").readFileSync(ROOT_PATH, "utf8");
+    const src = readRootSource();
     // 只允许出现在"已删除"的说明注释里
     for (const line of src.split("\n")) {
       if (line.includes("nodejs-websocket")) {

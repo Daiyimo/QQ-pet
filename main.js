@@ -38,14 +38,14 @@ function isStartupFailure() {
     return BrowserWindow.getAllWindows().length === 0;
   } catch (e) {
     // 读不到窗口列表说明 Electron 环境本身异常，按「没有窗口」的保守侧处理
-    console.warn("[main] 读取 BrowserWindow 列表失败，按启动失败处理:", e?.message || e);
+    console.warn("[main/startup] 读取 BrowserWindow 列表失败，按启动失败处理:", e?.message || e);
     return true;
   }
 }
 
 /** 启动失败的统一收尾：记完整堆栈 → 弹一次说明弹窗 → app.exit(1)。createWindow 与两个 process 处理器共用这一份。 */
 function fatalStartupExit(err, phase) {
-  console.error("[FATAL] 启动失败（" + phase + "），进程将退出:", err?.stack || err);
+  console.error("[main/startup] 启动失败（" + phase + "），进程将退出:", err?.stack || err);
   if (!startupFailureReported) {
     startupFailureReported = true;
     try {
@@ -63,7 +63,7 @@ function fatalStartupExit(err, phase) {
       );
     } catch (e2) {
       // 弹窗本身失败（dialog 不可用等）不该掩盖原始错误，记下后照样退出
-      console.error("[FATAL] 展示启动失败弹窗时又出错:", e2?.stack || e2);
+      console.error("[main/startup] 展示启动失败弹窗时又出错:", e2?.stack || e2);
     }
   }
   require("electron").app.exit(1);
@@ -77,18 +77,17 @@ process.on("uncaughtException", (err) => {
   // 运行期的孤立异常：必须带完整堆栈落日志，否则故障不可诊断
   // 注意：此处刻意不 app.exit() — 桌宠是长驻进程，单个未捕获异常不应导致用户宠物消失。
   // 代价是进程可能处于未定义状态，因此堆栈日志是唯一的排查线索。
-  console.error("[FATAL] 未捕获异常:", err?.stack || err);
+  console.error("[main] 未捕获异常（运行期，仅记日志不退出）:", err?.stack || err);
 });
 process.on("unhandledRejection", (reason, promise) => {
   // 启动路径大量是异步的（whenReady().then 之后的 microtask、service 的异步 init），
   // 这些拒绝同样会留下无窗口僵尸进程，因此与 uncaughtException 走同一条兜底。
   if (isStartupFailure()) return fatalStartupExit(reason, "启动期未处理的 Promise 拒绝");
   // 9 个 service 与全部 LLM 调用都是异步的，这里静默等于让密钥失效/配额耗尽/感知失败全部无声
-  console.error("[FATAL] 未处理的 Promise 拒绝:", reason?.stack || reason, "promise:", promise);
+  console.error("[main] 未处理的 Promise 拒绝（运行期，仅记日志不退出）:", reason?.stack || reason, "promise:", promise);
 });
 
 const { app, session } = require("electron");
-const path = require("path");
 
 // 闭锁：只要有过一个窗口被创建，之后的异常就都算运行期（用户有 UI/托盘可交互，不是僵尸进程）
 app.on("browser-window-created", () => {
@@ -118,7 +117,7 @@ try {
   // 工具模式解析/加载失败不应阻断启动，降级为「非工具模式」正常启动桌宠
   useTool = null;
   initData.NODE_TOOL = undefined;
-  console.warn("[启动] 工具窗模式加载失败，按普通桌宠模式启动:", e?.stack || e);
+  console.warn("[main/startup] 工具窗模式加载失败，按普通桌宠模式启动:", e?.stack || e);
 }
 
 const createWindow = async () => {
@@ -139,7 +138,9 @@ const createWindow = async () => {
         startDataWatcher();
       }
     } else {
-      app.exit(true);
+      // 抢不到单实例锁的第二实例：按设计不创建窗口直接退出，这是正常退出（0），
+      // 不是失败（此前写的是 app.exit(true)，布尔被强转成退出码，语义不明）。
+      app.exit(0);
     }
   } catch (e) {
     // 启动阶段的致命异常必须结束进程，不能落到上面的 unhandledRejection。

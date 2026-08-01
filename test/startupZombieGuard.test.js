@@ -212,7 +212,7 @@ test("运行期未捕获异常：只记日志，不弹窗、不退出（桌宠�
 
   assert.deepEqual(m.rec.exit, [], "运行期绝不能退出，否则用户的宠物会凭空消失");
   assert.deepEqual(m.rec.errorBox, [], "运行期不该弹启动失败弹窗");
-  const logged = m.rec.errors.filter((a) => a[0] === "[FATAL] 未捕获异常:");
+  const logged = m.rec.errors.filter((a) => a[0] === "[main] 未捕获异常（运行期，仅记日志不退出）:");
   assert.equal(logged.length, 1, "运行期必须恰好记一条带堆栈的未捕获异常日志");
   assert.match(logged[0][1], /运行期孤立异常/);
 });
@@ -224,7 +224,7 @@ test("运行期未处理的 Promise 拒绝：只记日志，不退出", () => {
 
   assert.deepEqual(m.rec.exit, []);
   assert.deepEqual(m.rec.errorBox, []);
-  const logged = m.rec.errors.filter((a) => a[0] === "[FATAL] 未处理的 Promise 拒绝:");
+  const logged = m.rec.errors.filter((a) => a[0] === "[main] 未处理的 Promise 拒绝（运行期，仅记日志不退出）:");
   assert.equal(logged.length, 1);
   assert.match(logged[0][1], /LLM 配额耗尽/);
 });
@@ -246,10 +246,14 @@ test("窗口曾创建成功后即便当前无活窗口，也不再判定为启�
 
 test("抢不到单实例锁的第二实例：按设计无窗口即退出，不得弹假的启动失败弹窗", () => {
   const m = loadMain({ gotTheLock: false });
-  m.runReady(); // createWindow 走 app.exit(true) 分支，全程不创建窗口
+  m.runReady(); // createWindow 走 app.exit(0) 分支，全程不创建窗口
   m.processHandlers.uncaughtException(new Error("第二实例退出途中的异常"));
   assert.deepEqual(m.rec.errorBox, [], "第二实例本就不该有窗口，不能被判成启动失败");
-  assert.deepEqual(m.rec.exit, [[true]], "只应有 createWindow 里那次 app.exit(true)，不得追加 exit(1)");
+  assert.deepEqual(
+    m.rec.exit,
+    [[0]],
+    "抢不到锁是正常退出：只应有 createWindow 里那次 app.exit(0)，不得追加 exit(1)"
+  );
 });
 
 /* --------------------------------------------------- EPIPE 静默不受影响 */

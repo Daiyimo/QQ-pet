@@ -1,7 +1,7 @@
 /**
  * probeBridge.js —— 用真实 Ruffle 验证 ruffleBridge 的 API 事实与 finish 触发时机
  *
- * 目的（对应 P0 bug「关闭桌宠必卡 30 秒」）：
+ * 目的（对应 P0 bug「关闭桌宠必卡满退出硬兜底才被强杀」）：
  *   1. 实测 Flash 老接口（IsPlaying/CurrentFrame/TotalFrames/GotoFrame/StopPlay/Rewind/PercentLoaded）
  *      在当前 Ruffle 元素上到底存不存在；
  *   2. 实测 metadata 字段（numFrames/frameRate 等）与 loadedmetadata 事件；
@@ -23,6 +23,19 @@ app.setPath("userData", fs.mkdtempSync(path.join(os.tmpdir(), "ruffle-bridge-pro
 
 const ROOT = path.join(__dirname, "../..");
 const APP_HTML = path.join(ROOT, "src/windows/app.html");
+
+// 退出硬兜底的口径只有一个真值：生产模块 ruffleBridge.js 的 EXIT_FALLBACK_MS
+// （main/main.js 的 before-quit setTimeout 与之由 test/ruffleBridge.test.js 的跨引用断言钉死）。
+// 这里 require 生产常量而不是再抄一份字面量 —— 本脚本此前写死 30000，是已被修掉的陈旧口径，
+// 那个数字会让「finish 在 20s 才触发」这种生产上必然被强杀的情形在冒烟里显示为通过。
+// EXIT_FINISH_DEADLINE_MS 只用于打印参考：它是 finish 应当满足的更严口径（硬兜底减安全余量）。
+const { EXIT_FALLBACK_MS, EXIT_FINISH_DEADLINE_MS } = require(path.join(
+    ROOT,
+    "src/windows/util/pet/ruffleBridge.js"
+));
+if (!(EXIT_FALLBACK_MS > 0) || !(EXIT_FINISH_DEADLINE_MS > 0)) {
+    throw new Error("未从 ruffleBridge.js 读到退出兜底常量，probe 判据不可信: " + EXIT_FALLBACK_MS);
+}
 
 const dashIdx = process.argv.indexOf("--");
 const args = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : [];
@@ -99,7 +112,8 @@ async function main() {
                         return resolve();
                     }
                 }
-                if (now - t0 > 30000) { out.timeout = true; return resolve(); }
+                // 超过生产退出硬兜底仍未出现 finish 判定点 ⇒ 线上必然被硬兜底强杀，等于"没修好"
+                if (now - t0 > ${EXIT_FALLBACK_MS}) { out.timeout = true; return resolve(); }
                 requestAnimationFrame(step);
             };
             requestAnimationFrame(step);
@@ -110,6 +124,10 @@ async function main() {
     })()`);
 
     console.log("=== 阶段1：Ruffle API 事实 + bridge 帧驱动 ===");
+    console.log(
+        `判据口径（读自 ruffleBridge.js）：退出硬兜底 ${EXIT_FALLBACK_MS}ms 为超时上界，` +
+            `finish 还应早于截止 ${EXIT_FINISH_DEADLINE_MS}ms（硬兜底减安全余量）`
+    );
     console.log(JSON.stringify(result, null, 2));
 
     // 阶段2：把真实 swfPet.js 注入同一页面（等价 window.js 的 jsFiles 注入），
@@ -147,8 +165,9 @@ async function main() {
                     if (!done) { done = true; resolve(); }
                 },
             });
-            // 30s 是 main/main.js 的硬兜底，超过即等于"没修好"
-            setTimeout(() => { if (!done) { done = true; out.timeout = true; resolve(); } }, 30000);
+            // 生产的退出硬兜底是 ruffleBridge.js 的 EXIT_FALLBACK_MS（main/main.js 的 before-quit
+            // setTimeout 与之一致），超过即等于"没修好"：线上到这一刻就 app.exit 强杀了
+            setTimeout(() => { if (!done) { done = true; out.timeout = true; resolve(); } }, ${EXIT_FALLBACK_MS});
         });
         try { out.watcherState = JSON.parse(JSON.stringify(pet.state.state)); } catch (e) { out.watcherState = String(e); }
         return out;

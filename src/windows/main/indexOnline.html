@@ -65,9 +65,10 @@
       <!-- </div> -->
     </div>
   </div>
-  <!-- <script src="./index.js"></script>
-  http://10.60.1.219:33385/u/assets/floatStyle.png 
-  -->
+  <!-- 已废的远程加载分支残留：本页原本由局域网静态服务（端口 33385）以 http 载入，
+       并从该服务取 ./index.js 与 /u/assets/*.png。历史遗留的内网 IP 字面量已删除，
+       端口出处见 src/ini/root.js 的 DEFAULT_PORT 注释。
+       该分支在 src/windows/main/main.js 里恒不启用（bd 恒为 true，走本地 jsFiles）。 -->
 </body>
 
 </html>

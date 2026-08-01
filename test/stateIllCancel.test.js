@@ -264,3 +264,276 @@ test("主动停止打工（stopNow）清空状态但不发工资", () => {
   assert.equal(petInfo.activeOption.work, null);
   assert.equal(overEvents(events, "overWork").length, 0);
 });
+
+// ================================================================================
+// cancelTravel 必须无条件执行（不能藏在 work/study/trip 的 if-else 链里）
+//
+// ill/dead 分支的形状是 `o.work ? … : o.study ? … : o.trip && …`，而 cancelTravel
+// 原先写在 trip 那一支里。档案里**同时**有 work 与 trip 时只会走 work 分支 →
+// cancelTravel 不被调用 → travel.js 的 finishTimer 还挂着、主窗口还是隐藏的 →
+// 桌面上宠物凭空消失，得等回家定时器到点才恢复。
+// （work 与 trip 理论互斥，但互斥校验只在 travel.startTravel 一侧；State.doActive 开工时
+//  并不清 trip，所以这个组合可达。）
+//
+// 档案侧的清空（trip: r，r 恒为 null）本来就是无条件的，缺的只是通知 travelService
+// 收窗口与定时器 —— 所以下面用**真实 TravelService**（不是桩）与 State 共用一份档案，
+// 断言的是真实副作用（窗口恢复、不结算），而不是"某个 mock 被调用过"。
+// ================================================================================
+
+const { createTravelService } = require(
+  path.join(__dirname, "..", "src", "service", "travel.js")
+);
+
+// 真实旅游服务挂到 global.travelService（State.js 就是从这里取的），共用上面的 petInfo。
+function attachRealTravelService() {
+  const timers = [];
+  const winCalls = [];
+  const speaks = [];
+  let now = 1e6;
+  const svc = createTravelService({
+    now: () => now,
+    random: () => 0, // 固定选第一个未收集省份、最短时长（8 分钟）
+    setTimeout: (fn, ms) => {
+      const t = { fn, ms, cleared: false, fired: false };
+      timers.push(t);
+      return t;
+    },
+    clearTimeout: (t) => {
+      if (t) t.cleared = true;
+    },
+    // 现读 petInfo：State 的 global.setPetInfo 会整体替换 activeOption 对象，不能缓存引用
+    getPetInfo: () => petInfo,
+    setPetInfo: (payload) => {
+      for (const g of Object.keys(payload)) {
+        petInfo[g] = { ...(petInfo[g] || {}), ...payload[g] };
+      }
+    },
+    openSpeak: (o) => speaks.push(o.data.data),
+    mainWindow: {
+      show: true,
+      window: {
+        webContents: { send: (ch, d) => winCalls.push("active:" + d.active) },
+        hide: () => winCalls.push("hide"),
+        show: () => winCalls.push("show"),
+      },
+    },
+    store: { getItem: () => undefined, setItem: () => {} },
+    achievementService: { check: () => {} },
+  });
+  global.travelService = svc;
+  return {
+    svc,
+    timers,
+    winCalls,
+    speaks,
+    advance: (ms) => {
+      now += ms;
+    },
+    // 触发所有未清除、未触发的定时器（回家结算就挂在这里）
+    runTimers: () => {
+      for (const t of timers) {
+        if (!t.cleared && !t.fired) {
+          t.fired = true;
+          t.fn();
+        }
+      }
+    },
+  };
+}
+
+function captureConsoleError() {
+  const errors = [];
+  const orig = console.error;
+  console.error = (...a) => errors.push(a.map((x) => String(x)).join(" "));
+  return {
+    errors,
+    restore() {
+      console.error = orig;
+    },
+  };
+}
+
+test("同时有 work 和 trip 时生病：旅行也必须被取消（主窗口恢复、回家定时器不再结算）", (t) => {
+  const { state } = makeWorld();
+  const w = attachRealTravelService();
+  t.after(() => {
+    delete global.travelService;
+  });
+
+  const trip = w.svc.startTravel();
+  assert.equal(trip.ok, true, "前置：应能出发");
+  // 只跑 exit 动画那个短定时器，让主窗口进入隐藏态；回家定时器留着
+  const hideTimer = w.timers.find((x) => x.ms < trip.duration);
+  hideTimer.fired = true;
+  hideTimer.fn();
+  assert.deepEqual(w.winCalls.slice(-1), ["hide"], "前置：旅游期间主窗口应已隐藏");
+
+  // 打工与旅行同时在档案里（doActive 开工不清 trip，故该组合可达）
+  petInfo.activeOption.work = DUE_WORK();
+  assert.ok(petInfo.activeOption.trip, "前置：档案里应同时有 work 和 trip");
+  w.winCalls.length = 0;
+  w.speaks.length = 0;
+
+  state.doActive({ type: "ill", val: COLD(), activeOption: petInfo.activeOption });
+
+  assert.equal(petInfo.activeOption.trip, null, "ill 分支必须清空 trip");
+  assert.equal(petInfo.activeOption.work, null, "ill 分支同时清空 work");
+  assert.deepEqual(
+    w.winCalls,
+    ["show", "active:enter"],
+    "走 work 分支时也必须通知 travelService：主窗口要被恢复出来，宠物不能凭空消失"
+  );
+  assert.deepEqual(w.speaks, [], "silent:true 时不得播「旅行取消啦」，免得盖掉「我生病了」");
+  assert.equal(w.svc.getStatus().traveling, false, "服务侧也应认为旅行已结束");
+
+  // 回家定时器已被清除：到点也不结算（不发 yb/mood、不收集省份）
+  w.advance(trip.duration + 1);
+  w.runTimers();
+  assert.equal(petInfo.info.yb, 1000, "被取消的旅行不得照发元宝");
+  assert.equal(petInfo.info.mood, 500, "也不得照加心情");
+  assert.deepEqual(w.svc.getStatus().collected, [], "不得收集省份");
+});
+
+test("同时有 study 和 trip 时生病：旅行同样被取消", (t) => {
+  const { state } = makeWorld();
+  const w = attachRealTravelService();
+  t.after(() => {
+    delete global.travelService;
+  });
+  const trip = w.svc.startTravel();
+  petInfo.activeOption.study = DUE_STUDY();
+  w.winCalls.length = 0;
+
+  state.doActive({ type: "ill", val: COLD(), activeOption: petInfo.activeOption });
+
+  assert.equal(petInfo.activeOption.trip, null);
+  assert.equal(petInfo.activeOption.study, null);
+  assert.ok(w.winCalls.includes("show"), "走 study 分支时也要恢复主窗口");
+  w.advance(trip.duration + 1);
+  w.runTimers();
+  assert.equal(petInfo.info.yb, 1000, "被取消的旅行不得照发元宝");
+});
+
+test("只有 trip 时生病：原有行为不回退（清 trip、恢复主窗口、不结算）", (t) => {
+  const { state } = makeWorld();
+  const w = attachRealTravelService();
+  t.after(() => {
+    delete global.travelService;
+  });
+  const trip = w.svc.startTravel();
+  w.winCalls.length = 0;
+
+  state.doActive({ type: "ill", val: COLD(), activeOption: petInfo.activeOption });
+
+  assert.equal(petInfo.activeOption.trip, null);
+  assert.ok(w.winCalls.includes("show"));
+  w.advance(trip.duration + 1);
+  w.runTimers();
+  assert.equal(petInfo.info.yb, 1000);
+});
+
+test("病死（dead）中止时同样取消旅行", (t) => {
+  const dead = { type: "dead", name: "死亡", health: 0, cure: { name: "还魂丹" }, tolk: "走了" };
+  const { state } = makeWorld();
+  const w = attachRealTravelService();
+  t.after(() => {
+    delete global.travelService;
+  });
+  w.svc.startTravel();
+  petInfo.activeOption.work = DUE_WORK();
+  w.winCalls.length = 0;
+
+  state.doActive({ type: "ill", val: dead, activeOption: petInfo.activeOption });
+
+  assert.equal(petInfo.activeOption.trip, null);
+  assert.ok(w.winCalls.includes("show"), "死亡中止旅行也要把主窗口交回来");
+});
+
+test("cancelTravel 必须在写档之前调用：调用瞬间档案里还看得见 trip", (t) => {
+  // travel._trip() 以档案为唯一权威。若把调用挪到 setPetInfo 之后，档案里的 trip 已是 null，
+  // cancelTravel 只会拿到 not_traveling 直接返回 —— 定时器与隐藏的主窗口仍然没人收。
+  const { state } = makeWorld({ work: DUE_WORK(), trip: { place: "云南", provinceId: 1 } });
+  const seen = [];
+  global.travelService = {
+    cancelTravel(opt) {
+      seen.push({
+        tripInArchive: getPetInfo().activeOption.trip,
+        silent: opt && opt.silent,
+      });
+      return { ok: true };
+    },
+  };
+  t.after(() => {
+    delete global.travelService;
+  });
+
+  state.doActive({ type: "ill", val: COLD(), activeOption: petInfo.activeOption });
+
+  assert.equal(seen.length, 1, "应恰好调用一次 cancelTravel");
+  assert.equal(seen[0].silent, true, "必须传 silent:true");
+  assert.deepEqual(
+    seen[0].tripInArchive,
+    { place: "云南", provinceId: 1 },
+    "调用时档案里必须仍有 trip，否则 travel 侧只会返回 not_traveling"
+  );
+});
+
+test("本来没在旅行时，无条件调用 cancelTravel 是安全空操作（not_traveling、窗口不动、无异常日志）", (t) => {
+  const { state } = makeWorld({ work: DUE_WORK() });
+  const w = attachRealTravelService(); // 从未 startTravel
+  const results = [];
+  const real = w.svc.cancelTravel.bind(w.svc);
+  global.travelService = {
+    cancelTravel: (opt) => {
+      const r = real(opt); // 真实实现，只是把返回值截下来看
+      results.push(r);
+      return r;
+    },
+  };
+  const hook = captureConsoleError();
+  t.after(() => {
+    hook.restore();
+    delete global.travelService;
+  });
+
+  state.doActive({ type: "ill", val: COLD(), activeOption: petInfo.activeOption });
+
+  assert.deepEqual(
+    results,
+    [{ ok: false, reason: "not_traveling" }],
+    "无旅行时真实 cancelTravel 应原样返回 not_traveling"
+  );
+  assert.deepEqual(w.winCalls, [], "不得顺手 show/hide 主窗口");
+  assert.deepEqual(w.speaks, [], "不得多播气泡");
+  assert.deepEqual(hook.errors, [], "空操作不该留异常日志");
+  assert.equal(petInfo.activeOption.work, null, "生病中止打工的既有行为不受影响");
+});
+
+test("travelService.cancelTravel 抛错时：生病流程照走完，且异常留完整堆栈", (t) => {
+  const { state, events } = makeWorld({ work: DUE_WORK(), trip: { place: "云南" } });
+  global.travelService = {
+    cancelTravel() {
+      throw new Error("窗口已销毁");
+    },
+  };
+  const hook = captureConsoleError();
+  t.after(() => {
+    hook.restore();
+    delete global.travelService;
+  });
+
+  state.doActive({ type: "ill", val: COLD(), activeOption: petInfo.activeOption });
+
+  assert.equal(petInfo.activeOption.work, null, "取消旅行失败不得连清档一起黄掉");
+  assert.equal(petInfo.activeOption.trip, null);
+  assert.equal(petInfo.info.health, 4, "病情仍要写进档案");
+  assert.equal(events.filter((e) => e.type === "ill").length, 1, "气泡照播一次");
+  assert.equal(hook.errors.length, 1, "必须恰好留一条错误日志（不是裸吞）");
+  assert.match(hook.errors[0], /^\[State\]/, "日志前缀");
+  assert.match(hook.errors[0], /Error: 窗口已销毁/, "必须带堆栈，而不是只有一句话");
+  assert.match(
+    hook.errors[0],
+    /主窗口可能仍处隐藏态/,
+    "必须写清降级后的行为"
+  );
+});

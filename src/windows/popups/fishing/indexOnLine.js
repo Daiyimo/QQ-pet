@@ -569,16 +569,47 @@ var shop = [
 ];
 var player;
 
-let i = 0;
+// setPETEVENT 把一份完整数据快照推给 iframe 里的 Flash/Ruffle 影片：player 是 <embed id="hlyg">，
+// PETEventOnReceived 由影片自己注册到该元素上，影片没加载完就不存在，所以要轮询等它。
+// 调用点两处：首次装载档案（setPetInfo）、每次操作后的刷新（getPetInfoAgain —— 买鱼 / 喂食 /
+// 收获 / errorFishesDo 都走它）。
+// 丢弃一次推送的后果：影片里的鱼缸、元宝、可用次数停在上一次的旧值；真实数据在 cookie 里，
+// 不会丢，下一次成功推送就能追平。渲染层没有用户可见通道可用（window.alert 在本文件被改成
+// 只打日志），所以放弃时只能降级为日志。
+// 间隔 50ms 是「影片注册回调只差几帧 + 不空转」的经验值；两个常数相乘才是**单次**推送的等待
+// 总时长（30 × 50ms = 1.5s），改任一个都会改变总时长，必须一起看。1.5s 上限的依据：影片在
+// 本地加载，正常在几百毫秒内就绪；再等下去影片基本是加载失败了，等也等不来。
+const PETEVENT_PUSH_INTERVAL_MS = 50;
+const PETEVENT_PUSH_MAX_TRIES = 30;
+const PETEVENT_PUSH_TIMEOUT_MS =
+  PETEVENT_PUSH_MAX_TRIES * PETEVENT_PUSH_INTERVAL_MS;
+
 const setPETEVENT = (ResultData) => {
-  if (i++ > 30) return;
-  if (player.PETEventOnReceived) {
-    player.PETEventOnReceived(JSON.stringify(ResultData));
-  } else {
-    setTimeout(() => {
-      setPETEVENT(ResultData);
-    }, 50);
-  }
+  // 重试预算**每次推送独立**（闭包内局部变量）。原先是模块级共享计数器：首次装载把 30 次
+  // 预算耗光后，后续每一次刷新推送都会在第一次尝试就被直接丢弃，连一次重试都没有。
+  let tries = 0;
+  const push = () => {
+    if (tries++ > PETEVENT_PUSH_MAX_TRIES) {
+      const head = ResultData?.head || {};
+      const fields = Object.keys(ResultData?.data || {}).join(",");
+      console.warn(
+        "[fishing/html] Flash 影片在 " +
+          PETEVENT_PUSH_TIMEOUT_MS +
+          "ms 内始终未注册 PETEventOnReceived，丢弃本次数据推送：" +
+          `cmd=${head.cmd} game=${head.game} 字段=[${fields}]` +
+          "；界面数值会停在上一次的旧值（cookie 里的真实数据不受影响），下一次成功推送才会追平"
+      );
+      return;
+    }
+    // player 本身也可能还没被 load 回调赋值：一并当作「未就绪」重试，
+    // 而不是抛 TypeError 死在定时器回调里（那样连日志都没有）。
+    if (player?.PETEventOnReceived) {
+      player.PETEventOnReceived(JSON.stringify(ResultData));
+    } else {
+      setTimeout(push, PETEVENT_PUSH_INTERVAL_MS);
+    }
+  };
+  push();
 };
 
 // // window.RufflePlayer = window.RufflePlayer || {};

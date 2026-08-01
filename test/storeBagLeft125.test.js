@@ -58,9 +58,10 @@ test("preload：左栏 IPC 通道齐备", () => {
   for (const frag of [
     'store_h_listBag:e=>ipcRenderer.send("store_h_listBag_m",e)',
     'store_h_useGood:e=>ipcRenderer.send("store_h_useGood_m",e)',
-    'store_m_bag:e=>ipcRenderer.on("store_m_bag_h",e)',
-    'store_m_useGoodResult:e=>ipcRenderer.on("store_m_useGoodResult_h",e)',
-    'store_m_bagRefresh:e=>ipcRenderer.on("store_m_bagRefresh_h",e)',
+    // on 类通道统一包装为 (_e,..._a)=>e(..._a)，不把 IpcRendererEvent 透传给渲染层回调
+    'store_m_bag:e=>ipcRenderer.on("store_m_bag_h",(_e,..._a)=>e(..._a))',
+    'store_m_useGoodResult:e=>ipcRenderer.on("store_m_useGoodResult_h",(_e,..._a)=>e(..._a))',
+    'store_m_bagRefresh:e=>ipcRenderer.on("store_m_bagRefresh_h",(_e,..._a)=>e(..._a))',
   ]) {
     assert.ok(src.includes(frag), `store/preload.js 缺少通道 ${frag}`);
   }

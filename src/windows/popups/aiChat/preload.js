@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 关闭窗口
   aiChat_h_close: (e) => ipcRenderer.send("aiChat_h_close_m", e),
   // 接收回复：{ ok, reply?, error?, type? }
-  aiChat_m_reply: (cb) => ipcRenderer.on("aiChat_m_reply_h", cb),
+  aiChat_m_reply: (cb) => ipcRenderer.on("aiChat_m_reply_h",(_e,..._a)=>cb(..._a)),
 });
 
 module.exports = {};

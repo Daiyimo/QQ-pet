@@ -8,9 +8,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 点击"立即签到"
   signIn_h_do: (e) => ipcRenderer.send("signIn_h_do_m", e),
   // 接收状态：{ signedToday, streak, total, week[7] }
-  signIn_m_load: (cb) => ipcRenderer.on("signIn_m_load_h", cb),
+  signIn_m_load: (cb) => ipcRenderer.on("signIn_m_load_h",(_e,..._a)=>cb(..._a)),
   // 接收签到结果：{ ok, reason?, streak?, total?, rewards?, status }
-  signIn_m_result: (cb) => ipcRenderer.on("signIn_m_result_h", cb),
+  signIn_m_result: (cb) => ipcRenderer.on("signIn_m_result_h",(_e,..._a)=>cb(..._a)),
 });
 
 module.exports = {};

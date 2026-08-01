@@ -12,9 +12,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 关闭窗口
   travel_h_close: (e) => ipcRenderer.send("travel_h_close_m", e),
   // 接收状态下发：{ status, provinces }
-  travel_m_load: (cb) => ipcRenderer.on("travel_m_load_h", cb),
+  travel_m_load: (cb) => ipcRenderer.on("travel_m_load_h",(_e,..._a)=>cb(..._a)),
   // 接收操作结果：{ status, result }
-  travel_m_status: (cb) => ipcRenderer.on("travel_m_status_h", cb),
+  travel_m_status: (cb) => ipcRenderer.on("travel_m_status_h",(_e,..._a)=>cb(..._a)),
 });
 
 module.exports = {};

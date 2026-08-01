@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 关闭窗口
   achievement_h_close: (e) => ipcRenderer.send("achievement_h_close_m", e),
   // 接收成就列表：{ ok, list: [{ id, name, desc, icon, unlocked, unlockedAt }] }
-  achievement_m_load: (cb) => ipcRenderer.on("achievement_m_load_h", cb),
+  achievement_m_load: (cb) => ipcRenderer.on("achievement_m_load_h",(_e,..._a)=>cb(..._a)),
 });
 
 module.exports = {};

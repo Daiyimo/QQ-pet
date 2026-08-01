@@ -4,6 +4,33 @@
 
 版本号说明：跟随 QQ 宠物怀旧服的上游版本线命名。本项目 fork 自 [qqpet_automation](https://github.com/xuemian168/qqpet_automation)，来源与许可见 `NOTICE.md`。
 
+## [未发布]（第三轮后续：安全纵深与防回归）
+
+补上第三轮审查列出的三条 P1。测试 656 → **690**，全绿。
+
+### 安全
+
+- **权限处理器缺失，恶意页面可无提示取用摄像头 / 麦克风 / 定位**：全仓 `setPermissionRequestHandler` / `setPermissionCheckHandler` 零命中，而 `tool/urlWindow` 的设计用途就是打开用户输入的任意网址；Electron 未设 handler 时默认放行多数权限请求，且**没有 Chrome 那样的权限气泡 UI**。新增 `src/ini/security.js`（多行模块，沿用 `pathGuard.js` / `ipcInputGuard.js` 的"逻辑独立成模块、压缩区只留接入点"模式），在 `main.js` 的 `createWindow()` 首行安装，先于 `init.js` 与任何窗口创建；装不上则走既有 FATAL 弹窗 + `app.exit(1)`（安全控制应 fail-closed）。
+  **白名单为空（全 deny）**，依据已写进模块顶部注释：渲染层 `getUserMedia` / `navigator.mediaDevices` / `geolocation` / `navigator.permissions` / `IdleDetector` / `usb|bluetooth|serial|hid` 全部零命中；三个易误判点已逐个验证——屏幕感知走主进程 `desktopCapturer`、通知是主进程 electron `Notification` 而非 Web API、BGM 是 `new Audio()`、剪贴板上云走主进程 `clipboard` 模块，四者都不经渲染层权限。
+  两处**已知会被拒且有意为之**（均留 warn 日志，非静默）：Ruffle 自带右键菜单的「全屏」（产品预期是窗口化；且给能打开任意网址的窗口放行全屏 = 给恶意站点无提示伪造全屏 UI 的能力）、Flash `System.setClipboard`。两个 handler 体内只调同一个 `isPermissionAllowed`，结构上排除"`navigator.permissions.query` 说 granted 而实际 request 被拒"的不一致。
+- **图像服务商侧的 API Key 明文出网**：`memory/imageGen.js` 的 `buildEndpoint` 缺回环门禁，用户把图像服务商填成 `http://1.2.3.4:8080/v1` 会明文发送 `Authorization: Bearer` + 参考图 + 日记正文——而同一个用户在对话服务商填同样地址会被明确拒绝。现复用 `providers.isLoopbackHost`（惰性 require，与本文件既有模式一致，**未产生第二份回环判定实现**），错误文案与对话侧逐字对齐、仅加"图像"限定以便用户定位是哪个字段。本地 Ollama / LM Studio 的回环地址继续可用。
+
+### 测试
+
+- **新增 `test/electronSecurityInvariants.test.js`（14 条）—— 这批安全加固此前唯一的防回归缺口**：加固做了两轮，但对 54 个测试文件 grep `nodeIntegration|contextIsolation|webSecurity|Content-Security-Policy|setWindowOpenHandler` 全部零命中，唯一验证它们的是刻意不进 `npm test` 的手动 Electron 冒烟脚本 —— 把 `nodeIntegration:!0` 写回 `window.js` 或删掉 CSP meta，整套测试仍会全绿。新测试为纯 node、平台无关的静态断言：窗口工厂默认值、`webSecurity` opt-out 文件集合恰好 4 个（集合等值，第 5 个偷偷 opt-out 会红）、CSP 12 条指令与 `unsafe-*` 配对集合恰好 4 条已登记项、导航与新窗守卫、7 个危险开关零命中、`urlWindow` 隔离、`new BrowserWindow` 出现位置恰好 3 处、`eval` 只许 `eval("require")` 静态形式。
+  关键设计：**先剥离注释再匹配** —— `window.js` 与 `app.html` 的注释里都复述了 `webPreferences:{webSecurity:!1}`，不剥离就会把注释误判成配置，这是本任务最大的假阳性陷阱。
+  建立时做了 **24 个变异（全部按预期变红且只红对应用例）+ 6 个良性对照全绿**（重排 webPreferences 键顺序并新增键、给 img-src 加白名单主机、改窗口尺寸、**在注释里写 `nodeIntegration:!0` / `eval(code)` / `child_process` 散文**、改守卫日志文案、CSP 指令整体重排）。变异入口 `QQ_SEC_SRC_ROOT` 为覆盖层目录，故"新增第 5 个 opt-out 窗口"这类变异无需碰磁盘源码。
+- 新增 `test/permissionHandler.test.js`（13 条）、`test/imageGenEndpoint.test.js`（7 条）。两者的变异验证各自暴露了一个我方指令未覆盖的缺口并被补上：前者发现**删掉 `main.js` 的接入行时全部测试仍绿**（模块会变成死代码），故补了接入点的结构与顺序断言；后者证明"Key 未出网"的方式是把 `http/https` 的 `request`/`get` 四个出网入口换成命中即抛的计数桩并断言 `deepStrictEqual(calls, [])`，回滚门禁后失败栈直接指到 `postBuffer`，把"没抛错"升级成"Key 真的会出网"的证据。
+
+### 订正
+
+- README「已知问题」的 `webSecurity` 条目此前称"壳窗另有 CSP meta"，**覆盖面被高估**：全仓 27 个 html 只有 `app.html` 与 `barrage/index.html`（后者是唯一零 `unsafe-` 的严格 CSP）带 CSP meta，而经 `http://127.0.0.1` 载入 iframe 的 `main/indexOnline.html`、`popups/fishing/indexOnLine.html`、`popups/backRoom/indexOnLine.html` **一个都没有** —— 它们恰好就在那 4 个 `webSecurity: false` 的窗口里。已作为独立的已知问题记入 README。
+- `nodeIntegrationInSubFrames` 此前记作"已移除"不准确：它仍以 `nodeIntegrationInSubFrames: false` 显式存在于 `urlWindow`（语义安全，但字面不实）。相应的不变量断言因此写成"不许为真"而非"零命中"，否则会立刻假阳性。
+- `sandbox:false` 那条的窗口统计口径补正：不走工厂的 `barrage` 窗（第 20 个）已经是 `sandbox: true`，不在"18 窗无必要"之列。
+- 新记录一条本轮发现、未修的同类不对称：`imageGen.downloadBuffer` 无回环门禁，而那个 URL 是服务端返回的，可指向 `http://` 内网地址且重定向每跳不复查（不发 `Authorization`，故低一档）。
+
+
+
 ## [未发布]（第三轮深度评审修复）
 
 第三轮七维度并行深度审查（Electron 攻击面 / 状态机与并发 / LLM 与网络层 / 代码质量合规 / 测试真实质量 / 未提交改动 / 性能与资源）。三个维度确认无 P0（Electron 攻击面、性能与资源、未提交改动），修掉 4 类 P0、8 个位置。测试 573 → **656**，全绿。约 30 条 P1 已记入 README「第三轮审查确认、但尚未修复的问题」，本轮未动。

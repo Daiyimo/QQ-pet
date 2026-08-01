@@ -165,7 +165,7 @@ npm run build:win:portable   # 仅免安装版
 npm test        # node --test test/*.test.js
 ```
 
-当前 **656 个测试 / 54 个测试文件**（实测 `npm test` 的 `tests` 计数）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
+当前 **690 个测试 / 57 个测试文件**（实测 `npm test` 的 `tests` 计数）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
 
 **「不依赖 Electron」不等于「不碰磁盘和网络」**（此前的表述容易被误读）：`coursesManager` / `coursesRepo` / `memory` / `memoryStore` / `pathGuardRealpath` / `storeCorrupt` / `storeGetItemThrow` 七个文件用 `os.tmpdir()` + `mkdtempSync` 建真实临时目录（用后 `rmSync` 清理）；`imageGenAbort` / `providersTransport` 两个文件用 `server.listen(0, "127.0.0.1")` 起真实 HTTP 服务（临时端口、仅回环，无冲突风险）。
 
@@ -219,7 +219,8 @@ console.warn("[前缀] 人话描述，含降级后的行为:", e?.message || e);
 
 - **`Alt+Q` 截图无功能** — 当前是**不分平台的空实现**：只记一条 warn 说明它依赖 macOS 的 `screencapture`、当前平台不支持，然后跳过。全仓已无 `child_process`。仅占用快捷键，未实现。（此条此前描述为"调用 macOS 命令、回调 `this` 丢失、成败判断反了"，那段代码已不存在，本轮审查订正。）
 - **贴边动画不停在指定帧** — Ruffle 未暴露任何跳帧能力（无 `GotoFrame` 等价 API），贴边动画会整片播放。需改素材或等 Ruffle 支持。
-- **本地窗口默认 `webSecurity: true`，仅 4 窗显式 opt-out** — 主宠窗 / smallGame / 钓鱼 / 密室因 Ruffle fetch 本地 SWF 或跨源 iframe 需要保留 `webSecurity: false`，其余窗口已全部收紧；壳窗另有 CSP meta 与统一的导航 / 新窗守卫（默认 deny）。可输入任意网址的窗口隔离到 `webSecurity: true + sandbox: true + 无 preload`。
+- **本地窗口默认 `webSecurity: true`，仅 4 窗显式 opt-out** — 主宠窗 / smallGame / 钓鱼 / 密室因 Ruffle fetch 本地 SWF 或跨源 iframe 需要保留 `webSecurity: false`，其余窗口已全部收紧；统一的导航 / 新窗守卫（默认 deny）覆盖全部窗口。可输入任意网址的窗口隔离到 `webSecurity: true + sandbox: true + 无 preload`。
+- **CSP meta 只覆盖 2 个文档，iframe 载入的三个页面完全无 CSP** — 全仓 27 个 html 里只有 `app.html`（壳窗）与 `barrage/index.html`（全仓唯一零 `unsafe-` 的严格 CSP）带 CSP meta。而经 `http://127.0.0.1` 载入 iframe 的 `main/indexOnline.html`、`popups/fishing/indexOnLine.html`、`popups/backRoom/indexOnLine.html` 一个都没有 —— 它们恰好就在上面那 4 个 `webSecurity: false` 的窗口里。`app.html` 自己的注释已承认其 CSP 不约束子框架文档。
 - **钓鱼 / 密室的跨源 `contentWindow` 直写在 Electron 28 下很可能已失效** — 实测 `webSecurity: false` 下 file:// 壳写 http://127.0.0.1 iframe 的 window 仍被 "Blocked a frame ... cross-origin" 拦截，需 `disable-site-isolation-trials` 才放行（该开关已在安全加固中移除，不计划恢复）。彻底修复需把那两处改为 `postMessage`。
 - **多显示器下贴边判定可能错位** — 贴边逻辑用累加后的屏幕尺寸，而窗口钳制是多屏感知的，两套坐标体系不一致。
 - 屏幕感知默认每 2 秒截屏一次，长时间开启有一定 CPU 开销。
@@ -231,15 +232,15 @@ console.warn("[前缀] 人话描述，含降级后的行为:", e?.message || e);
 
 **安全**
 
-- **`imageGen` 的 `buildEndpoint` 仍放行非回环 `http://`** — 随后照样发 `Authorization: Bearer`，即 API Key 明文出网。对话服务商侧已由 `providers.isLoopbackHost` 拒绝，图像服务商侧未复用该校验，两个入口的安全边界不对称。
-- **全仓无任何权限处理器** — `setPermissionRequestHandler` / `setPermissionCheckHandler` 零命中，而 `tool/urlWindow` 的设计用途就是打开用户输入的任意网址。Electron 未设 handler 时默认放行多数请求（media / geolocation / notifications）且**没有 Chrome 那样的权限气泡**，恶意页面可无提示取用摄像头 / 麦克风 / 定位。
-- **`sandbox:false` 是窗口工厂的全局默认** — 逐个统计 preload 的 require，19 窗里只有主宠窗真正需要 Node 能力，其余 18 窗的 opt-out 无必要。`contextIsolation` 挡不住渲染进程层面的漏洞利用。
-- **远程窗与本地窗共用默认 session** — `urlWindow` 未设 `partition`（全仓 `partition` 零命中），任意站点的 cookie / localStorage / SW 落进应用默认 session，且无 `will-download` 处理。
-- **约 70 条 IPC 通道无一校验 `event.senderFrame`** — 属纵深防御缺口而非当前可利用漏洞（子框架无 preload、`nodeIntegrationInSubFrames` 已移除）。通道已天然带窗口名前缀，在工厂注册处包一层校验成本很低。
+- **`sandbox:false` 是窗口工厂的全局默认** — 逐个统计 preload 的 require，走工厂的 19 窗里只有主宠窗真正需要 Node 能力（`fs` / `path` / `iconv-lite`），其余 18 窗的 opt-out 无必要。`contextIsolation` 挡不住渲染进程层面的漏洞利用。注意不走工厂的 `barrage` 窗（第 20 个）已经是 `sandbox: true`，不在此列。
+- **远程窗与本地窗共用默认 session** — `urlWindow` 未设 `partition`（全仓 `partition` 零命中），任意站点的 cookie / localStorage / SW 落进应用默认 session，且无 `will-download` 处理。**注意连带关系**：若要做 partition 隔离，必须对该 partition 的 session 也调一次 `src/ini/security.js` 的 `installPermissionHandlers`（它目前只保护 `defaultSession`），否则隔离反而会绕过权限门禁。
+- **`downloadBuffer` 无回环门禁** — `memory/imageGen.js` 的图片下载只校验 protocol ∈ {http, https}，而那个 URL 是**服务端返回的**，可指向 `http://` 内网地址，且重定向每跳都不复查。它不发 `Authorization` 所以低一档，但 https → http 的降级重定向至少该禁掉。
+- **约 70 条 IPC 通道无一校验 `event.senderFrame`** — 属纵深防御缺口而非当前可利用漏洞（子框架无 preload、`nodeIntegrationInSubFrames` 在唯一出现处显式为 `false`）。通道已天然带窗口名前缀，在工厂注册处包一层校验成本很低。
 
 **防回归**
 
-- **本节全部安全不变量零自动化覆盖** — 对 54 个测试文件 grep `nodeIntegration|contextIsolation|webSecurity|Content-Security-Policy|setWindowOpenHandler` 全部零命中，唯一验证它们的是刻意不进 `npm test` 的手动 Electron 冒烟脚本。把 `nodeIntegration:!0` 写回 `window.js` 或删掉 CSP meta，整套测试仍会全绿。
+- **已补上锚，但覆盖面有边界** — `test/electronSecurityInvariants.test.js` 是纯 node、平台无关的静态断言（14 条），钉住窗口工厂默认值、`webSecurity` opt-out 文件集合恰好 4 个、CSP 指令与 `unsafe-*` 配对集合、导航与新窗守卫、7 个危险开关零命中、`urlWindow` 隔离、`new BrowserWindow` 出现位置恰好 3 处、`eval` 只许 `eval("require")` 静态形式。建立时做了 24 个变异验证（全部按预期变红）+ 6 个良性对照（含"注释里写 `nodeIntegration:!0` 散文"不误伤）。
+  **仍未覆盖的**：第三方 bundle（`lib/`、`js/ruffle/`）被整体排除，故不含供应链风险；`sandbox:false` 全局默认**刻意未断言**（那是 preload 用 Node 的既定设计，断言它等于给未来收紧上锁）；`spawn` / `execSync` 未扫描（"spawn"在刷怪 / 刷鱼语境下会自然出现，纯误伤）。运行期行为（CSP 是否真拦住、Ruffle 是否仍能播）仍只有手动冒烟 `test/ruffleSmoke/runCspGuard.js` 覆盖。
 
 **正确性**
 

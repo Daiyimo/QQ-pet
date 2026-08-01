@@ -22,7 +22,7 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("[FATAL] 未处理的 Promise 拒绝:", reason?.stack || reason, "promise:", promise);
 });
 
-const { app } = require("electron");
+const { app, session } = require("electron");
 const path = require("path");
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -52,6 +52,10 @@ try {
 
 const createWindow = async () => {
   try {
+    // 权限门禁必须先于任何窗口创建：未设 handler 时 Electron 默认放行摄像头/麦克风/定位，
+    // 且没有权限提示 UI，而 tool/urlWindow 就是用来加载任意网址的。核查与策略见该模块注释。
+    require("./src/ini/security.js").installPermissionHandlers(session.defaultSession);
+
     require("./src/ini/init.js");
     app.setAppUserModelId("com.qqlocal.desktop");
 

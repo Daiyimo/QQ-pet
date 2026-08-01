@@ -1,15 +1,21 @@
 const { clipboard } = require("electron");
 
+// 默认轮询周期。依据：每 tick 至少一次 clipboard.readText() + readFormats()，在 Windows 上
+// 都是主进程同步的 OpenClipboard —— 剪贴板是独占资源，高频占用会让其他程序的复制/粘贴
+// 间歇失败（Office / 远程桌面的经典症状）。曾用的 200ms = 5 次/秒 = 18000 次/小时 =
+// 216000 次/12 小时，收益却为零：人手复制后 1 秒内响应完全够用。
+const DEFAULT_WATCH_DELAY_MS = 1000;
+
 module.exports = function (options) {
   options = options || {};
-  const watchDelay = options.watchDelay || 1000;
+  const watchDelay = options.watchDelay || DEFAULT_WATCH_DELAY_MS;
   const shakeTime = options.shakeTime || 0;
 
   const readThumbnail = (image) => {
     try {
       return image.resize({ width: 16, height: 16, quality: "good" }).toPNG();
     } catch (err) {
-      console.warn("Failed to build clipboard thumbnail:", err);
+      console.warn("[main/clip] 生成剪贴板缩略图失败，本次改动按「无缩略图」比较:", err?.message || err);
       return null;
     }
   };

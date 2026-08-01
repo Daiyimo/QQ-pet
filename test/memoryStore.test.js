@@ -319,3 +319,44 @@ test("memoryDays 合并事件天与 daily/daily-images 并倒序返回", () => {
     assert.equal(new Set(days).size, days.length, "不应有重复天");
   });
 });
+
+// —— 非法 timestamp 防护：回退当前时间 + warn 日志，不抛 RangeError ——
+test("appendEvent：非法 timestamp 回退为当前时间并记 warn，事件不丢", () => {
+  withTempRoot((root) => {
+    const store = new MemoryStore(root);
+    const before = Date.now();
+    const logs = captureConsole(() => {
+      const event = store.appendEvent({
+        kind: "activity",
+        text: "时间戳坏了但内容有效",
+        timestamp: "not-a-date",
+      });
+      const ts = Date.parse(event.timestamp);
+      assert.ok(Number.isFinite(ts), "落盘时间戳必须是合法 ISO");
+      assert.ok(ts >= before - 1000 && ts <= Date.now() + 1000, "应回退为当前时间");
+    });
+    assert.equal(logs.error.length, 0);
+    assert.equal(logs.warn.length, 1);
+    assert.match(logs.warn[0], /\[memory\/store\]/);
+    assert.match(logs.warn[0], /时间戳非法/);
+    // 事件确实入库（按今天归日可读回）
+    const day = localDayString(new Date());
+    assert.equal(store.readEvents({ day }).length, 1);
+  });
+});
+
+test("appendEvent：合法 timestamp 不受影响，无 warn", () => {
+  withTempRoot((root) => {
+    const store = new MemoryStore(root);
+    const logs = captureConsole(() => {
+      const event = store.appendEvent({
+        kind: "activity",
+        text: "正常事件",
+        timestamp: localIso(2025, 5, 10, 9),
+      });
+      assert.equal(event.timestamp, localIso(2025, 5, 10, 9));
+    });
+    assert.deepEqual(logs.warn, []);
+    assert.deepEqual(logs.error, []);
+  });
+});

@@ -163,9 +163,19 @@ class MemoryStore {
     if (!String(kind || "").trim() || !String(text || "").trim()) {
       throw new Error("kind and text must be non-empty");
     }
+    // timestamp 校验与 kind/text 对称：非法值（Invalid Date）时 toISOString 会抛
+    // RangeError。这里选择回退当前时间而非拒绝——事件内容本身有效，记错时间比
+    // 整条丢弃损失小；按"降级必须记日志"约定留 warn。
+    let tsDate = timestamp ? new Date(timestamp) : new Date();
+    if (Number.isNaN(tsDate.getTime())) {
+      console.warn(
+        `[memory/store] 事件时间戳非法（${timestamp}），已回退为当前时间`
+      );
+      tsDate = new Date();
+    }
     const event = {
       id: eventId || crypto.randomUUID().replace(/-/g, ""),
-      timestamp: toUtcIso(timestamp ? new Date(timestamp) : new Date()),
+      timestamp: toUtcIso(tsDate),
       kind: String(kind),
       text: String(text),
       metadata: metadata && typeof metadata === "object" ? { ...metadata } : {},

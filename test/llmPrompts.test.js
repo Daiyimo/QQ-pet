@@ -142,3 +142,18 @@ test("PetChatService：clearHistory 清空历史", async () => {
   svc.clearHistory();
   assert.equal(svc._history.length, 0);
 });
+
+// —— llm.js SYSTEM_PROMPT 量纲（满健康为 5，见 src/ini/pet.js maxInfo.health）——
+test("SYSTEM_PROMPT：健康量纲为 /5，心情 /1000", () => {
+  const { __SYSTEM_PROMPT } = require("../src/service/llm.js");
+  const prompt = __SYSTEM_PROMPT({
+    info: { host: "小明", name: "球球", mood: 800, health: 5 },
+    maxInfo: { level: 12 },
+  });
+  assert.match(prompt, /健康5\/5/);
+  assert.match(prompt, /心情800\/1000/);
+  assert.match(prompt, /等级12/);
+  // 缺省 health 也按满值 5 兜底
+  const def = __SYSTEM_PROMPT({ info: {}, maxInfo: {} });
+  assert.match(def, /健康5\/5/);
+});

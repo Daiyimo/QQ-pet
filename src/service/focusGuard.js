@@ -31,10 +31,13 @@ class FocusGuard {
     this.continuousActiveSec = 0;
     this.continuousSedentarySec = 0;
     this.lastReminders = {};
+    // 每次 start()/stop() 自增：_fireReminder 里在途的 LLM 台词靠它判断"自己是否已过期"
+    this._epoch = 0;
   }
 
   start() {
     if (this.timer) return;
+    this._epoch += 1;
     this.lastIdleSec = 0;
     this.continuousActiveSec = 0;
     this.continuousSedentarySec = 0;
@@ -47,12 +50,17 @@ class FocusGuard {
         console.error("[focusGuard] 巡检 tick 异常，跳过本轮:", e && e.stack ? e.stack : e);
       }
     }, TICK_INTERVAL_MS);
+    // 与 aiWiring / courses.manager / perception.loop 的定时器一致：护眼巡检是"可丢弃"的
+    // 提醒链（丢一轮只是少一次提醒，无数据损失），不得让退出时多等一个 30s 周期。
+    // 与 storeCache 的落盘定时器不同——那条刻意不 unref 是为了保住玩家进度。
+    if (this.timer.unref) this.timer.unref();
   }
 
   stop() {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+      this._epoch += 1;
     }
   }
 
@@ -145,6 +153,7 @@ class FocusGuard {
 
   _fireReminder(type, ctx) {
     this._markReminded(type);
+    const epoch = this._epoch;
 
     // 尊重"启用 AI 对话"总开关（llmEnabled，默认关）；开启后需已配置可用的云端服务商。
     // 旧的明文 llmApiKey 由 providers 层一次性迁移为加密提供商，这里不再直接读明文键。
@@ -179,6 +188,9 @@ class FocusGuard {
     llmService
       .generateOnce(type, ctx, petInfo)
       .then((r) => {
+        // stop() 已发生（用户关了专注守护 / 正在退出）：在途台词不得再弹气泡，
+        // 否则关掉开关后仍会冒出一条"迟到"的提醒，与 perception/loop.js 同类问题。
+        if (epoch !== this._epoch) return;
         if (r?.tolk) {
           openSpeak({
             data: {
@@ -198,6 +210,7 @@ class FocusGuard {
           `[focusGuard] ${type} 提醒的 AI 台词生成失败，改用离线文案:`,
           e && e.stack ? e.stack : e
         );
+        if (epoch !== this._epoch) return;
         showFallback();
       });
   }

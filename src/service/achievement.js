@@ -70,13 +70,12 @@ const ACHIEVEMENTS = [
       return Array.isArray(arr) && arr.length >= 34;
     },
   },
-  {
-    id: "rich",
-    name: "小富翁",
-    desc: "元宝数量达到 10000",
-    icon: "💰",
-    check: (p) => num(p && p.info && p.info.yb) >= 10000,
-  },
+  // 曾有「小富翁」（id: "rich"，判据 info.yb >= 10000），已移除：
+  // 本项目定位是「离线 + AI 版不设资源门槛」——新档默认 yb 为 999999999（src/ini/doMain.js 的
+  // 新宠物分支）、背包预置全品类道具（starterKit.js），该判据开局即达成，与定位互斥。
+  // 老存档里可能残留 achievements.rich 记录：loadUnlocked 仍会把它读进并集、persist 原样写回
+  // （不删，避免丢历史痕迹），而 check / getAll 只遍历本表，所以既不会渲染成未知成就，
+  // 也不会影响其它成就的解锁记录与「已达成 / 总数」计数。
   {
     id: "signMaster",
     name: "签到达人",

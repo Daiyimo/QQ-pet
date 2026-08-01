@@ -106,13 +106,19 @@ test("环游中国：travel_china 缺失不报错，34 省边界", () => {
   assert.deepEqual(r.service.check(), []);
 });
 
-test("小富翁：yb 10000 边界", () => {
-  let r = makeService(pet({ info: { yb: 9999 } }));
-  assert.deepEqual(r.service.check(), []);
-  r = makeService(pet({ info: { yb: 10000 } }));
-  const newly = r.service.check("shop");
-  assert.equal(newly.length, 1);
-  assert.equal(newly[0].id, "rich");
+// 产品定位：离线 + AI 版不设资源门槛，新档默认 yb 为 999999999（src/ini/doMain.js 新宠物分支），
+// 所以成就体系里不能存在以元宝存量为判据的成就（原「小富翁」yb >= 10000 开局即达成）。
+test("元宝存量不再作为任何成就的判据：新档级巨额元宝不解锁任何成就", () => {
+  assert.equal(ACHIEVEMENTS.find((a) => a.id === "rich"), undefined);
+  const r = makeService(pet({ info: { yb: 999999999 } }));
+  assert.deepEqual(r.service.check("shop"), []);
+  assert.equal(r.calls.openSpeak.length, 0);
+  assert.equal(r.calls.setPetInfo.length, 0);
+  // 全部定义在「只有巨额元宝」的存档下都应是未解锁
+  assert.deepEqual(
+    r.service.getAll().filter((a) => a.unlocked),
+    []
+  );
 });
 
 // 签到状态的权威存储是 sys.signin（signIn.js 走 setSys；info.signin 不在 ini/pet.js 的
@@ -143,9 +149,10 @@ test("忠实陪伴：onLineTime 单位为分钟，100 小时 = 6000 分钟", () 
 });
 
 test("幂等：重复 check 不重复解锁、不重复庆祝", () => {
-  const r = makeService(pet({ info: { yb: 20000 } }));
+  const r = makeService(pet({ fishing: { harvestfish: 2000 } }));
   const first = r.service.check();
   assert.equal(first.length, 1);
+  assert.equal(first[0].id, "fishMaster");
   const second = r.service.check();
   assert.deepEqual(second, []);
   assert.equal(r.calls.openSpeak.length, 1); // 只庆祝一次
@@ -153,26 +160,28 @@ test("幂等：重复 check 不重复解锁、不重复庆祝", () => {
 });
 
 test("解锁写入 setPetInfo 的 info.achievements（ISO 时间）", () => {
-  const r = makeService(pet({ info: { yb: 10000 } }));
+  const r = makeService(pet({ fishing: { harvestfish: 1000 } }));
   r.service.check();
   const arg = r.calls.setPetInfo[0];
-  assert.ok(arg.info.achievements.rich);
-  assert.doesNotThrow(() => new Date(arg.info.achievements.rich).toISOString());
+  assert.ok(arg.info.achievements.fishMaster);
+  assert.doesNotThrow(() =>
+    new Date(arg.info.achievements.fishMaster).toISOString()
+  );
 });
 
 test("getAll：返回全部定义并带解锁状态", () => {
-  const r = makeService(pet({ info: { yb: 10000 } }));
+  const r = makeService(pet({ fishing: { harvestfish: 1000 } }));
   r.service.check();
   const all = r.service.getAll();
   assert.equal(all.length, ACHIEVEMENTS.length);
-  const rich = all.find((a) => a.id === "rich");
-  assert.equal(rich.unlocked, true);
-  assert.ok(rich.unlockedAt);
+  const fish = all.find((a) => a.id === "fishMaster");
+  assert.equal(fish.unlocked, true);
+  assert.ok(fish.unlockedAt);
   const hatch = all.find((a) => a.id === "hatch");
   assert.equal(hatch.unlocked, false);
   assert.equal(hatch.unlockedAt, null);
   // 不带 check 函数（可 IPC 序列化）
-  assert.equal(typeof rich.check, "undefined");
+  assert.equal(typeof fish.check, "undefined");
 });
 
 test("getAll 能从 petInfo.info.achievements 读取已解锁（双写并集）", () => {
@@ -190,4 +199,49 @@ test("空 petInfo / 字段全缺失不抛错", () => {
   const r = makeService({});
   assert.deepEqual(r.service.check(), []);
   assert.equal(r.service.getAll().length, ACHIEVEMENTS.length);
+});
+
+// ---- 老存档兼容：已解锁过「小富翁」（id: rich，已从定义表移除）的存档 ----
+// 定义表已无 rich，但老存档的 $Store.achievements / info.achievements 里仍有这条记录。
+
+test("老存档残留的 rich 记录：面板不出现未知成就，其它成就记录不丢", () => {
+  const ISO = "2026-01-01T00:00:00.000Z";
+  const petInfo = pet({
+    info: { yb: 999999999, achievements: { rich: ISO } },
+    fishing: { harvestfish: 1000 },
+  });
+  const r = makeService(petInfo);
+  // 兜底存储侧也有老记录（双写两路都可能残留）
+  r.mem.map = { rich: ISO, hatch: ISO };
+
+  const all = r.service.getAll();
+  assert.equal(all.length, ACHIEVEMENTS.length);
+  assert.equal(ACHIEVEMENTS.length, 7); // 移除 rich 后为 7 条
+  assert.equal(all.some((a) => a.id === "rich"), false); // 不渲染未知成就
+  assert.equal(all.find((a) => a.id === "hatch").unlocked, true); // 别的记录仍在
+  assert.equal(all.find((a) => a.id === "hatch").unlockedAt, ISO);
+  // 渲染层的 unlockedCount / list.length 口径（popups/achievement/index.js + index.html）
+  assert.equal(all.filter((a) => a.unlocked).length, 1);
+
+  // check 不因残留记录报错，也不会为它补一次庆祝气泡
+  const newly = r.service.check("load");
+  assert.deepEqual(newly.map((a) => a.id), ["fishMaster"]);
+  assert.equal(r.calls.openSpeak.length, 1);
+  assert.ok(r.calls.openSpeak[0].data.data.includes("成就达成：养鱼大师"));
+});
+
+test("老存档 rich 记录在后续解锁落盘时被原样保留，不覆盖不删除", () => {
+  const ISO = "2026-01-01T00:00:00.000Z";
+  const r = makeService(pet({ info: { growth: 1100 } }));
+  r.mem.map = { rich: ISO };
+
+  const newly = r.service.check("levelup");
+  assert.deepEqual(newly.map((a) => a.id), ["hatch"]);
+  // 兜底存储：老记录 + 新记录
+  assert.equal(r.mem.map.rich, ISO);
+  assert.ok(r.mem.map.hatch);
+  // petInfo 侧双写同样带上老记录
+  assert.equal(r.calls.setPetInfo.length, 1);
+  assert.equal(r.calls.setPetInfo[0].info.achievements.rich, ISO);
+  assert.ok(r.calls.setPetInfo[0].info.achievements.hatch);
 });

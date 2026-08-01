@@ -151,8 +151,10 @@ test("getAll 中签到达人的解锁态与 check 一致", () => {
   assert.equal(env.service.getAll().find((x) => x.id === "signMaster").unlocked, true);
 });
 
-test("小富翁成就仍按 info.yb 判定（未被本次改动影响）", () => {
-  const env = makeEnv({ yb: 10000 });
-  const ids = env.service.check("rich").map((x) => x.id);
-  assert.ok(ids.includes("rich"));
+test("巨额元宝存档不解锁任何成就（「小富翁」已随不设资源门槛定位移除）", () => {
+  const env = makeEnv({ yb: 999999999 });
+  const ids = env.service.check("shop").map((x) => x.id);
+  assert.deepEqual(ids, []);
+  assert.equal(env.speaks.length, 0);
+  assert.equal(env.achStore.map, undefined, "无新解锁则不应落盘");
 });

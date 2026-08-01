@@ -165,7 +165,9 @@ npm run build:win:portable   # 仅免安装版
 npm test        # node --test test/*.test.js
 ```
 
-当前 502 个测试（实测 `npm test` 的 `tests` 计数；注意 `test/edgeHide.test.js` 内部有 21 条 assert，但 `node --test` 把整个文件计为 1 个）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
+当前 **656 个测试 / 54 个测试文件**（实测 `npm test` 的 `tests` 计数）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
+
+**「不依赖 Electron」不等于「不碰磁盘和网络」**（此前的表述容易被误读）：`coursesManager` / `coursesRepo` / `memory` / `memoryStore` / `pathGuardRealpath` / `storeCorrupt` / `storeGetItemThrow` 七个文件用 `os.tmpdir()` + `mkdtempSync` 建真实临时目录（用后 `rmSync` 清理）；`imageGenAbort` / `providersTransport` 两个文件用 `server.listen(0, "127.0.0.1")` 起真实 HTTP 服务（临时端口、仅回环，无冲突风险）。
 
 `test/ruffleSmoke/` 是需要 Electron 与真实素材的手动冒烟脚本（`node test/ruffleSmoke/run.js` 等），**刻意不被 `npm test` 的 glob 收录**，改 Ruffle 相关代码时手动跑。
 
@@ -215,12 +217,51 @@ console.warn("[前缀] 人话描述，含降级后的行为:", e?.message || e);
 
 ## 已知问题
 
-- **`Alt+Q` 截图在 Windows 上无功能** — 调用的是 macOS 的 `screencapture` 命令，且回调 `this` 丢失、成败判断反了。当前仅占用快捷键，未修复。
+- **`Alt+Q` 截图无功能** — 当前是**不分平台的空实现**：只记一条 warn 说明它依赖 macOS 的 `screencapture`、当前平台不支持，然后跳过。全仓已无 `child_process`。仅占用快捷键，未实现。（此条此前描述为"调用 macOS 命令、回调 `this` 丢失、成败判断反了"，那段代码已不存在，本轮审查订正。）
 - **贴边动画不停在指定帧** — Ruffle 未暴露任何跳帧能力（无 `GotoFrame` 等价 API），贴边动画会整片播放。需改素材或等 Ruffle 支持。
-- **本地窗口保留 `webSecurity: false`** — 后花园与钓鱼依赖跨源 iframe 的 `contentWindow` 直写传数据，强行收紧会废掉这两个功能。可输入任意网址的窗口已隔离到 `webSecurity: true + sandbox: true + 无 preload`。彻底修复需先把那两处改为 `postMessage`。
+- **本地窗口默认 `webSecurity: true`，仅 4 窗显式 opt-out** — 主宠窗 / smallGame / 钓鱼 / 密室因 Ruffle fetch 本地 SWF 或跨源 iframe 需要保留 `webSecurity: false`，其余窗口已全部收紧；壳窗另有 CSP meta 与统一的导航 / 新窗守卫（默认 deny）。可输入任意网址的窗口隔离到 `webSecurity: true + sandbox: true + 无 preload`。
+- **钓鱼 / 密室的跨源 `contentWindow` 直写在 Electron 28 下很可能已失效** — 实测 `webSecurity: false` 下 file:// 壳写 http://127.0.0.1 iframe 的 window 仍被 "Blocked a frame ... cross-origin" 拦截，需 `disable-site-isolation-trials` 才放行（该开关已在安全加固中移除，不计划恢复）。彻底修复需把那两处改为 `postMessage`。
 - **多显示器下贴边判定可能错位** — 贴边逻辑用累加后的屏幕尺寸，而窗口钳制是多屏感知的，两套坐标体系不一致。
 - 屏幕感知默认每 2 秒截屏一次，长时间开启有一定 CPU 开销。
 - **新版钓鱼无"免费饲料"按钮** — 官方 1.2.5 素材本身没有该入口，cmd:10 分支不触发，属预期；鱼苗商店沿用本项目调过价的内置表，官方 `fish_fry_table.json` 未接入。
+
+### 第三轮审查确认、但尚未修复的问题
+
+第三轮深度审查（七个维度：Electron 攻击面 / 状态机与并发 / LLM 与网络层 / 代码质量 / 测试真实质量 / 未提交改动 / 性能与资源）修掉了 4 类 P0，以下 P1 已确认但本轮未动，按优先级排：
+
+**安全**
+
+- **`imageGen` 的 `buildEndpoint` 仍放行非回环 `http://`** — 随后照样发 `Authorization: Bearer`，即 API Key 明文出网。对话服务商侧已由 `providers.isLoopbackHost` 拒绝，图像服务商侧未复用该校验，两个入口的安全边界不对称。
+- **全仓无任何权限处理器** — `setPermissionRequestHandler` / `setPermissionCheckHandler` 零命中，而 `tool/urlWindow` 的设计用途就是打开用户输入的任意网址。Electron 未设 handler 时默认放行多数请求（media / geolocation / notifications）且**没有 Chrome 那样的权限气泡**，恶意页面可无提示取用摄像头 / 麦克风 / 定位。
+- **`sandbox:false` 是窗口工厂的全局默认** — 逐个统计 preload 的 require，19 窗里只有主宠窗真正需要 Node 能力，其余 18 窗的 opt-out 无必要。`contextIsolation` 挡不住渲染进程层面的漏洞利用。
+- **远程窗与本地窗共用默认 session** — `urlWindow` 未设 `partition`（全仓 `partition` 零命中），任意站点的 cookie / localStorage / SW 落进应用默认 session，且无 `will-download` 处理。
+- **约 70 条 IPC 通道无一校验 `event.senderFrame`** — 属纵深防御缺口而非当前可利用漏洞（子框架无 preload、`nodeIntegrationInSubFrames` 已移除）。通道已天然带窗口名前缀，在工厂注册处包一层校验成本很低。
+
+**防回归**
+
+- **本节全部安全不变量零自动化覆盖** — 对 54 个测试文件 grep `nodeIntegration|contextIsolation|webSecurity|Content-Security-Policy|setWindowOpenHandler` 全部零命中，唯一验证它们的是刻意不进 `npm test` 的手动 Electron 冒烟脚本。把 `nodeIntegration:!0` 写回 `window.js` 或删掉 CSP meta，整套测试仍会全绿。
+
+**正确性**
+
+- **屏幕感知失败的根因未消除** — 本轮只让它可诊断（分级日志 + 连续失败一次性气泡告知）。视觉模型未单独配置时仍会静默回退到对话服务商，对不支持图片的模型必然每轮 400。应在设置页保存时或感知入口做一次能力预检，而不是每轮烧一次截屏再失败。
+- **`recoverable()` 无调用者** — 启动时不做 finalize 恢复，崩溃遗留的 `finalizing` 会话与总结缺失的会话都需要用户手动触发才会重跑。
+- **多块课程总结无部分成功保留** — 串行 N 次 LLM 调用，第 N 块失败会丢掉前 N-1 块的提取结果，重试要从头再花钱。
+- **`achievement.js` 等 3 处非启动期 `$Store.getItem` 现在会上抛** — `getItem` 语义本轮从"吞错返 `{}`"改为上抛，这三个调用方未加 try，运行期读失败会冒泡到各自上下文，值得单独排查一轮。
+- **`main.js` 的 `uncaughtException` 处理器刻意不退出进程** — 对运行期孤立异常是对的（桌宠是长驻进程），但启动期同步 throw 会留下无窗口却占着单实例锁的僵尸进程。本轮只堵了 `toSex` 一个抛出点，建议给该处理器加"窗口从未创建成功则 exit(1)"的兜底。
+
+**磁盘与性能**
+
+- **`memory/daily-images/` 无上界** — 上面「数据与隐私」列的磁盘上界（events 12 MiB、课程 ≈520 MiB）逐条都真在代码里，但**漏了日记配图**：每次生成成功都新增一个文件，全库无裁剪，点 20 次最坏 500 MiB。
+- **存档 `config-qq-local.json` 无上界** — 且 `electron-store` 的 `get`/`set` 每次都是全文件同步读写，稳态每小时约 240 次全量读 + 60 次全量写（其中一半是 dataWatcher 回声造成的多余写）。
+- **感知每 tick 都做一次注定被丢弃的 PNG 编码** — `captureScreen` 无条件 `toPNG()` + `toBitmap()`，而"画面未变 / 在途中 / 不到心跳"的判定在截屏之后。12 小时约 21,600 次，每次 PNG 编码 10–30ms CPU；`toBitmap()` 分配 3.69 MB 只为读 576 个采样点。
+- **剪贴板轮询 200ms** — 5 次/秒。除 CPU 外有实际副作用：Windows 剪贴板是独占资源，高频 `OpenClipboard` 会让其他程序的复制粘贴间歇失败。
+- **录课期间每感知 tick ≥3 次 fsync** — `appendTranscript` 每次全量重读重写 `state.json`，而唯一作用是把 `updated_at` 往前推。一节 1 小时网课 720–3600 次全量重写，同步执行在主进程，动画会周期性卡顿。
+- **桌面导出目录的上界只落在日志里** — `MAX_EXPORTED_COURSES` 超限只 `console.warn`，用户看不到，实际等于无护栏。
+
+**文档与注释准确性**
+
+- 本轮发现至少四处**注释断言了代码并不做的事**，且其中三处是缺陷的承重墙（`aiWiring` 的就绪探针、`ruffleBridge` 的 30s 兜底、`dataWatcher` 的"只传原始类型"）。由于本仓库一半源码是无 sourcemap 的 webpack 压缩产物、注释是唯一导航工具，注释准确性在这里等同于代码正确性。已知仍存的一处：`swfPet.js` 的 `TAIL_FORCE_FRAMES` 注释称"配置中最大为 5（bury）"，而 Kid 的 `sickOption` 配了 `lastTimeCut:600`；`test/ruffleSmoke/probeBridge.js` 里的 30000 也仍是旧口径。
+- 上面「已知问题」中 `webSecurity` 那两条互相矛盾：一条说钓鱼 / 密室因跨源 `contentWindow` 直写需要保留 opt-out，另一条又说该直写在 Electron 28 下已被站点隔离拦死。两条合起来的结论是**该 opt-out 应当被移除而非保留**，需先用冒烟脚本实测确认。
 
 ---
 

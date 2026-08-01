@@ -4,6 +4,99 @@
 
 版本号说明：跟随 QQ 宠物怀旧服的上游版本线命名。本项目 fork 自 [qqpet_automation](https://github.com/xuemian168/qqpet_automation)，来源与许可见 `NOTICE.md`。
 
+## [未发布]（第三轮深度评审修复）
+
+第三轮七维度并行深度审查（Electron 攻击面 / 状态机与并发 / LLM 与网络层 / 代码质量合规 / 测试真实质量 / 未提交改动 / 性能与资源）。三个维度确认无 P0（Electron 攻击面、性能与资源、未提交改动），修掉 4 类 P0、8 个位置。测试 573 → **656**，全绿。约 30 条 P1 已记入 README「第三轮审查确认、但尚未修复的问题」，本轮未动。
+
+### 修复
+
+**P0 — 数据丢失**
+
+- **`aiWiring` 的启动引导会用默认值覆盖整份 sys 存档（含加密的 API Key）**：`bootTimer` 拿 `getSys()` 当就绪探针，注释称"sys 未初始化时会抛 TypeError"。该前提是错的 —— `pet.js` 在模块加载期就把 `e.system` 赋成默认字面量，`getSys()` 无参时直接 `return e.system`，**永不抛错**。于是探针恒真，首个 tick 必定执行 `boot()`；而 `boot()` 第一件事就是写盘（`barrageEnabled` 默认值），此刻 `e.system` 仍是默认字面量，`setSys` 末尾无条件全量落盘，用户的快捷键 / 透明度 / 皮肤 / 免打扰 / `llmEnabled` / `perceptionEnabled` 与 `safeStorage` 加密的 API Key 一并丢失，无任何提示。
+  可达路径不是"express 装载慢"（`doMain` 传 `none=true` 走同步分支，express 根本没启动），而是 **`dialog.showErrorBox` 的嵌套消息循环** —— 该弹窗同步阻塞但定时器仍在 tick，且恰好出现在 aiWiring 已 require 而 `setSys({init})` 尚未执行之时，即偏偏在用户存档已出问题、正在读错误提示的时候销毁其设置。
+  现改为 `doMain` 在 `setSys({init})` 后置 `global.__sysReady`，探针只认该标志；`boot()` 首行加防御断言（未就绪一律不写 sys），堵的是不变量而非某条时序。
+
+**P0 — 故障不可诊断**
+
+- **屏幕感知的所有失败 100% 静默**：失败只经 `emit("perception-failed")` 外传，而生产端**零监听者**（EventEmitter 对无监听的非 error 事件静默返回 false）。用户开了感知但没配服务商 / 视觉回退到不支持图片的模型 / Key 失效，三种情况都表现为气泡说"屏幕感知开启啦"，此后永久截屏、永久失败、一行日志都没有 —— 全仓唯一一条用户完全无从察觉的链路。现补分级日志（未配置 / 缺 Key / HTTP 4xx 走 warn 带 message，其余含 5xx 走 error 带完整堆栈）+ 按次节流 + 连续失败超阈值时一次性气泡告知。
+- **课程终稿总结失败静默且永久不可重试**：同样 emit 到零监听者，且随后照常把 status 置 `complete`，而 `finishSession` 对 `complete` 直接 return。桌面导出的 `README.md` 只有标题和关键帧、没有总结小节，state 却显示正常，日志一片干净。现补分级日志 + `state.summary_error` 留痕 + 导出稿显式写出"总结生成失败：<原因>"而非静默省略 + `recoverable()` 纳入该类会话允许重跑。
+- 顺带修**结稿期的僵尸收养**：`finishSession` 此前同步清空 `currentSession` 后才 `await` 总结，期间 `state.json` 的 status 仍是 `recording`，用户在那 30~120 秒里切回课程会被 `findRecordingSession` 收养回正在结稿的会话，转写写进已被总结的 `transcript.md`（导出稿看不到），此后每轮感知抛 `session is not recording` 被上层降级成一条 warn，课程内容静默丢弃。现在任何 `await` 之前就原子落盘 `finalizing`。
+
+**P0 — 测试假绿（5 处）**
+
+- **`ruffleBridge` 的退场阈值比生产兜底松一倍**（最危险的一条，它守的正是本仓库最初那个"关桌宠卡住才被强杀"的 P0）：生产硬兜底是 15000ms，而注释与三条测试都写 30s，唯一时间断言是 `< 30000`。实测 91 帧 finish 于 14000ms（余量仅 1 秒），100 / 110 / 150 帧分别 15000 / 16000 / 19000，**全部越过生产兜底而测试照绿**。根因是 `finishAtMs` 第一项随帧数线性增长，故不止改数字：中段新增与素材无关的硬截止，使 finish 上界与 `numFrames` 解耦（300 帧实测 ≈11.9s，原 25s+），并建立 `EXIT_FALLBACK_MS` 单一真值 + 跨引用断言校验 `main.js` 侧的字面量与日志文案。**代价：单个动画超时长时尾段被提前，观感上动画截短。**
+- `controlBarHover` 用例：单例在纯 node 下 `state` 为 undefined，所有分支判定都不成立，`changeState` 一次未被调用。
+- `speakOptions` 成就用例：断言的是解锁数而非气泡数且循环体为空。
+- `activeRecheck` 的 TOCTOU 用例：实为纯函数自调两次，未钉住"复检必须在 `activeIt` 早退之前"这个真正的修复点。
+- `edgeHide` 整个文件是一个合成测试（0 个 `test()` / 21 条 assert）且关键断言包在 `if` 里，不产生位移就什么都不验。现拆成 21 条独立 `test()`。
+
+以上每处修复均做**变异验证**：把被测行为回滚或极性反转，确认对应断言必然变红，而非口头声称。
+
+### 订正
+
+- **本轮发现至少四处「注释断言了代码并不做的事」，其中三处是缺陷的承重墙**（`aiWiring` 的就绪探针、`ruffleBridge` 的 30s 兜底、`dataWatcher` 的"只传原始类型或 null 以避免引用比较回写"—— 而默认 `info` 里 `travel_china:[]`、`achievements:{}` 就是数组和对象，引用比较恒不相等，导致每次心跳写被放大成两次）。本仓库一半源码是无 sourcemap 的 webpack 压缩产物、注释是唯一导航工具，故注释准确性等同于代码正确性。
+- 下方第二轮小节的三处不实表述已就地更正：测试数、`openSpeak` 形状统一范围、`http://` 回环校验的覆盖范围。
+- README 的 `Alt+Q` 已知问题描述过期（所述缺陷代码已不存在，现为不分平台的空实现）；测试数与"隔离方式"表述已订正（"不依赖 Electron"成立，但 7 个文件用真实临时目录、2 个起真实回环 HTTP 服务）。
+- `main/main.js` 新增的中文日志前缀改为可 grep 反查的模块路径（`[退出]` → `[main/exit]`，`[重载]` → `[main/reload]`）。压缩产物出问题时前缀是唯一定位手段。
+
+## [未发布]（第二轮深度评审修复）
+
+第二轮三域并行深度评审（主进程与服务层 / 窗口与渲染层 / 安全专项与测试质量）确认约 30 项缺陷，本次全部修复。测试 502 → **573**，全绿。
+
+复审追加（对上述修复再做一轮对抗性 review 后修掉的问题）：
+
+- **aiWiring boot 引用已删除的局部变量 `sys`**：`getSys("barrageEnabled")` 简化时漏改下一行 `sys.perceptionEnabled`，导致感知自启静默失效（不抛错、无日志）。已改为 `getSys("perceptionEnabled")` 并补 boot 路径回归测试（test/aiWiring.test.js）。
+- **getSys 对类型损坏的 sys 值抛 `TypeError`**：存档 `"sys"` 为合法 JSON 但真值原始类型（如 `5`）时 `t in e.system` 抛错。已加 typeof 守卫降级为返回 undefined，与旧实现的静默降级对齐。
+- 测试注释漂移（speakOptions）与 signIn 内存兜底的重启边界说明、imageGen abort 未接线的已知边界，均已补注释。
+
+### 安全
+
+- **本地窗口 `webSecurity` 默认收紧为 `true`**：仅主宠窗 / smallGame / 钓鱼 / 密室 4 个窗口因 Ruffle 加载本地 SWF 或跨源 iframe 显式 opt-out（带注释说明理由），其余全部恢复默认安全基线（`src/windows/window.js`）。
+- **壳窗补 CSP meta**：`app.html` 注入内容安全策略（兼容 Vue 模板编译的 `unsafe-eval`、Ruffle 的 `wasm-unsafe-eval`、钓鱼/密室 iframe 的 `frame-src http://127.0.0.1:*`）。
+- **本地窗口统一导航 / 新窗守卫**：窗口工厂默认 `setWindowOpenHandler` deny + `will-navigate` 白名单仅放 app.html 初始 URL；此前除 urlWindow 外全仓无任何导航防护，老 Flash 页面的 `window.open` 会开出无守卫新窗。
+- **`stateInfo_bus-upData` 渲染层 payload 全量透传 `setPetInfo`**：无白名单可写元宝 / 成长值等任意存档字段。现经 `ipcInputGuard.normalizeStateInfoUpdate` 逐字段校验，实测渲染层只发两种合法形态。
+- **作弊快捷键（Ctrl+Shift+1/2/3/4 等改元宝 / 成长值）常驻发布版**：现仅 `--dev` 模式注册与响应，store 窗口的 shortcut 透传分支同步门控。
+- **LLM 允许 `http://` 明文端点**：API Key 会随 Authorization 头明文上网。现 `http://` 仅允许回环地址（127.0.0.0/8、localhost、[::1]，即本地 Ollama / LM Studio 场景），非回环 http 明确拒绝（`providers.js`）。**订正（第三轮）：此校验只覆盖对话服务商。`memory/imageGen.js` 的 `buildEndpoint` 仍放行任意 `http://` 主机并照样发 `Authorization: Bearer`，同一漏洞在图像服务商侧原样存在，`isLoopbackHost` 已导出但未被复用。**
+- 全部 19 个 preload 的 `ipcRenderer.on` 回调不再向渲染层透传原始 `IpcRendererEvent`（含 `sender`），统一包装为 `(_e, ...args) => cb(...args)`。
+- `setup` / `smallGame` 两处 `v-html` 改为安全渲染（当前数据源为本地静态串，属"上膛枪"清理）。
+
+### 修复
+
+**数据安全**
+
+- **签到可重复刷奖励**：`signIn.js` 的 `setSys` 落盘失败时奖励已发、状态读不回（`readState` 永不回退内存态），当天可重复签到。现内存态较新时优先内存态。
+- **`$Store.getItem` 读键异常静默返回 `{}`**：`doMain` 以 `n?.info` 判新宠物，一次瞬时读错误（杀软占用等）会把老存档当新宠物并覆盖落盘，不可逆。现异常记日志后上抛，启动读档失败走既有的存档隔离 + 弹窗退出路径（`store.js` / `doMain.js`）。
+- **`Goods.buy` 入库成功但扣款落盘抛错会"免费拿货"**：现扣款失败就地回滚背包快照并重新落盘。
+- **`getPetInfo` 浅拷贝返回活引用**：调用方就改嵌套字段会绕过 `setPetInfo` 的 dirty 检查与落盘。现返回深拷贝（复用 `tool.js` 的 `JSONto`）。
+- `addPetInfo` 只钳上限不钳下限，饥饿 / 心情可被扣成负数并持久化，现下限钳 0。
+
+**功能**
+
+- **`getSys(key)` 用 `||` 取值吞掉 `false`/`0`/`""`**：「默认开、显式关」的开关语义无法表达，此前靠两处读整个 sys 对象的 workaround 硬扛。现改为 `in` 语义，workaround 同步简化（`pet.js`、`aiWiring.js`、`perception/loop.js`）。
+- **travel.init 与主窗口创建竞态**：恢复中的旅行期间宠物仍显示在桌面；关机期间结束的旅行丢失回家动画与气泡。现 init 经 `_whenMainWindowReady` 等待主窗口就绪（500ms 轮询 + 30s 超时兜底 + epoch 取消令牌）。
+- **aiWiring 桥接丢 `course_title`**：感知层发出、记忆层接收的字段在桥接处被丢，课程观察为空时完全不落记忆。
+- **自动课程会话在低置信期无限拖延**：自动结束依赖 `confidence ≥ 0.6` 的 activity 事件，屏幕持续模糊时永不结束。现自动会话挂 5 分钟沉默看门狗自动收尾。
+- **focusGuard 无条件启动且 `stop()` 是死代码**：现按 `focusEnabled` 设置启停，设置变更实时联动。
+- `llm.js` 人设 prompt 写「健康/10」而满值是 5，模型长期以为宠物半血；`openSpeak` 选项形状在成就 / 签到 / 旅游三个调用方补齐为 `{active, nextActiveStr}`。**订正（第三轮）：此前写作"在四个调用方统一"，实际仍有 5 处不传 `active`（`focusGuard` ×2、`courses/manager`、`perception/loop` ×2）。行为上无差异（`openSpeak` 内有 `active:n||"speak"` 兜底），但 `test/speakOptions.test.js` 自称"把这个约定钉死"而只钉了 3 处，属虚假信心。**
+- `memory/store.js` 对非法 timestamp 抛 `RangeError`，现回退当前时间并记 warn；`imageGen` 补 AbortSignal 支持，在途图像生成可中止。
+
+**Electron / 窗口杂项**
+
+- `AppUserModelId` 由过于通用的 `"pet"` 改为 `"com.qqlocal.desktop"`（与 `build.appId` 一致）。
+- 窗口工厂清理：删除恒 `undefined` 的 `height:this.height`、`openUrl` 死分支（含 80×80 loading 窗泄漏路径），魔法 `+10` 尺寸补偿补注释。
+- fishing / backRoom 的 `webPreferences:{}` 空对象传参改为表意清晰的显式 opt-out。
+- `screen.js` 的 `oneSize` 多屏下优先取鼠标所在屏，回退主屏。
+- `level.js` 常量 `hour`（实为一天毫秒数）改名 `dayMs`；删除粉钻结算的 `console.log` 刷屏与 `signIn.js` 无前缀日志。
+- 注释漂移修正：`ruffleBridge.js` 的「30s 硬兜底」（实为 15s）、`controlBarHover.js` 的过时 bug 描述。
+- `localstorge.js`（零引用）匿名实例 + 空导出重写为正常导出并标注现状。
+- 死代码桩 `request.js` 补「远程 API 已禁用」说明注释。
+
+### 测试
+
+- 新增 11 个测试文件 + 6 个既有文件追加用例（502 → 573）：签到内存态兜底、getSys/getPetInfo/addPetInfo 语义、getItem 异常上抛、http 回环校验、课程看门狗、travel 竞态（含 epoch 作废与超时兜底）、imageGen abort、stateInfo 守卫真实接线、preload event 剥离全量、buy 回滚、作弊门控、openSpeak 形状钉死。
+- 新增 `test/ruffleSmoke/runCspGuard.js` Electron 冒烟：真实 app.html + 窗口工厂 + 真实 SWF，验证 CSP 下 Ruffle 正常渲染与播放、webSecurity 默认 true / opt-out false 生效、https 与 file 顶层导航被拦、`window.open` 被 deny、127.0.0.1 iframe 在 `frame-src` 下正常加载。12/12 通过。
+- `test/storeCorrupt.test.js` 与 `test/storeBagLeft125.test.js` 各有一处断言钉的是本轮被修复的旧行为（getItem 吞错返回 {}、preload 直传 event），已更新为新契约。
+
 ## [未发布]
 
 一轮全量源码审查后的集中修复，随后又做了一轮独立 code review（正确性 / 测试质量 / 一致性三个视角）并修掉 review 发现的问题。审查分五个域并行进行（主进程/IPC、宠物数值与经济、AI 服务层、渲染层、存储与测试），共确认约 50 项缺陷 + review 追加约 20 项，本次修完其中全部代码类缺陷。测试 279 → **502**，全绿。

@@ -10,7 +10,16 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const { startDataWatcher, REBUILD_DELAYS_MS, FILE_NAME } = require("../src/ini/dataWatcher.js");
+/* 被测源码路径可用 QQ_DATA_WATCHER_SRC 覆盖，专为"变异测试/回滚验证"准备：
+   把修复回滚后的版本写进临时文件，再
+   `QQ_DATA_WATCHER_SRC=<临时文件> node --test test/dataWatcher.test.js`，
+   即可验证这些用例真的会红 —— 无需改动仓库里的 src/。
+   与 test/storeCorrupt.test.js 的 QQ_INI_STORE_SRC 同一套约定。 */
+const { startDataWatcher, REBUILD_DELAYS_MS, FILE_NAME, deepEqual } = require(
+  process.env.QQ_DATA_WATCHER_SRC
+    ? path.resolve(process.env.QQ_DATA_WATCHER_SRC)
+    : "../src/ini/dataWatcher.js"
+);
 
 const USER_DATA = path.join("C:", "fake-userdata");
 const CONFIG_PATH = path.join(USER_DATA, FILE_NAME);
@@ -355,4 +364,312 @@ test("拿不到 electron.app 且未注入时：记日志并返回 null，不静�
     logs.error.some((m) => m.includes("无法获取 electron.app") && m.includes("at ")),
     "拿不到 app 是致命降级，必须带堆栈记录"
   );
+});
+
+/* ------------------------------------------------------------------ *
+ * 写放大回归（本文件头注释此前断言"info 基本都是原始类型"，是错的）
+ *
+ * pet.js 的默认 info 表里 travel_china:[] / achievements:{} 是数组和对象，
+ * activeOption 的 work/study/trip/ill 非 null 时也是对象；而 setPetInfo 的变更判定是
+ * `!=`（对对象即引用比较），JSON.parse 每次产生新引用 → 恒被判为"变更" → 每次心跳回声
+ * 都再写一次全量存档。下面的桩把 pet.js 的判定逐字复刻，用精确写盘次数把这条链钉住。
+ * ------------------------------------------------------------------ */
+
+function clone(v) {
+  return JSON.parse(JSON.stringify(v));
+}
+
+/**
+ * pet.js 的 setPetInfo / getPetInfo 桩。
+ * 判定逻辑复刻 src/ini/pet.js：只遍历默认表已有的键，用 `!=` 比较（对象即引用比较），
+ * 任一节有变更就调一次 $Store.setItem("pet", ...) —— 即 writes 里记一笔。
+ */
+function stubPetJs(memory) {
+  const writes = [];
+  const origSet = global.setPetInfo;
+  const origGet = global.getPetInfo;
+  global.getPetInfo = () => clone(memory);
+  global.setPetInfo = (payload) => {
+    let changed = false;
+    for (const section of ["info", "maxInfo", "activeOption"]) {
+      const incoming = payload[section];
+      if (!incoming) continue;
+      for (const key of Object.keys(memory[section])) {
+        if (!(key in incoming)) continue;
+        const value = incoming[key];
+        // pet.js 的 info 分支会跳过 falsy（0 除外）；这里一并复刻，避免桩比真实实现更严
+        if (section === "info" && !value && value !== 0) continue;
+        // eslint-disable-next-line eqeqeq
+        if (value != memory[section][key]) {
+          changed = true;
+          memory[section][key] = value;
+        }
+      }
+    }
+    if (changed) writes.push(clone(payload)); // = 一次 $Store.setItem("pet", ...) 全量写盘
+  };
+  return {
+    writes,
+    restore: () => {
+      if (origSet === undefined) delete global.setPetInfo;
+      else global.setPetInfo = origSet;
+      if (origGet === undefined) delete global.getPetInfo;
+      else global.getPetInfo = origGet;
+    },
+  };
+}
+
+/** 一份同时含原始类型、数组、对象的宠物内存表（贴近 pet.js 的默认 info 表形状） */
+function makeMemoryPet() {
+  return {
+    info: { yb: 1, hunger: 3100, travel_china: ["beijing"], achievements: { first_meet: 1 } },
+    maxInfo: { mood: 1000, level: 3 },
+    activeOption: { work: null, study: null, ill: { health: 0, overTime: 10 } },
+  };
+}
+
+test("[写放大回归] 心跳回声：引用类型键值未变时，必须零次回写（原来每次都多写一次全量存档）", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  let handle;
+  try {
+    handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+
+    // 模拟一次 60s 心跳：pet.js 改了 yb 并把整份 pet 写盘 → 触发一次 watch 回声事件
+    memory.info.yb = 2;
+    disk = JSON.stringify({ pet: clone(memory) });
+    const readsBefore = state.reads.length;
+    state.watchers[0].emitChange();
+
+    assert.equal(
+      pet.writes.length,
+      0,
+      "回声里 yb 已与内存一致、travel_china/achievements/ill 值也未变，一次都不该回写"
+    );
+    // 回声本身的读盘：reload 一次 + setPetInfo 后刷新 lastRaw 一次
+    assert.equal(state.reads.length - readsBefore, 2, "回声只允许 2 次读盘（reload + 刷新 lastRaw）");
+  } finally {
+    pet.restore();
+    if (handle) handle.stop();
+  }
+});
+
+test("[写放大回归] 连续 3 次心跳回声累计写盘次数必须为 0（放大是每次都发生的）", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  let handle;
+  try {
+    handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+    for (const yb of [2, 3, 4]) {
+      memory.info.yb = yb;
+      disk = JSON.stringify({ pet: clone(memory) });
+      state.watchers[0].emitChange();
+    }
+    assert.equal(pet.writes.length, 0, "3 次心跳原本会放大出 3 次额外全量写");
+  } finally {
+    pet.restore();
+    if (handle) handle.stop();
+  }
+});
+
+test("[反假绿] 外部真的改了 travel_china / achievements：必须同步进内存并回写一次", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  let handle;
+  try {
+    handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+
+    const external = clone(memory);
+    external.info.travel_china = ["beijing", "shanghai"];
+    external.info.achievements = { first_meet: 1, level_10: 1 };
+    disk = JSON.stringify({ pet: external });
+    state.watchers[0].emitChange();
+
+    assert.equal(pet.writes.length, 1, "真的变了就必须同步（值比较不能退化成一律不传）");
+    assert.deepEqual(pet.writes[0].info.travel_china, ["beijing", "shanghai"]);
+    assert.deepEqual(pet.writes[0].info.achievements, { first_meet: 1, level_10: 1 });
+    assert.deepEqual(memory.info.travel_china, ["beijing", "shanghai"], "内存必须被真的更新");
+  } finally {
+    pet.restore();
+    if (handle) handle.stop();
+  }
+});
+
+test("[反假绿] 值未变的引用类型键不进 payload，值变的才进（同一次同步里两者并存）", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  let handle;
+  try {
+    handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+
+    const external = clone(memory);
+    external.info.achievements = { first_meet: 1, night_owl: 1 }; // 变了
+    external.info.travel_china = ["beijing"]; // 值相同，只是新引用
+    external.activeOption.ill = { health: 0, overTime: 10 }; // 值相同，只是新引用
+    disk = JSON.stringify({ pet: external });
+    state.watchers[0].emitChange();
+
+    assert.equal(pet.writes.length, 1);
+    const payload = pet.writes[0];
+    assert.equal("achievements" in payload.info, true, "真变了的键必须传");
+    assert.equal("travel_china" in payload.info, false, "值相同的数组不得进 payload");
+    assert.equal("ill" in payload.activeOption, false, "值相同的 activeOption 对象不得进 payload");
+    assert.equal(payload.info.yb, memory.info.yb, "原始类型键仍照常交给 setPetInfo 自己判断");
+  } finally {
+    pet.restore();
+    if (handle) handle.stop();
+  }
+});
+
+test("拿不到 getPetInfo（无法值比较）：引用类型键宁可不传，并留 warn 不静默", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const calls = [];
+  const restore = stubSetPetInfo((p) => calls.push(p));
+  const origGet = global.getPetInfo;
+  delete global.getPetInfo;
+  let handle;
+  let logs;
+  try {
+    logs = captureConsole(() => {
+      handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+      // 必须造一次真实的内容变化，否则被 lastRaw 去重、根本走不到过滤逻辑
+      const external = clone(memory);
+      external.info.yb = 6;
+      disk = JSON.stringify({ pet: external });
+      state.watchers[0].emitChange();
+    });
+  } finally {
+    restore();
+    if (origGet !== undefined) global.getPetInfo = origGet;
+    if (handle) handle.stop();
+  }
+
+  assert.equal(calls.length, 1, "原始类型键仍应正常同步");
+  assert.equal(calls[0].info.yb, 6);
+  assert.equal("travel_china" in calls[0].info, false, "拿不到内存现值时数组键不得传");
+  assert.equal("achievements" in calls[0].info, false, "拿不到内存现值时对象键不得传");
+  assert.equal("ill" in calls[0].activeOption, false, "activeOption 的对象值同理");
+  assert.ok(
+    logs.warn.some((m) => m.includes("拿不到内存宠物数据") && m.includes("travel_china")),
+    "降级必须可见，且点名是哪些键没同步"
+  );
+  assert.deepEqual(logs.error, [], "这条降级路径不该产生 error");
+});
+
+test("文件内容变化时必须校准 $Store 的内存镜像（镜像前提是本进程唯一写者）", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  const reconciles = [];
+  const origStore = global.$Store;
+  global.$Store = {
+    _cache: {
+      reconcile: (data, isEqual, reason) => reconciles.push({ data, isEqual, reason }),
+    },
+  };
+  let handle;
+  try {
+    handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+    assert.deepEqual(reconciles, [], "启动阶段不该动镜像");
+
+    const external = clone(memory);
+    external.info.yb = 777;
+    disk = JSON.stringify({ pet: external });
+    state.watchers[0].emitChange();
+
+    assert.equal(reconciles.length, 1, "确认磁盘内容变化后必须校准镜像恰好一次");
+    assert.equal(reconciles[0].data.pet.info.yb, 777, "必须把磁盘实际内容交给 reconcile");
+    assert.equal(typeof reconciles[0].isEqual, "function", "必须把深比较函数传下去");
+
+    // 同内容的重复事件被 lastRaw 去重，不该再校准（会白白多一次全文件读）
+    state.watchers[0].emitChange();
+    assert.equal(reconciles.length, 1, "被去重的事件不得触发镜像校准");
+  } finally {
+    if (origStore === undefined) delete global.$Store;
+    else global.$Store = origStore;
+    pet.restore();
+    if (handle) handle.stop();
+  }
+});
+
+test("旧版 storeCache（只有 invalidate）：退回整表失效，不因缺 reconcile 而静默跳过", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  const invalidations = [];
+  const origStore = global.$Store;
+  global.$Store = { _cache: { invalidate: (reason) => invalidations.push(reason) } };
+  let handle;
+  try {
+    handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+    const external = clone(memory);
+    external.info.yb = 888;
+    disk = JSON.stringify({ pet: external });
+    state.watchers[0].emitChange();
+    assert.equal(invalidations.length, 1, "没有 reconcile 时必须退回 invalidate");
+  } finally {
+    if (origStore === undefined) delete global.$Store;
+    else global.$Store = origStore;
+    pet.restore();
+    if (handle) handle.stop();
+  }
+});
+
+test("$Store 镜像校准抛错时：记完整堆栈且不打断本轮同步", () => {
+  const memory = makeMemoryPet();
+  let disk = JSON.stringify({ pet: clone(memory) });
+  const { fs, state } = makeFs({ read: () => disk });
+  const pet = stubPetJs(memory);
+  const origStore = global.$Store;
+  global.$Store = {
+    _cache: {
+      reconcile: () => {
+        throw new Error("flush boom");
+      },
+    },
+  };
+  let handle;
+  let logs;
+  try {
+    logs = captureConsole(() => {
+      handle = startDataWatcher({ fs, app: makeApp(), ...makeTimers() });
+      const external = clone(memory);
+      external.info.travel_china = ["beijing", "xizang"];
+      disk = JSON.stringify({ pet: external });
+      state.watchers[0].emitChange();
+    });
+  } finally {
+    if (origStore === undefined) delete global.$Store;
+    else global.$Store = origStore;
+    pet.restore();
+    if (handle) handle.stop();
+  }
+  const hit = logs.error.find((m) => m.includes("校准 $Store 内存镜像失败"));
+  assert.ok(hit, "校准失败必须留日志");
+  assert.ok(hit.includes("flush boom") && hit.includes("at "), "必须打完整堆栈");
+  assert.equal(pet.writes.length, 1, "镜像失效失败不得吃掉本轮的外部改动同步");
+});
+
+test("deepEqual：键顺序无关，类型/长度/嵌套差异必须判为不等", () => {
+  assert.equal(deepEqual({ a: 1, b: 2 }, { b: 2, a: 1 }), true);
+  assert.equal(deepEqual(["a", "b"], ["a", "b"]), true);
+  assert.equal(deepEqual(["a", "b"], ["b", "a"]), false, "数组是有序的");
+  assert.equal(deepEqual({ a: 1 }, { a: 1, b: undefined }), false, "键数量不同即不等");
+  assert.equal(deepEqual([], {}), false, "数组与对象不等");
+  assert.equal(deepEqual(null, {}), false);
+  assert.equal(deepEqual({ a: { b: [1, { c: 2 }] } }, { a: { b: [1, { c: 2 }] } }), true);
+  assert.equal(deepEqual({ a: { b: [1, { c: 2 }] } }, { a: { b: [1, { c: 3 }] } }), false);
+  assert.equal(deepEqual(0, "0"), false, "必须是严格值比较，不能退化成 ==");
 });

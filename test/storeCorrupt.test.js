@@ -29,6 +29,10 @@ function withTempUserData(fn) {
   try {
     return fn(dir);
   } finally {
+    // store.js 现在带写防抖（src/ini/storeCache.js）：setItem 的落盘定时器刻意不 unref
+    // （见该文件注释：宁可多活 5s 也不丢存档）。测试收尾必须显式丢弃，否则定时器会在临时
+    // 目录删掉之后才触发，刷出一堆 ENOENT 并把测试进程多挂 5 秒。
+    if (global.$Store && global.$Store._cache) global.$Store._cache.reset();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -408,5 +412,71 @@ test("isolateBrokenConfig({backupOnly:true})：只复制副本，原文件既不
     const backups = corruptFiles(dir);
     assert.equal(backups.length, 1, "但仍须留一份可人工排查的副本");
     assert.equal(fs.readFileSync(path.join(dir, backups[0]), "utf8"), original);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * store.js ←→ storeCache.js 的接入回归
+ *
+ * src/ini/store.js 是压缩单行产物，内存镜像/写防抖的逻辑放在 src/ini/storeCache.js，
+ * 压缩行里只留 5 个接入点（constructor / getItem / setItem / removeItem / clear）。
+ * 任何一个接入点被改回"直通 electron-store"，性能修复就整体失效且没有任何报错 ——
+ * 所以这里用底层 get/set 的**精确调用次数**把接入点钉住。
+ * ------------------------------------------------------------------ */
+test("[接入回归] getItem 走内存镜像、setItem 走写防抖，而不是直通 electron-store", () => {
+  withTempUserData((dir) => {
+    const configFile = path.join(dir, CONFIG_NAME);
+    fs.writeFileSync(configFile, JSON.stringify({ pet: { info: { yb: 7 } } }));
+    const FakeStore = makeFakeStoreClass({ userData: dir });
+
+    captureConsole(() => {
+      const store = loadStore(dir, FakeStore);
+      // 在真实实例外面加计数器：统计到底穿到 electron-store 几次
+      const inner = store.ElectronStore;
+      const calls = { get: 0, set: 0 };
+      store.ElectronStore = {
+        get: (k) => (calls.get++, inner.get(k)),
+        set: (k, v) => (calls.set++, inner.set(k, v)),
+        delete: (k) => inner.delete(k),
+        clear: () => inner.clear(),
+      };
+
+      // 读：3 次 getItem 只允许 1 次全文件读
+      for (let i = 0; i < 3; i++) {
+        assert.deepEqual(store.getItem("pet"), { info: { yb: 7 } });
+      }
+      assert.equal(calls.get, 1, "getItem 必须经内存镜像，3 次读只该穿 1 次");
+
+      // 写：pet 是防抖键，setItem 之后磁盘还不该变
+      store.setItem("pet", { info: { yb: 8 } });
+      assert.equal(calls.set, 0, "setItem('pet') 必须进防抖窗口，不得立即落盘");
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(configFile, "utf8")).pet,
+        { info: { yb: 7 } },
+        "防抖窗口内磁盘必须还是旧值"
+      );
+      // 但内存里必须已是新值（getItem 立即可见，且仍不读盘）
+      assert.deepEqual(store.getItem("pet"), { info: { yb: 8 } });
+      assert.equal(calls.get, 1, "写过的键再读仍不该读盘");
+
+      // flush（退出前钩子走的就是这条）必须把数据真的写下去
+      assert.equal(store._cache.flush("接入回归"), true);
+      assert.equal(calls.set, 1, "flush 只允许落盘一次");
+      assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")).pet, { info: { yb: 8 } });
+
+      // 非防抖键写穿：立即落盘
+      store.setItem("sys", { bgm: true });
+      assert.equal(calls.set, 2, "非防抖键必须写穿，立即落盘");
+      assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")).sys, { bgm: true });
+
+      // removeItem 只清该键的镜像；clear 清空整份镜像
+      store.setItem("pet", { info: { yb: 9 } });
+      store.removeItem("pet");
+      assert.equal(store._cache.status().pending, 0, "removeItem 必须丢掉该键的待落盘写入");
+      store.setItem("pet", { info: { yb: 10 } });
+      store.clear();
+      assert.equal(store._cache.status().mirrored, 0, "clear 必须清空整份镜像");
+      assert.equal(store._cache.status().pending, 0, "clear 后不许把旧数据再写回去");
+    });
   });
 });

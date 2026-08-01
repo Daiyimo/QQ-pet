@@ -191,6 +191,44 @@ function resolveGiftIndex(payload, list) {
   return { ok: true, index };
 }
 
+/**
+ * 归一化 stateInfo 窗 stateInfo_bus-upData 的入参，产出可直接交给 setPetInfo 的 patch。
+ *
+ * 渲染层（popups/stateInfo/index.js）实际只会发两种 payload：
+ * - {type:"openPetFile"}            —— 打开宠物资料卡（main.js 的 openPetFile 分支，不走本函数）
+ * - {otherOptions:{sweetHeart:bool}} —— 开关甜心守护（doSweetHeart(true/false)）
+ * 因此这里只放行 otherOptions.sweetHeart 一个布尔字段，其余一律丢弃，
+ * 防止被注入的渲染层借 setPetInfo 全量改写宠物存档（yb/growth 等）。
+ *
+ * @param {unknown} data
+ * @returns {{patch:object, rejected:string[], hasChange:boolean}}
+ */
+function normalizeStateInfoUpdate(data) {
+  const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const patch = {};
+  const rejected = [];
+  for (const key of Object.keys(d)) {
+    if (key === "type") continue; // type 仅用于 openPetFile 分支判别，本身不写入存档
+    if (key !== "otherOptions") {
+      rejected.push(key);
+      continue;
+    }
+    const oo = d.otherOptions;
+    if (!oo || typeof oo !== "object" || Array.isArray(oo)) {
+      rejected.push("otherOptions:bad-type");
+      continue;
+    }
+    for (const k of Object.keys(oo)) {
+      if (k === "sweetHeart" && typeof oo[k] === "boolean") {
+        patch.otherOptions = { sweetHeart: oo[k] };
+      } else {
+        rejected.push("otherOptions." + k);
+      }
+    }
+  }
+  return { patch, rejected, hasChange: Object.keys(patch).length > 0 };
+}
+
 module.exports = {
   ALLOWED_NAV_PROTOCOLS,
   MAX_FISHES,
@@ -200,6 +238,7 @@ module.exports = {
   normalizePositiveNumber,
   normalizeFishes,
   normalizeFishingSave,
+  normalizeStateInfoUpdate,
   wantsPetInfo,
   pickActiveOptionKey,
   resolveGiftIndex,

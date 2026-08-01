@@ -20,12 +20,22 @@ const KEYFRAME_MIN_INTERVAL_MS = 30 * 1000; // 关键帧最小间隔
 const INTERACTION_COOLDOWN_MS = 30 * 1000; // 课程气泡冷却
 const EXIT_SAMPLES = 4; // 连续非 course 次数阈值
 const EXIT_GRACE_MS = 90 * 1000; // 且距首次非 course 时长阈值
+// 看门狗：activity 桥（aiWiring）只在 confidence≥0.6 且 observation 非空时发事件
+//（perception/loop.js 的门槛），屏幕持续模糊时 handleNonCourse 一次都不会被调到，
+// 自动会话会无限拖延。因此对自动会话加"无课程感知信号"超时兜底，
+// 不依赖任何感知事件也能让会话终结。
+const SILENCE_TIMEOUT_MS = 5 * 60 * 1000; // 连续无课程感知信号的超时时长
+const WATCHDOG_INTERVAL_MS = 30 * 1000; // 看门狗检查间隔
 const SUMMARY_LIMIT = 6000;
 const CHAT_TIMEOUT_MS = 120000;
 // 桌面导出目录（桌面/QQ-Courses）的课程数上限提示。依据：桌面是用户可见资产，
 // 删除不可逆，这里只在超限时告警提示用户自行清理，不代替用户删桌面文件。
 // 取 30 与本地会话上限（repo.MAX_SESSION_COUNT=20）留出余量，避免刚导出就刷告警。
 const MAX_EXPORTED_COURSES = 30;
+// state.summary_error 里保留的错误摘要长度上限。依据：providers.chat 的 HTTP 错误会把
+// 响应体截到 500 字符拼进 message，整段写进 state.json 会淹没其他字段、也会灌进导出稿；
+// 300 字符足够看清 "HTTP 429" / "缺少 API Key" 这类根因。
+const SUMMARY_ERROR_LIMIT = 300;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -47,6 +57,19 @@ function desktopPath() {
   return getElectronPath("desktop", path.join(os.homedir(), "Desktop"), "courses");
 }
 
+// 总结失败的日志分级：可预期的业务/环境错误（未配置 provider、缺 Key、HTTP 4xx 含 429、
+// 请求超时）只需 warn——用户改配置或稍后重试即可；其余（编程错误、磁盘/解析异常）
+// 属意外异常，必须 error + 完整堆栈。
+function isExpectedSummaryError(e) {
+  const message = String((e && e.message) || e || "");
+  return (
+    /配置 LLM 提供商/.test(message) ||
+    /缺少 API Key/.test(message) ||
+    /HTTP 4\d\d/.test(message) ||
+    /\btimeout\b/i.test(message)
+  );
+}
+
 function speakBubble(text) {
   if (typeof openSpeak !== "function") return;
   openSpeak({
@@ -56,9 +79,21 @@ function speakBubble(text) {
 }
 
 class CourseManager extends EventEmitter {
-  constructor({ repo } = {}) {
+  // opts.now / setInterval / clearInterval / desktopDir 仅测试注入
+  //（看门狗定时链 + 导出根目录，避免单测写进用户真实桌面），生产走全局/desktopPath()
+  constructor({
+    repo,
+    now,
+    setInterval: setIntervalFn,
+    clearInterval: clearIntervalFn,
+    desktopDir,
+  } = {}) {
     super();
     this.repo = repo || new CourseRepo();
+    this._desktopDir = desktopDir || null;
+    this._nowFn = now || (() => Date.now());
+    this._setIntervalFn = setIntervalFn || ((fn, ms) => setInterval(fn, ms));
+    this._clearIntervalFn = clearIntervalFn || ((t) => clearInterval(t));
     this.currentSession = null; // 当前录制中的 state 快照（含 manual 标记）
     this._lastTranscript = ""; // 上一轮全量转写（增量提取基准）
     this._lastNote = ""; // 上一条入库笔记（连续去重）
@@ -67,6 +102,8 @@ class CourseManager extends EventEmitter {
     this._keyframeRequestedAt = 0;
     this._nonCourseStreak = 0;
     this._nonCourseStartedAt = 0;
+    this._lastCourseSignalAt = 0; // 最近一次课程感知信号时间（看门狗基准）
+    this._watchdog = null; // 无课程信号看门狗定时器（仅自动会话）
   }
 
   // 开始录制；已有录制中的会话时直接复用（幂等）
@@ -83,14 +120,47 @@ class CourseManager extends EventEmitter {
     this._lastTranscript = "";
     this._lastNote = "";
     this._keyframeRequestedAt = 0;
+    this._lastCourseSignalAt = this._nowFn();
+    this._armWatchdog();
     this.emit("session-started", state);
     return state;
+  }
+
+  // ---- 无课程信号看门狗（仅自动会话）----
+  _armWatchdog() {
+    if (this._watchdog || !this.currentSession || this.currentSession.manual) return;
+    this._watchdog = this._setIntervalFn(() => this._checkSilence(), WATCHDOG_INTERVAL_MS);
+    if (this._watchdog && this._watchdog.unref) this._watchdog.unref();
+  }
+
+  _disarmWatchdog() {
+    if (!this._watchdog) return;
+    this._clearIntervalFn(this._watchdog);
+    this._watchdog = null;
+  }
+
+  _checkSilence() {
+    const session = this.currentSession;
+    if (!session || session.manual) {
+      this._disarmWatchdog();
+      return;
+    }
+    if (this._nowFn() - this._lastCourseSignalAt >= SILENCE_TIMEOUT_MS) {
+      console.warn(
+        `[courses] 超过 ${SILENCE_TIMEOUT_MS}ms 无课程感知信号，自动结束会话（看门狗兜底）`
+      );
+      // async 调用，异常（如 state.json 损坏）不能变成 unhandledRejection
+      this.finishSession().catch((e) => {
+        console.warn("[courses] 看门狗结束会话失败:", e?.message || e);
+      });
+    }
   }
 
   // 感知模块确认 course 场景后的入口（payload 为统一感知 JSON 的课程字段）
   handleCoursePerception(result = {}) {
     this._nonCourseStreak = 0;
     this._nonCourseStartedAt = 0;
+    this._lastCourseSignalAt = this._nowFn(); // 喂看门狗：课程信号活跃
 
     const note = transcript.cleanCourseNote(result.course_note);
     const validTranscript = transcript.cleanCourseTranscript(result.course_transcript);
@@ -103,6 +173,7 @@ class CourseManager extends EventEmitter {
         const zombie = this.repo.findRecordingSession();
         if (zombie) {
           this.currentSession = { ...zombie, manual: false };
+          this._armWatchdog();
           this.emit("session-started", zombie);
         } else {
           this.startSession({ title: String(result.course_title || "").trim() });
@@ -183,7 +254,9 @@ class CourseManager extends EventEmitter {
     });
   }
 
-  // 非 course 场景计数：连续 4 次且距首次 ≥90s 自动结束（仅自动会话）
+  // 非 course 场景计数：连续 4 次且距首次 ≥90s 自动结束（仅自动会话）。
+  // 注意本方法只在 activity 桥（aiWiring）被调，感知结果被 confidence/observation
+  // 门槛滤掉时永远不会走到这里——那种"完全无信号"的情形由看门狗（_checkSilence）兜底。
   handleNonCourse() {
     const session = this.currentSession;
     if (!session || session.manual) return;
@@ -201,13 +274,17 @@ class CourseManager extends EventEmitter {
     }
   }
 
-  // 结束会话：生成总结 → finalizing → 导出 Markdown → complete；失败 → failed（可重试）
+  // 结束会话：入口即把 status 置 finalizing（任何 await 之前）→ 生成终稿总结 →
+  // 导出 Markdown → complete；导出/落盘失败 → failed（可重试）。
+  // 总结失败不阻断导出，但会写 state.summary_error，使会话保持"可重试总结"。
   async finishSession(sessionId) {
     const session = this.currentSession;
     const id = sessionId || (session && session.id);
     if (!id) return null;
     if (session && session.id === id) {
+      // 这段必须留在任何 await 之前：否则看门狗会在总结期间反复触发 finishSession
       this.currentSession = null;
+      this._disarmWatchdog();
       this._nonCourseStreak = 0;
       this._nonCourseStartedAt = 0;
       this._lastInteraction = "";
@@ -217,17 +294,20 @@ class CourseManager extends EventEmitter {
     let state;
     try {
       state = this.repo.getState(id);
-      // 已完成的会话直接返回（幂等，避免重复导出）
-      if (state.status === "complete") return state;
-      // 录制中的会话先生成终稿总结（finalizing/failed 重试时跳过，沿用已有 summary）
-      if (state.status === "recording") {
-        await this._generateFinalSummary(id);
-        state = this.repo.getState(id);
-      }
-
+      // 已完成且总结齐备的会话直接返回（幂等，避免重复导出）；
+      // 但"总结失败的 complete 会话"必须放行重试，否则 complete 会永久掩盖缺失的总结
+      if (state.status === "complete" && !state.summary_error) return state;
+      // 需要（重）生成总结：录制中的新会话，或上次总结失败的会话。
+      // finalizing/failed 且无 summary_error 时是导出环节失败，沿用已有 summary 直接重导。
+      const needSummary = state.status === "recording" || !!state.summary_error;
+      // 关键：置 finalizing 必须发生在 _generateFinalSummary 之前。总结是串行 N 次 LLM
+      // 调用（每次上限 CHAT_TIMEOUT_MS），期间若 status 仍是 recording，
+      // repo.findRecordingSession() 会把正在结稿的会话再"收养"回去 → 新转写写进已总结的
+      // transcript.md（导出稿看不到），随后 appendTranscript 因状态断言全部抛错。
       state.status = "finalizing";
       state.error = null;
       this.repo.saveState(id, state);
+      if (needSummary) await this._generateFinalSummary(id);
     } catch (e) {
       // state.json 损坏/磁盘错误：不能变成调用方的 unhandledRejection，
       // 记日志并尽力把会话置为 failed（置失败本身也可能因磁盘问题再抛，兜底返回 null）
@@ -261,10 +341,20 @@ class CourseManager extends EventEmitter {
     }
   }
 
-  // 分块总结：单块直接终稿；多块逐块提取后拼接再终稿；截 6000 存 state.summary
+  // 分块总结：单块直接终稿；多块逐块提取后拼接再终稿；截 6000 存 state.summary。
+  // 失败时不抛错（不阻断导出），但一定留日志 + 写 state.summary_error（可诊断、可重试）。
   async _generateFinalSummary(id) {
     const text = this.repo.readTranscript(id).trim();
-    if (!text) return;
+    if (!text) {
+      // 无转写 = 没有可总结的内容，不算"总结缺失"；顺手清掉历史失败标记，
+      // 免得这类会话被 recoverable() 永久判为待重试
+      const empty = this.repo.getState(id);
+      if (empty.summary_error) {
+        empty.summary_error = null;
+        this.repo.saveState(id, empty);
+      }
+      return;
+    }
     try {
       const chunks = transcript.splitTranscript(text);
       let source;
@@ -291,10 +381,40 @@ class CourseManager extends EventEmitter {
       }
       const state = this.repo.getState(id);
       state.summary = summary.slice(0, SUMMARY_LIMIT);
+      state.summary_error = null; // 重试成功后必须清掉失败标记
       this.repo.saveState(id, state);
     } catch (e) {
-      // 总结失败不阻断导出，仅上报（jarvis 同样只发 course.summary.failed 事件）
-      this.emit("summary-failed", { id, error: e.message || String(e) });
+      // 总结失败不阻断导出，但绝不能静默：summary-failed 事件目前没有监听者，
+      // 只发事件等于失败消失（导出稿缺"课程总结"小节、state 却是 complete）。
+      const message = (e && e.message) || String(e);
+      if (isExpectedSummaryError(e)) {
+        console.warn(
+          `[courses/manager] 生成课程总结失败（会话 ${id}），本次导出无总结小节、可稍后重试:`,
+          message
+        );
+      } else {
+        console.error(
+          `[courses/manager] 生成课程总结时发生意外异常（会话 ${id}），` +
+            "本次导出无总结小节、可稍后重试:",
+          (e && e.stack) || e
+        );
+      }
+      // 把失败事实落进 state：导出稿据此写明"总结生成失败"，
+      // repo.recoverable() 据此把 complete 会话也列为可重试
+      try {
+        const state = this.repo.getState(id);
+        state.summary_error = `${(e && e.name) || "Error"}: ${message}`.slice(
+          0,
+          SUMMARY_ERROR_LIMIT
+        );
+        this.repo.saveState(id, state);
+      } catch (e2) {
+        console.error(
+          `[courses/manager] 记录会话 ${id} 的总结失败标记时出错（该会话将无法被识别为待重试）:`,
+          (e2 && e2.stack) || e2
+        );
+      }
+      this.emit("summary-failed", { id, error: message });
     }
   }
 
@@ -330,8 +450,19 @@ class CourseManager extends EventEmitter {
     ];
     if (state.summary) {
       lines.push("## 课程总结", "", state.summary, "");
+    } else if (state.summary_error) {
+      // 总结缺失必须写进导出稿：只省掉小节的话，用户看到的是一份"没有总结的完整课程"，
+      // 完全无从知道少了什么、更不知道可以重试
+      lines.push(
+        "## 课程总结",
+        "",
+        `> 总结生成失败：${state.summary_error}`,
+        ">",
+        "> 原始转写仍保存在本地课程会话目录，修好上述原因后可重新生成总结。",
+        ""
+      );
     }
-    const outDir = path.join(desktopPath(), "QQ-Courses", state.id);
+    const outDir = path.join(this._desktopPath(), "QQ-Courses", state.id);
     const assetDir = path.join(outDir, "images");
     fs.mkdirSync(assetDir, { recursive: true });
     if (state.keyframes && state.keyframes.length) {
@@ -353,8 +484,13 @@ class CourseManager extends EventEmitter {
     }
     const destination = path.join(outDir, "README.md");
     atomicWrite(destination, lines.join("\n").replace(/\s+$/, "") + "\n");
-    this._warnIfExportOverflow(path.join(desktopPath(), "QQ-Courses"));
+    this._warnIfExportOverflow(path.join(this._desktopPath(), "QQ-Courses"));
     return destination;
+  }
+
+  // 导出根目录：生产走 desktopPath()，测试可注入 desktopDir 避免写进真实桌面
+  _desktopPath() {
+    return this._desktopDir || desktopPath();
   }
 
   // 桌面导出目录只做上限告知：超过 MAX_EXPORTED_COURSES 就提示用户清理。

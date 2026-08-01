@@ -115,6 +115,9 @@ class CourseRepo {
       created_at: now,
       updated_at: now,
       summary: "",
+      // 终稿总结失败的原因摘要（manager._generateFinalSummary 写入）。非空表示
+      // "总结缺失"：导出稿会写明失败，recoverable() 也会把该会话列为待重试。
+      summary_error: null,
       keyframes: [], // [{filename, timestamp_ms, metadata:{note}}]
       error: null,
       output_path: null,
@@ -312,16 +315,24 @@ class CourseRepo {
     return out;
   }
 
-  // 最近一个仍在录制中的会话（对应 jarvis recording[-1]）
+  // 最近一个仍在录制中的会话（对应 jarvis recording[-1]）。
+  // 只认 recording：manager.finishSession 在任何 await 之前就把会话置为 finalizing，
+  // 因此"正在结稿（总结耗时可达数分钟）"的会话不会在这里被再次收养——
+  // 否则新转写会写进已被总结的 transcript.md，且随后 appendTranscript 全部抛错。
   findRecordingSession() {
     const recording = this.listSessions().filter((s) => s.status === "recording");
     return recording.length ? recording[recording.length - 1] : null;
   }
 
-  // 可恢复会话：finalizing/failed 状态可重试 finalize
+  // 可恢复会话：finalizing/failed 状态可重试 finalize；
+  // complete 但 summary_error 非空的会话也算——总结缺失时 complete 不该掩盖失败，
+  // 对它再调一次 finishSession(id) 即会重跑总结并重新导出。
   recoverable() {
     return this.listSessions().filter(
-      (s) => s.status === "finalizing" || s.status === "failed"
+      (s) =>
+        s.status === "finalizing" ||
+        s.status === "failed" ||
+        (s.status === "complete" && !!s.summary_error)
     );
   }
 }

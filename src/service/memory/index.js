@@ -7,12 +7,14 @@
 const _require = eval("require");
 const { MemoryStore, localDayString } = _require("./store.js");
 const { MemoryActivityRecorder } = _require("./activity.js");
-const { DailyMemoryService } = _require("./daily.js");
+const { DailyMemoryService, dedupeByKey } = _require("./daily.js");
 const imageGen = _require("./imageGen.js");
 
 const store = new MemoryStore();
 const recorder = new MemoryActivityRecorder({ store });
 const dailyService = new DailyMemoryService({ store });
+// key = "YYYY-MM-DD" → 该天正在进行的配图生成 Promise（去重语义见 daily.js 的 dedupeByKey）
+const imageInflight = new Map();
 
 const memoryService = {
   store,
@@ -38,7 +40,9 @@ const memoryService = {
     return this.recordActivity(payload);
   },
 
-  // 生成并落盘某一天（"YYYY-MM-DD"，缺省今天）的记忆 Markdown
+  // 生成并落盘某一天（"YYYY-MM-DD"，缺省今天）的记忆 Markdown。
+  // 同一天的并发调用在 DailyMemoryService.generateDaily 内已按天去重（in-flight Promise），
+  // 菜单/设置页连点两次只会发一次 LLM 请求，两个调用方拿到同一个结果。
   generateDaily(day) {
     return dailyService.generateDaily(day || localDayString(new Date()));
   },
@@ -47,13 +51,18 @@ const memoryService = {
   // opts.signal（AbortSignal）：可选，功能关闭/会话结束时掐断在途生成请求。
   // 已知边界：目前唯一生产调用方（设置页 genDailyImage 菜单，setup/main.js）是手动触发、
   // 未传 signal；在途生成靠 imageGen 内部的 300s 超时兜底，收益不足以在压缩代码里接线。
+  // 同一天并发调用复用同一个 in-flight Promise（图像生成既慢又计费，重复跑纯浪费）；
+  // 复用时沿用首个调用方的 signal——后到的调用方 abort 不会掐断已在途的那次。
   generateDailyImage(day, opts = {}) {
-    return imageGen.generateDailyImage({
-      store,
-      dailyService,
-      day: day || localDayString(new Date()),
-      signal: opts.signal,
-    });
+    const target = day || localDayString(new Date());
+    return dedupeByKey(imageInflight, target, () =>
+      imageGen.generateDailyImage({
+        store,
+        dailyService,
+        day: target,
+        signal: opts.signal,
+      })
+    );
   },
 };
 

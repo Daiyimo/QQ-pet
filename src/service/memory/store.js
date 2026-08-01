@@ -21,6 +21,17 @@ const EVENTS_ROTATE_KEEP = 2;
 // JSONL 行分隔符字节（按字节切行，避免多字节字符在增量读边界被截断）
 const NEWLINE_BYTE = 0x0a;
 
+// —— 磁盘增长边界：日记配图裁剪 ——
+// 每点一次"生成今日记忆图"就新增一张图 + 一个 .json，此前全库无任何裁剪，
+// 单图上限 25 MiB（imageGen.MAX_IMAGE_BYTES）→ 点 20 次最坏 500 MiB 无上界。
+// 单天保留张数。依据：同一天重复生成基本是"对首图不满意再来一张"的重试，保留最近 3 张
+// 足够用户比较取舍；更早的重试图没有回看价值（当天正文已固化在 daily/<day>.md）。
+const DAILY_IMAGES_KEEP_PER_DAY = 3;
+// daily-images/ 全库字节上限（含 .json 元数据）。依据：单图硬上限 25 MiB，1536x1024
+// 的实际产物约 2–3 MiB；200 MiB ≈ 8 张最坏体积 / ≈70 张典型体积（每天 1 张可存两个多月），
+// 与课程录制的 ≈520 MiB 同一量级但更保守，配图是可再生成的衍生物，删旧的代价低。
+const DAILY_IMAGES_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
+
 // 记忆根目录：Electron 下取 userData/memory；普通 node（单测）退到 cwd/memory。
 // 可用性判定与降级日志统一走 electronPaths（原内联实现漏了"require 成功但 app 为
 // undefined"这条静默降级，见该模块注释）。
@@ -95,13 +106,22 @@ function atomicWriteJson(filePath, value) {
 }
 
 class MemoryStore {
-  // options.eventsMaxBytes / options.eventsRotateKeep 仅用于注入测试用的小阈值，
-  // 生产不传，走 EVENTS_MAX_BYTES / EVENTS_ROTATE_KEEP 常量
+  // options.eventsMaxBytes / options.eventsRotateKeep / options.dailyImagesKeepPerDay /
+  // options.dailyImagesMaxTotalBytes 仅用于注入测试用的小阈值，生产不传，
+  // 走 EVENTS_MAX_BYTES / EVENTS_ROTATE_KEEP / DAILY_IMAGES_* 常量
   constructor(root, options = {}) {
     this.root = root || defaultMemoryRoot();
     this.eventsMaxBytes = options.eventsMaxBytes > 0 ? options.eventsMaxBytes : EVENTS_MAX_BYTES;
     this.eventsRotateKeep =
       options.eventsRotateKeep > 0 ? options.eventsRotateKeep : EVENTS_ROTATE_KEEP;
+    this.dailyImagesKeepPerDay =
+      options.dailyImagesKeepPerDay > 0
+        ? options.dailyImagesKeepPerDay
+        : DAILY_IMAGES_KEEP_PER_DAY;
+    this.dailyImagesMaxTotalBytes =
+      options.dailyImagesMaxTotalBytes > 0
+        ? options.dailyImagesMaxTotalBytes
+        : DAILY_IMAGES_MAX_TOTAL_BYTES;
     this.eventsPath = path.join(this.root, "events.jsonl");
     this.summaryPath = path.join(this.root, "summary.json");
     this.factsPath = path.join(this.root, "facts.json");
@@ -327,15 +347,47 @@ class MemoryStore {
     }
     if (fs.existsSync(this.dailyImagesRoot)) {
       for (const name of fs.readdirSync(this.dailyImagesRoot)) {
-        if (
-          isValidDay(name) &&
-          fs.statSync(path.join(this.dailyImagesRoot, name)).isDirectory()
-        ) {
-          days.add(name);
+        if (!isValidDay(name)) continue;
+        try {
+          if (!fs.statSync(path.join(this.dailyImagesRoot, name)).isDirectory()) continue;
+        } catch (e) {
+          // 目录在扫描间隙被删 / 无权限：该天配图不计入，但不能让整份记忆列表崩掉
+          console.warn(
+            `[memory/store] daily-images/${name} 状态读取失败，该天配图未计入:`,
+            e && e.message ? e.message : e
+          );
+          continue;
         }
+        days.add(name);
+        this._warnOrphanDailyImages(name);
       }
     }
     return [...days].sort().reverse();
+  }
+
+  // 孤儿配图（有图无 .json）扫描：容忍——该天照常计入记忆天，只告警。
+  // 元数据写入失败已在 writeDailyImage 里回滚删图，孤儿只可能来自写入中途断电等极端情况，
+  // 且后续 _pruneDailyImages 会把它当普通条目回收。
+  _warnOrphanDailyImages(day) {
+    let names;
+    try {
+      names = fs.readdirSync(path.join(this.dailyImagesRoot, day));
+    } catch (e) {
+      console.warn(
+        `[memory/store] 读取 daily-images/${day} 失败，孤儿配图检查跳过:`,
+        e && e.message ? e.message : e
+      );
+      return [];
+    }
+    const metas = new Set(names.filter((n) => n.endsWith(".json")));
+    const orphans = names.filter((n) => !n.endsWith(".json") && !metas.has(n + ".json"));
+    if (orphans.length) {
+      console.warn(
+        `[memory/store] daily-images/${day} 有 ${orphans.length} 张缺少 .json 元数据的孤儿配图，` +
+          `已按无元数据容忍: ${orphans.join(", ")}`
+      );
+    }
+    return orphans;
   }
 
   dailyPath(day) {
@@ -354,7 +406,11 @@ class MemoryStore {
     return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null;
   }
 
-  // 日程信息图落盘：daily-images/<day>/<filename> + 同名 .json 元数据（均原子写）
+  // 日程信息图落盘：daily-images/<day>/<filename> + 同名 .json 元数据（均原子写）。
+  // 顺序为"先图片后元数据"，元数据失败则回滚删除刚写的图片（要么都在要么都不留）：
+  // 反过来（先元数据）失败时若删不掉元数据，会留下指向不存在图片的悬空记录，
+  // 比留一个无人引用的图片文件更糟（后者只是占字节，且会被 _pruneDailyImages 回收）。
+  // 写成功后按上限裁剪磁盘（见 _pruneDailyImages）。
   writeDailyImage(day, filename, content, metadata) {
     if (!isValidDay(day)) throw new Error(`invalid day: ${day}`);
     if (!/^[A-Za-z0-9_.-]+$/.test(filename) || filename.includes("..")) {
@@ -362,8 +418,193 @@ class MemoryStore {
     }
     const imagePath = path.join(this.dailyImagesRoot, day, filename);
     atomicWriteBuffer(imagePath, content);
-    atomicWriteJson(imagePath + ".json", { ...metadata });
+    try {
+      atomicWriteJson(imagePath + ".json", { ...metadata });
+    } catch (e) {
+      console.error(
+        `[memory/store] 日记配图元数据写入失败，已回滚删除刚写入的图片 ${day}/${filename}:`,
+        e && e.stack ? e.stack : e
+      );
+      try {
+        fs.rmSync(imagePath, { force: true });
+      } catch (e2) {
+        // 回滚删除也失败：只剩一个孤儿图片（memoryDays 会容忍并告警，裁剪会回收），
+        // 原始的元数据写入错误照常抛给调用方
+        console.warn(
+          `[memory/store] 回滚删除图片 ${day}/${filename} 失败，将残留孤儿图片:`,
+          e2 && e2.message ? e2.message : e2
+        );
+      }
+      throw e;
+    }
+    try {
+      this._pruneDailyImages(day, filename);
+    } catch (e) {
+      // 裁剪只是磁盘回收，意外失败不能改变"配图已成功落盘"这个主流程结果
+      console.error(
+        "[memory/store] 日记配图裁剪意外失败，本次未回收磁盘（下次生成时重试）:",
+        e && e.stack ? e.stack : e
+      );
+    }
     return imagePath;
+  }
+
+  // 文件字节数；不存在按 0 计（孤儿图片没有 .json 属正常情况，不刷日志）
+  _fileBytes(filePath) {
+    try {
+      return fs.statSync(filePath).size;
+    } catch (e) {
+      if (!e || e.code !== "ENOENT") {
+        console.warn(
+          `[memory/store] 读取 ${path.basename(filePath)} 大小失败，按 0 字节计入配图裁剪:`,
+          e && e.message ? e.message : e
+        );
+      }
+      return 0;
+    }
+  }
+
+  // 列举 daily-images/ 下所有配图条目：{day, filename, imagePath, metaPath, sortKey, bytes}。
+  // sortKey 优先取 .json 的 created_at（落盘时的 UTC ISO），元数据缺失/损坏（孤儿图片）时
+  // 退到文件名的 UTC 时间戳前缀；两者都归一为纯数字串，可直接按字符串升序比较。
+  // bytes 同时计入图片与 .json，使字节上限就是该目录真实的磁盘上界。
+  _listDailyImages() {
+    const entries = [];
+    let dayNames;
+    try {
+      dayNames = fs.readdirSync(this.dailyImagesRoot);
+    } catch (e) {
+      if (!e || e.code !== "ENOENT") {
+        // 目录还不存在属正常（尚未生成过配图）；其余错误不能静默，本次跳过裁剪
+        console.error(
+          "[memory/store] 列举 daily-images 失败，本次跳过配图裁剪:",
+          e && e.stack ? e.stack : e
+        );
+      }
+      return entries;
+    }
+    for (const day of dayNames) {
+      if (!isValidDay(day)) continue;
+      const dayDir = path.join(this.dailyImagesRoot, day);
+      let names;
+      try {
+        if (!fs.statSync(dayDir).isDirectory()) continue;
+        names = fs.readdirSync(dayDir);
+      } catch (e) {
+        console.error(
+          `[memory/store] 读取 daily-images/${day} 失败，该天配图本次不参与裁剪:`,
+          e && e.stack ? e.stack : e
+        );
+        continue;
+      }
+      for (const filename of names) {
+        if (filename.endsWith(".json")) continue;
+        const imagePath = path.join(dayDir, filename);
+        const metaPath = imagePath + ".json";
+        let createdAt = "";
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+          createdAt = meta && meta.created_at ? String(meta.created_at) : "";
+        } catch (e) {
+          // 元数据缺失（孤儿）或损坏：不阻断裁剪，按文件名时间戳排序并告警
+          console.warn(
+            `[memory/store] daily-images/${day}/${filename} 的 .json 元数据不可用，` +
+              "裁剪改按文件名时间戳排序:",
+            e && e.message ? e.message : e
+          );
+        }
+        entries.push({
+          day,
+          filename,
+          imagePath,
+          metaPath,
+          // 文件名形如 <UTC时间戳>-<uuid8>.<ext>，只取第一段避免 uuid 里的数字混入排序键
+          sortKey: String(createdAt || filename.split("-")[0]).replace(/\D/g, ""),
+          bytes: this._fileBytes(imagePath) + this._fileBytes(metaPath),
+        });
+      }
+    }
+    return entries;
+  }
+
+  // daily-images 裁剪：① 每天只留最近 dailyImagesKeepPerDay 张；② 全库字节降到
+  // dailyImagesMaxTotalBytes 以内，从最旧往新删。keepDay/keepFilename（本次刚写入的那张）
+  // 永不删，因此单天最多短暂多留一张、总量最多为上限或"仅剩这一张"。
+  // 模式与 courses/repo.js 的 _pruneOldSessions 一致：created_at 升序删最旧、跳过正在使用的、
+  // 单个删除失败只记日志并继续、最终仍超限只 warn 不强删。返回删除的配图张数。
+  _pruneDailyImages(keepDay, keepFilename) {
+    const entries = this._listDailyImages();
+    if (!entries.length) return 0;
+    const isKeep = (e) => e.day === keepDay && e.filename === keepFilename;
+    const oldestFirst = (a, b) =>
+      a.sortKey.localeCompare(b.sortKey) || a.filename.localeCompare(b.filename);
+
+    const doomed = new Set();
+    // ① 单天张数上限
+    const perDay = new Map();
+    for (const e of entries) {
+      const list = perDay.get(e.day);
+      if (list) list.push(e);
+      else perDay.set(e.day, [e]);
+    }
+    for (const [, list] of perDay) {
+      if (list.length <= this.dailyImagesKeepPerDay) continue;
+      const sorted = [...list].sort(oldestFirst);
+      for (const e of sorted.slice(0, sorted.length - this.dailyImagesKeepPerDay)) {
+        if (!isKeep(e)) doomed.add(e);
+      }
+    }
+    // ② 全库字节上限（①已判死的不计入总量，它们即将被删）
+    const remaining = entries.filter((e) => !doomed.has(e)).sort(oldestFirst);
+    let total = remaining.reduce((sum, e) => sum + e.bytes, 0);
+    for (const e of remaining) {
+      if (total <= this.dailyImagesMaxTotalBytes) break;
+      if (isKeep(e)) continue;
+      doomed.add(e);
+      total -= e.bytes;
+    }
+    if (total > this.dailyImagesMaxTotalBytes) {
+      console.warn(
+        `[memory/store] daily-images 仍超过 ${this.dailyImagesMaxTotalBytes} 字节上限` +
+          "（可删的都已清理，本次刚生成的配图不强删）"
+      );
+    }
+
+    let removed = 0;
+    const touchedDays = new Set();
+    for (const e of doomed) {
+      try {
+        fs.rmSync(e.imagePath, { force: true });
+        fs.rmSync(e.metaPath, { force: true });
+        removed += 1;
+        touchedDays.add(e.day);
+        console.warn(
+          `[memory/store] daily-images 超出上限（每天 ${this.dailyImagesKeepPerDay} 张 / ` +
+            `全库 ${this.dailyImagesMaxTotalBytes} 字节），已清理最旧配图 ${e.day}/${e.filename}`
+        );
+      } catch (err) {
+        // 单张删不掉（占用/权限）不影响继续清理下一张，但必须留完整堆栈
+        console.error(
+          `[memory/store] 清理配图 ${e.day}/${e.filename} 失败，本次跳过（下次生成时重试）:`,
+          err && err.stack ? err.stack : err
+        );
+      }
+    }
+    for (const day of touchedDays) this._removeDailyImageDirIfEmpty(day);
+    return removed;
+  }
+
+  // 裁剪后清掉空的天目录，避免 memoryDays 继续把没有任何配图的天算作"有记忆的天"
+  _removeDailyImageDirIfEmpty(day) {
+    const dayDir = path.join(this.dailyImagesRoot, day);
+    try {
+      if (fs.readdirSync(dayDir).length === 0) fs.rmdirSync(dayDir);
+    } catch (e) {
+      console.warn(
+        `[memory/store] 清理空目录 daily-images/${day} 失败，已忽略:`,
+        e && e.message ? e.message : e
+      );
+    }
   }
 
   // 滚动总结（summary.json）：{text, through_event_id, updated_at}
@@ -404,4 +645,6 @@ module.exports = {
   isValidDay,
   EVENTS_MAX_BYTES,
   EVENTS_ROTATE_KEEP,
+  DAILY_IMAGES_KEEP_PER_DAY,
+  DAILY_IMAGES_MAX_TOTAL_BYTES,
 };

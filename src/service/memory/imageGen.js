@@ -158,15 +158,45 @@ function postBuffer(urlStr, headers, body, timeoutMs, maxBytes, signal) {
 // signal（AbortSignal）：掐断在途下载；重定向的每一跳都会继承同一个 signal。
 const MAX_REDIRECTS = 5;
 
-function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0, signal) {
+// 下载地址门禁（SSRF 面）：这个 URL 是**图像服务商响应里给的**，不是我方配置的，
+// 可以指向内网/本机。规则：
+//   ① 只允许 http/https；
+//   ② https 上游不得降级到 http（无论目标是不是回环）——降级重定向没有正当用途；
+//   ③ http:// 只放行回环地址，保证本地服务商（Ollama / LM Studio 等）返回
+//      http://127.0.0.1/... 的图片地址仍可下载，同时挡住 http://内网主机。
+// 回环判定复用 llm/providers.js 的 isLoopbackHost（与 buildEndpoint 同一实现，
+// 全仓只此一份，不产生第三份拷贝）。
+// fromProtocol：上一跳（首个 URL 时为 endpoint）的协议，用于判定②；未提供则跳过②。
+// 返回拒绝原因字符串，通过则返回 null。**每一跳都调用**（见 downloadBuffer 递归）。
+function downloadUrlDenialReason(u, fromProtocol) {
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    return "image API returned an unsupported image URL";
+  }
+  if (u.protocol === "http:" && fromProtocol === "https:") {
+    return (
+      "generated image download refused: https to http downgrade is not allowed " +
+      `(got http://${u.hostname})`
+    );
+  }
+  if (u.protocol === "http:" && !_require("../llm/providers.js").isLoopbackHost(u.hostname)) {
+    return (
+      "generated image download refused: plain http:// image URL is only allowed for " +
+      `loopback hosts (127.x.x.x / localhost / [::1]), got ${u.hostname}`
+    );
+  }
+  return null;
+}
+
+function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0, signal, fromProtocol) {
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
       reject(new Error("generated image download aborted"));
       return;
     }
     const u = new URL(urlStr);
-    if (u.protocol !== "http:" && u.protocol !== "https:") {
-      reject(new Error("image API returned an unsupported image URL"));
+    const denied = downloadUrlDenialReason(u, fromProtocol);
+    if (denied) {
+      reject(new Error(denied));
       return;
     }
     const mod = u.protocol === "http:" ? http : https;
@@ -197,7 +227,9 @@ function downloadBuffer(urlStr, timeoutMs, maxBytes, depth = 0, signal) {
             timeoutMs,
             maxBytes,
             depth + 1,
-            signal
+            signal,
+            // 本跳的协议作为下一跳的 fromProtocol：门禁在递归入口重新执行，逐跳复查
+            u.protocol
           )
         );
         return;
@@ -318,7 +350,16 @@ class ImageGenerationClient {
     }
     let { image, url } = responseImage(payload);
     if (!image && url) {
-      image = await downloadBuffer(url, timeout, MAX_IMAGE_BYTES, 0, signal);
+      // 传入 endpoint 的协议作为首跳的 fromProtocol：https 服务商返回 http 图片地址
+      // 一律拒绝（配置错误或指向内网），http 回环服务商返回 http 回环地址仍可下载
+      image = await downloadBuffer(
+        url,
+        timeout,
+        MAX_IMAGE_BYTES,
+        0,
+        signal,
+        new URL(endpoint).protocol
+      );
     }
     if (!image || !image.length) throw new Error("image API response contains no image");
     if (image.length > MAX_IMAGE_BYTES) throw new Error("generated image exceeds 25 MB");
@@ -427,5 +468,6 @@ module.exports = {
   imageExtension,
   buildMultipart,
   buildEndpoint,
+  downloadUrlDenialReason,
   MAX_IMAGE_BYTES,
 };

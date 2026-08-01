@@ -11,6 +11,8 @@ const {
   localDayString,
   EVENTS_MAX_BYTES,
   EVENTS_ROTATE_KEEP,
+  DAILY_IMAGES_KEEP_PER_DAY,
+  DAILY_IMAGES_MAX_TOTAL_BYTES,
 } = require("../src/service/memory/store.js");
 
 // 临时根目录 + 用后即删（不污染 cwd/memory 与真实 userData）
@@ -358,5 +360,214 @@ test("appendEvent：合法 timestamp 不受影响，无 warn", () => {
     });
     assert.deepEqual(logs.warn, []);
     assert.deepEqual(logs.error, []);
+  });
+});
+
+// —— 日记配图（daily-images/）磁盘上界与写入原子性 ——
+
+// 按 exportImagesMeta 的真实命名规则造配图文件名：<UTC时间戳>-<uuid8>.<ext>
+function imageName(stamp, tag) {
+  return `${stamp}-${tag}.png`;
+}
+
+// 写一张配图（content 长度可控，便于验证字节上界）
+function writeImage(store, day, stamp, tag, bytes = 64) {
+  const filename = imageName(stamp, tag);
+  store.writeDailyImage(day, filename, Buffer.alloc(bytes, 7), {
+    id: filename,
+    date: day,
+    filename,
+    created_at: `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(
+      9,
+      11
+    )}:${stamp.slice(11, 13)}:${stamp.slice(13, 15)}.000Z`,
+    model_name: "image-model",
+  });
+  return filename;
+}
+
+function listImages(store, day) {
+  return fs
+    .readdirSync(path.join(store.dailyImagesRoot, day))
+    .filter((n) => !n.endsWith(".json"))
+    .sort();
+}
+
+test("daily-images 上界常量为命名常量且量级合理", () => {
+  assert.equal(DAILY_IMAGES_KEEP_PER_DAY, 3);
+  assert.equal(DAILY_IMAGES_MAX_TOTAL_BYTES, 200 * 1024 * 1024);
+});
+
+test("writeDailyImage：单天配图超出保留张数时删掉最旧的，元数据一并删除", () => {
+  withTempRoot((root) => {
+    const store = new MemoryStore(root, { dailyImagesKeepPerDay: 2 });
+    const day = "2025-06-10";
+    const logs = captureConsole(() => {
+      writeImage(store, day, "20250610T090000", "aaaaaaaa");
+      writeImage(store, day, "20250610T100000", "bbbbbbbb");
+      writeImage(store, day, "20250610T110000", "cccccccc");
+      writeImage(store, day, "20250610T120000", "dddddddd");
+    });
+    assert.deepEqual(
+      listImages(store, day),
+      [imageName("20250610T110000", "cccccccc"), imageName("20250610T120000", "dddddddd")],
+      "应只留最近 2 张，删掉的是最旧的两张"
+    );
+    assert.equal(
+      fs.existsSync(path.join(store.dailyImagesRoot, day, imageName("20250610T090000", "aaaaaaaa") + ".json")),
+      false,
+      "被清理配图的 .json 元数据必须一起删掉，不留孤儿元数据"
+    );
+    assert.equal(
+      logs.warn.filter((m) => m.includes("已清理最旧配图")).length,
+      2,
+      "两次清理各留一条告警"
+    );
+  });
+});
+
+test("writeDailyImage：全库字节超出上限时从最旧往新删，删到上限以内", () => {
+  withTempRoot((root) => {
+    // 每张 1000 字节图 + 约 200 字节 .json；上限 4000 字节 → 稳定容纳 3 张、放不下 4 张
+    const store = new MemoryStore(root, {
+      dailyImagesKeepPerDay: 100,
+      dailyImagesMaxTotalBytes: 4000,
+    });
+    captureConsole(() => {
+      writeImage(store, "2025-06-01", "20250601T090000", "aaaaaaaa", 1000);
+      writeImage(store, "2025-06-02", "20250602T090000", "bbbbbbbb", 1000);
+      writeImage(store, "2025-06-03", "20250603T090000", "cccccccc", 1000);
+      writeImage(store, "2025-06-04", "20250604T090000", "dddddddd", 1000);
+    });
+    // 最旧的那天已被整体清理（空目录也被收回）
+    assert.equal(fs.existsSync(path.join(store.dailyImagesRoot, "2025-06-01")), false);
+    assert.deepEqual(listImages(store, "2025-06-04"), [imageName("20250604T090000", "dddddddd")]);
+    let total = 0;
+    for (const day of fs.readdirSync(store.dailyImagesRoot)) {
+      for (const name of fs.readdirSync(path.join(store.dailyImagesRoot, day))) {
+        total += fs.statSync(path.join(store.dailyImagesRoot, day, name)).size;
+      }
+    }
+    assert.ok(total <= 4000, `全库字节必须压在上限内，实际 ${total}`);
+  });
+});
+
+test("writeDailyImage：本次刚生成的配图即使超上限也不被误删", () => {
+  withTempRoot((root) => {
+    // 上限故意小于一张图，逼出"只剩刚生成那张"的边界
+    const store = new MemoryStore(root, { dailyImagesMaxTotalBytes: 100 });
+    const day = "2025-06-10";
+    let filename;
+    const logs = captureConsole(() => {
+      filename = writeImage(store, day, "20250610T090000", "aaaaaaaa", 500);
+    });
+    assert.deepEqual(listImages(store, day), [filename], "刚生成的配图必须还在");
+    assert.equal(
+      fs.existsSync(path.join(store.dailyImagesRoot, day, filename + ".json")),
+      true
+    );
+    assert.ok(
+      logs.warn.some((m) => m.includes("仍超过")),
+      "无法降到上限内必须告警"
+    );
+  });
+});
+
+test("writeDailyImage：单张配图删不掉时只记 error 并继续清理其余，主流程照常返回", () => {
+  withTempRoot((root) => {
+    const store = new MemoryStore(root, { dailyImagesKeepPerDay: 1 });
+    const day = "2025-06-10";
+    // 用目录冒充最旧的一张配图：fs.rmSync 不带 recursive 删目录会抛错，模拟删除失败
+    const stuck = imageName("20250610T080000", "stuckdir");
+    fs.mkdirSync(path.join(store.dailyImagesRoot, day, stuck), { recursive: true });
+    fs.writeFileSync(path.join(store.dailyImagesRoot, day, stuck, "占位.bin"), "x");
+    fs.writeFileSync(
+      path.join(store.dailyImagesRoot, day, stuck + ".json"),
+      JSON.stringify({ created_at: "2025-06-10T08:00:00.000Z" })
+    );
+    const deletable = imageName("20250610T090000", "aaaaaaaa");
+    fs.writeFileSync(path.join(store.dailyImagesRoot, day, deletable), Buffer.alloc(64, 1));
+    fs.writeFileSync(
+      path.join(store.dailyImagesRoot, day, deletable + ".json"),
+      JSON.stringify({ created_at: "2025-06-10T09:00:00.000Z" })
+    );
+
+    let newest;
+    let returned;
+    const logs = captureConsole(() => {
+      newest = imageName("20250610T100000", "bbbbbbbb");
+      returned = store.writeDailyImage(day, newest, Buffer.alloc(64, 2), {
+        created_at: "2025-06-10T10:00:00.000Z",
+      });
+    });
+    assert.equal(returned, path.join(store.dailyImagesRoot, day, newest));
+    assert.equal(fs.existsSync(returned), true, "主流程不能被裁剪失败带崩");
+    assert.equal(
+      fs.existsSync(path.join(store.dailyImagesRoot, day, deletable)),
+      false,
+      "一张删不掉不能影响继续清理下一张"
+    );
+    assert.equal(fs.existsSync(path.join(store.dailyImagesRoot, day, stuck)), true);
+    assert.equal(
+      logs.error.filter((m) => m.includes("清理配图") && m.includes("失败")).length,
+      1,
+      "删除失败必须记一条 error（含堆栈）"
+    );
+  });
+});
+
+test("writeDailyImage：元数据写入失败时回滚删除刚写的图片，不留孤儿", () => {
+  withTempRoot((root) => {
+    const store = new MemoryStore(root);
+    const day = "2025-06-10";
+    const filename = imageName("20250610T090000", "aaaaaaaa");
+    // 用非空目录占住 .json 路径，使元数据的原子写 rename 必然失败
+    const metaDir = path.join(store.dailyImagesRoot, day, filename + ".json");
+    fs.mkdirSync(metaDir, { recursive: true });
+    fs.writeFileSync(path.join(metaDir, "占位.txt"), "x");
+
+    const logs = captureConsole(() => {
+      assert.throws(
+        () => store.writeDailyImage(day, filename, Buffer.alloc(64, 1), { created_at: "x" }),
+        /.+/,
+        "元数据写失败必须抛给调用方，不能假装成功"
+      );
+    });
+    assert.equal(
+      fs.existsSync(path.join(store.dailyImagesRoot, day, filename)),
+      false,
+      "图片必须被回滚删除，不能留下无元数据的孤儿"
+    );
+    assert.ok(
+      logs.error.some((m) => m.includes("元数据写入失败") && m.includes("回滚删除")),
+      "回滚必须记 error 日志"
+    );
+    // 目录里除了占位的 .json 目录不应留下任何 .tmp 残留
+    assert.deepEqual(
+      fs.readdirSync(path.join(store.dailyImagesRoot, day)).filter((n) => n.includes(".tmp")),
+      []
+    );
+  });
+});
+
+test("memoryDays：孤儿配图（有图无 json）被容忍并告警，不影响该天入列", () => {
+  withTempRoot((root) => {
+    const store = new MemoryStore(root);
+    const day = "2025-06-10";
+    fs.mkdirSync(path.join(store.dailyImagesRoot, day), { recursive: true });
+    fs.writeFileSync(
+      path.join(store.dailyImagesRoot, day, imageName("20250610T090000", "orphan01")),
+      Buffer.alloc(16, 1)
+    );
+    let days;
+    const logs = captureConsole(() => {
+      days = store.memoryDays();
+    });
+    assert.deepEqual(days, [day], "孤儿配图的那天仍应算作有记忆的天");
+    assert.ok(
+      logs.warn.some((m) => m.includes("孤儿配图")),
+      "孤儿配图必须告警"
+    );
+    assert.deepEqual(logs.error, [], "孤儿配图属可预期情况，不该记 error 或抛错");
   });
 });

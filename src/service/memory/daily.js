@@ -247,13 +247,44 @@ function llmDeps() {
   };
 }
 
+// —— in-flight 去重（同一 key 的并发调用复用同一个 Promise）——
+// 场景：右键菜单"生成今日记忆"点一次、菜单关闭、再点一次（间隔 >300ms 防抖窗口，人手可及），
+// 裸 async 会并发跑两次 compactTimeline + 两次 120s 的 LLM 调用（重复计费，
+// 且两次 writeDaily 后写覆盖先写）。成功与失败都要清理，否则一次失败后当天再也无法重试。
+function dedupeByKey(map, key, factory) {
+  const pending = map.get(key);
+  if (pending) return pending;
+  let promise;
+  try {
+    promise = Promise.resolve(factory());
+  } catch (e) {
+    // factory 同步抛错（参数校验等）：不该占用 in-flight 槽位，直接把错误交回调用方
+    return Promise.reject(e);
+  }
+  map.set(key, promise);
+  const release = () => {
+    if (map.get(key) === promise) map.delete(key);
+  };
+  // 两条分支都挂 release：拒绝分支同时消化了"无人 await 时的 unhandled rejection"，
+  // 真正的错误仍从返回的原始 promise 抛给每个调用方
+  promise.then(release, release);
+  return promise;
+}
+
 class DailyMemoryService {
   constructor({ store } = {}) {
     this.store = store || new MemoryStore();
+    // key = "YYYY-MM-DD" → 该天正在进行的 generateDaily Promise（见 dedupeByKey）
+    this._dailyInflight = new Map();
   }
 
-  // 生成并落盘某一天的记忆 Markdown，返回 {date, event_count, generated, content}
-  async generateDaily(day) {
+  // 生成并落盘某一天的记忆 Markdown，返回 {date, event_count, generated, content}。
+  // 同一天的并发调用复用同一个 Promise（含 imageGen 内部"没有当日记忆则先生成"这条路径）。
+  generateDaily(day) {
+    return dedupeByKey(this._dailyInflight, String(day), () => this._generateDaily(day));
+  }
+
+  async _generateDaily(day) {
     if (!isValidDay(day)) throw new Error(`invalid day: ${day}`);
     const { providers, prompts } = llmDeps();
     const events = this.store.readEvents({ day });
@@ -300,6 +331,7 @@ class DailyMemoryService {
 
 module.exports = {
   DailyMemoryService,
+  dedupeByKey,
   compactTimeline,
   summaryCovers,
   summaryCoversReason,

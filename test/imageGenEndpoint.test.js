@@ -8,7 +8,11 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const https = require("node:https");
 
-const { buildEndpoint, ImageGenerationClient } = require("../src/service/memory/imageGen.js");
+const {
+  buildEndpoint,
+  downloadUrlDenialReason,
+  ImageGenerationClient,
+} = require("../src/service/memory/imageGen.js");
 const providers = require("../src/service/llm/providers.js");
 
 // 最小合法参考图：PNG 魔数 + 填充字节（isSupportedImage 只嗅探魔数）
@@ -38,6 +42,19 @@ function withNetworkTrap(fn) {
   } finally {
     for (const [mod, name, orig] of saved) mod[name] = orig;
   }
+}
+
+// 本地 http 服务（下载门禁的端到端用例用，回环地址是唯一被放行的 http 场景）
+function startServer(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer(handler);
+    server.on("clientError", (e, socket) => socket.destroy());
+    server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+function closeServer(server) {
+  return new Promise((resolve) => server.close(() => resolve()));
 }
 
 function generateWith(baseUrl) {
@@ -139,6 +156,11 @@ test("回环判定复用 llm/providers.js 的唯一实现（无第二份拷贝�
       () => buildEndpoint("http://127.0.0.1:11434/v1"),
       /http:\/\/ 明文协议仅限本机回环地址/
     );
+    // 下载门禁同样走这一份实现（不存在第三份拷贝）
+    assert.match(
+      String(downloadUrlDenialReason(new URL("http://127.0.0.1:8080/a.png"))),
+      /only allowed for loopback hosts/
+    );
   } finally {
     providers.isLoopbackHost = orig;
   }
@@ -146,4 +168,174 @@ test("回环判定复用 llm/providers.js 的唯一实现（无第二份拷贝�
     buildEndpoint("http://127.0.0.1:11434/v1"),
     "http://127.0.0.1:11434/v1/images/edits"
   );
+  assert.strictEqual(downloadUrlDenialReason(new URL("http://127.0.0.1:8080/a.png")), null);
+});
+
+// —— 下载地址门禁（SSRF 面）：图片 URL 由服务端响应给出，可指向内网 ——
+test("downloadUrlDenialReason：非回环 http 图片地址被拒绝，回环放行", () => {
+  for (const url of [
+    "http://192.0.2.10/a.png",
+    "http://10.0.0.5:8080/a.png",
+    "http://169.254.169.254/latest/meta-data", // 云元数据服务
+    "http://images.example.com/a.png",
+    "http://127.0.0.1.evil.example.com/a.png", // 前缀伪装不得绕过
+  ]) {
+    assert.match(
+      String(downloadUrlDenialReason(new URL(url))),
+      /only allowed for loopback hosts/,
+      `应拒绝：${url}`
+    );
+  }
+  for (const url of [
+    "http://127.0.0.1:11434/a.png",
+    "http://127.9.9.9/a.png",
+    "http://localhost:1234/a.png",
+    "http://[::1]:1234/a.png",
+    "https://cdn.example.com/a.png",
+  ]) {
+    assert.strictEqual(downloadUrlDenialReason(new URL(url)), null, `应放行：${url}`);
+  }
+});
+
+test("downloadUrlDenialReason：https 上游不得降级到 http（含回环目标）", () => {
+  assert.match(
+    String(downloadUrlDenialReason(new URL("http://cdn.example.com/a.png"), "https:")),
+    /https to http downgrade is not allowed/
+  );
+  assert.match(
+    String(downloadUrlDenialReason(new URL("http://127.0.0.1:8080/a.png"), "https:")),
+    /https to http downgrade is not allowed/
+  );
+  // http 上游跳 http 回环仍放行（本地服务商场景）
+  assert.strictEqual(
+    downloadUrlDenialReason(new URL("http://127.0.0.1:8080/a.png"), "http:"),
+    null
+  );
+  // https → https 不受影响
+  assert.strictEqual(
+    downloadUrlDenialReason(new URL("https://cdn.example.com/a.png"), "https:"),
+    null
+  );
+});
+
+test("downloadUrlDenialReason：非 http(s) 图片地址被拒绝", () => {
+  for (const url of ["file:///c:/windows/win.ini", "ftp://example.com/a.png", "data:image/png;base64,AA"]) {
+    assert.match(
+      String(downloadUrlDenialReason(new URL(url))),
+      /unsupported image URL/,
+      `应拒绝：${url}`
+    );
+  }
+});
+
+test("服务端返回的非回环 http 图片地址：生成失败且不去连那个地址", async () => {
+  let hits = 0;
+  const server = await startServer((req, res) => {
+    hits += 1;
+    req.resume();
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      // 图像 API 把图片地址指向内网主机
+      res.end(JSON.stringify({ data: [{ url: "http://192.0.2.10/secret.png" }] }));
+    });
+  });
+  try {
+    await assert.rejects(
+      new ImageGenerationClient().generate({
+        providerCfg: {
+          baseUrl: `http://127.0.0.1:${server.address().port}`,
+          apiKey: "sk-test",
+          modelName: "image-model",
+        },
+        prompt: "今天的日程信息图",
+        referenceImages: [FAKE_PNG, FAKE_PNG],
+        timeoutMs: 3000,
+      }),
+      /only allowed for loopback hosts \(127\.x\.x\.x \/ localhost \/ \[::1\]\), got 192\.0\.2\.10/
+    );
+    assert.strictEqual(hits, 1, "只应发生一次 images/edits 上传，下载地址被门禁挡在建连之前");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("重定向每一跳都复查：回环首跳 302 到非回环 http 时被拒绝", async () => {
+  const hits = { edits: 0, redirect: 0, final: 0 };
+  const server = await startServer((req, res) => {
+    if (req.url.startsWith("/images/edits")) {
+      hits.edits += 1;
+      req.resume();
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        const port = server.address().port;
+        // 首跳是合法的回环地址，重定向目标才是内网
+        res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/redirect` }] }));
+      });
+      return;
+    }
+    if (req.url === "/redirect") {
+      hits.redirect += 1;
+      res.statusCode = 302;
+      res.setHeader("location", "http://192.0.2.10/secret.png");
+      res.end();
+      return;
+    }
+    hits.final += 1;
+    res.end("x");
+  });
+  try {
+    await assert.rejects(
+      new ImageGenerationClient().generate({
+        providerCfg: {
+          baseUrl: `http://127.0.0.1:${server.address().port}`,
+          apiKey: "sk-test",
+          modelName: "image-model",
+        },
+        prompt: "今天的日程信息图",
+        referenceImages: [FAKE_PNG, FAKE_PNG],
+        timeoutMs: 3000,
+      }),
+      /only allowed for loopback hosts .*got 192\.0\.2\.10/,
+      "第二跳（重定向目标）必须被重新校验"
+    );
+    assert.deepStrictEqual(hits, { edits: 1, redirect: 1, final: 0 });
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("本地服务商返回的回环 http 图片地址仍可正常下载（不一刀切禁 http）", async () => {
+  const png = FAKE_PNG;
+  let downloads = 0;
+  const server = await startServer((req, res) => {
+    if (req.url.startsWith("/images/edits")) {
+      req.resume();
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        const port = server.address().port;
+        res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/gen.png` }] }));
+      });
+      return;
+    }
+    downloads += 1;
+    res.setHeader("content-type", "image/png");
+    res.end(png);
+  });
+  try {
+    const r = await new ImageGenerationClient().generate({
+      providerCfg: {
+        baseUrl: `http://127.0.0.1:${server.address().port}`,
+        apiKey: "sk-test",
+        modelName: "image-model",
+      },
+      prompt: "今天的日程信息图",
+      referenceImages: [FAKE_PNG, FAKE_PNG],
+      timeoutMs: 3000,
+    });
+    assert.strictEqual(r.ext, "png");
+    assert.strictEqual(r.imageBuffer.length, png.length);
+    assert.strictEqual(downloads, 1, "回环图片地址应真正被下载一次");
+  } finally {
+    await closeServer(server);
+  }
 });

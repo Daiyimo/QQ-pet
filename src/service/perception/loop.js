@@ -14,8 +14,12 @@ const {
   EVIDENCE_KEYS,
 } = _require("./sceneStabilizer");
 const { BarrageEmitter, textsAreSimilar } = _require("./barrageRanker");
-const { chat, getVisionProvider } = _require("../llm/providers");
-const { tryExtractJsonObject, isPlainObject } = _require("../llm/jsonParse");
+const { chat, getVisionProvider, resolveVisionProvider } = _require(
+  "../llm/providers"
+);
+const { tryExtractJsonObject, isPlainObject, normField } = _require(
+  "../llm/jsonParse"
+);
 const { UNIFIED_PERCEPTION_PROMPT } = _require("../llm/prompts");
 
 const HEARTBEAT_MS = 5 * 60 * 1000;
@@ -37,6 +41,37 @@ const PERCEPTION_FAILURE_NOTIFY_THRESHOLD = 3;
 // 覆盖 providers.js 抛出的"未配置 LLM 提供商"/"缺少 API Key"，以及 HTTP 4xx
 // （模型不支持图片时的 400、Key 失效的 401、欠费的 402/403、限流的 429）。
 const EXPECTED_PERCEPTION_ERROR_RE = /(?:尚未|未)配置|缺少 API Key|HTTP 4\d\d/;
+
+// —— 配置性失败 vs 瞬时失败 ——
+// 这两类失败该走的路完全相反，此前实现只按"要不要打堆栈"分级，两类混在一起无限退避重试：
+//   · 配置性失败（未配置视觉提供商 / 模型不支持图片 / Key 无效 / 欠费 / 地址写错）：
+//     不改配置永远不会成功，每一轮都是纯浪费（一次截屏 + 一次出网 + 一条日志），
+//     达 PERCEPTION_CONFIG_FAILURE_LIMIT 次即自动停用感知并告知用户。
+//   · 瞬时失败（限流 / 5xx / 网络抖动 / 超时 / 模型偶发不吐 JSON）：等一等就能恢复，
+//     继续按指数退避重试（行为与此前一致）。
+// HTTP 码归类依据：408（请求超时）、425（Too Early）、429（限流）是"过一会儿再来"，
+// 其余 4xx 都要用户动手改配置（400 模型不支持图片 / 401 Key 无效 / 403 欠费或无权限 /
+// 404 地址写错）；5xx 是服务端故障，按瞬时。非 HTTP 错误里只有 providers.js 抛出的
+// 「未配置 LLM 提供商」「缺少 API Key」「API 地址…」属配置性，其余（socket hang up、
+// timeout、响应解析失败）按瞬时。
+const TRANSIENT_HTTP_CODES = new Set([408, 425, 429]);
+const CONFIG_PERCEPTION_ERROR_RE = /(?:尚未|未)配置|缺少 API Key|API 地址/;
+// 连续配置性失败达到该次数即停用感知。与 PERCEPTION_FAILURE_NOTIFY_THRESHOLD 同值：
+// "该告知用户"与"确认这不是抖动而是配置错"是同一时机，于是这类故障全程只弹一次气泡
+// （告知内容换成"已自动停用"），不会既弹"一直失败"又弹"已停用"。
+const PERCEPTION_CONFIG_FAILURE_LIMIT = PERCEPTION_FAILURE_NOTIFY_THRESHOLD;
+
+// 返回 "config"（要用户改配置）| "transient"（可重试）
+function classifyPerceptionError(err) {
+  const msg = err && err.message ? String(err.message) : String(err || "");
+  const http = msg.match(/HTTP (\d{3})/);
+  if (http) {
+    const code = Number(http[1]);
+    if (TRANSIENT_HTTP_CODES.has(code)) return "transient";
+    return code >= 400 && code < 500 ? "config" : "transient";
+  }
+  return CONFIG_PERCEPTION_ERROR_RE.test(msg) ? "config" : "transient";
+}
 
 // 屏幕闲置时的摸鱼吐槽（移植 service.py SCREEN_IDLE_MESSAGES）
 const SCREEN_IDLE_MESSAGES = [
@@ -119,25 +154,22 @@ function parsePerceptionJson(text) {
   return value;
 }
 
-// 字段归一化：模型偶发把本该是字符串的字段写成对象/数组，
-// String() 会得到 "[object Object]" 并被当成正文（弹幕曾因此上屏），这里直接判空。
-function str(value, limit) {
-  if (value == null) return "";
-  if (typeof value === "object") return "";
-  return String(value).trim().slice(0, limit);
-}
-
+// 字段归一化统一走 llm/jsonParse.js 的 normField（对象/数组判空 + trim + 限长）：
+// 本文件原有的 str() 与 llm.js 的 normSpeakField 是同口径的两份实现，现已收敛到那里。
 // 弹幕候选归一化：允许字符串，或 {text|content|barrage} 形式的对象；其余判空丢弃
 function candidateText(candidate, limit) {
   if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-    return str(candidate.text ?? candidate.content ?? candidate.barrage, limit);
+    return normField(
+      candidate.text ?? candidate.content ?? candidate.barrage,
+      limit
+    );
   }
-  return str(candidate, limit);
+  return normField(candidate, limit);
 }
 
 // 归一化为统一感知契约，并套用 game/course 置信门槛（validateScene）
 function buildPerceptionResult(value) {
-  let scene = str(value.scene, 32).toLowerCase();
+  let scene = normField(value.scene, 32).toLowerCase();
   if (!["game", "course", "other"].includes(scene)) scene = "other";
   let confidence = Number(value.confidence);
   if (!Number.isFinite(confidence)) confidence = 0;
@@ -154,15 +186,15 @@ function buildPerceptionResult(value) {
     scene,
     confidence,
     scene_evidence: sceneEvidence,
-    observation: str(value.observation, 300),
-    course_transcript: str(value.course_transcript, 2000),
-    course_note: str(value.course_note, 2000),
-    course_title: str(value.course_title, 128),
-    course_interaction: str(value.course_interaction, 100),
+    observation: normField(value.observation, 300),
+    course_transcript: normField(value.course_transcript, 2000),
+    course_note: normField(value.course_note, 2000),
+    course_title: normField(value.course_title, 128),
+    course_interaction: normField(value.course_interaction, 100),
     capture_keyframe: value.capture_keyframe === true,
-    keyframe_note: str(value.keyframe_note, 300),
-    assistant_message: str(value.assistant_message, 500),
-    barrage: str(value.barrage, 30),
+    keyframe_note: normField(value.keyframe_note, 300),
+    assistant_message: normField(value.assistant_message, 500),
+    barrage: normField(value.barrage, 30),
     // validateScene 的"无证据但有产出"兜底要看原始候选列表，先挂原始值
     // （非字符串元素在这里就被剔除，避免 "[object Object]" 混进弹幕）
     barrage_candidates: Array.isArray(value.barrage_candidates)
@@ -176,13 +208,13 @@ function buildPerceptionResult(value) {
 
   // game 场景弹幕兜底（移植 _parse_perception 末段）
   if (result.scene === "game" && !result.barrage) {
-    result.barrage = str(result.assistant_message || result.course_note, 30);
+    result.barrage = normField(result.assistant_message || result.course_note, 30);
   }
   const rawCandidates = result.barrage_candidates;
   const candidates = [result.barrage, ...rawCandidates];
   const deduped = [];
   for (const c of candidates) {
-    const text = str(c, 30);
+    const text = normField(c, 30);
     if (text && !deduped.includes(text)) deduped.push(text);
   }
   result.barrage_candidates = result.scene === "game" ? deduped.slice(0, 4) : [];
@@ -221,6 +253,8 @@ class PerceptionLoop extends EventEmitter {
     this._petHidden = false; // 游戏场景下桌宠是否处于隐藏态
     this._failures = 0; // 连续感知失败计数（用于指数退避与失败日志节流）
     this._failureNotified = false; // 本轮连续失败是否已告知过用户（只弹一次气泡）
+    this._configFailures = 0; // 连续"配置性失败"计数（达阈值即自动停用感知）
+    this._visionFallbackWarned = false; // 视觉提供商回退提示是否已给过（每进程一次，避免开关一次刷一条）
   }
 
   _interval() {
@@ -248,6 +282,8 @@ class PerceptionLoop extends EventEmitter {
     this.idleMonitor.reset();
     this._failures = 0;
     this._failureNotified = false;
+    this._configFailures = 0;
+    this._precheckVisionProvider();
     const epoch = ++this._epoch; // 本次运行周期；旧周期的续作全部作废
     const tick = () => {
       if (!this.running || epoch !== this._epoch) return;
@@ -257,6 +293,7 @@ class PerceptionLoop extends EventEmitter {
           if (epoch !== this._epoch) return;
           this._failures = 0;
           this._failureNotified = false;
+          this._configFailures = 0;
         })
         .catch((e) => {
           // 先判 epoch 再自增。本轮已被 stop() 作废（含 stop() 主动 abort 造成的失败）时：
@@ -266,11 +303,22 @@ class PerceptionLoop extends EventEmitter {
           if (epoch !== this._epoch) return;
           // 连续失败指数退避：interval × 2^n，封顶 30s（API key 失效/断网时不至于狂打请求）
           this._failures = (this._failures || 0) + 1;
+          // 配置性失败单独计数：这类失败不改配置永远不会成功，达阈值即停用感知
+          // （只在成功时清零，中间夹一次瞬时失败不该让"配置错"的证据归零）
+          const kind = classifyPerceptionError(e);
+          if (kind === "config") this._configFailures += 1;
           // perception-failed 事件目前无生产监听者（EventEmitter 对无监听的非 error 事件
           // 静默返回 false），失败必须在这里无条件落日志，否则整条链路完全不可诊断。
           this._logFailure(e);
-          this._maybeNotifyFailure();
-          this.emit("perception-failed", { error: e?.message || String(e) });
+          if (
+            kind === "config" &&
+            this._configFailures >= PERCEPTION_CONFIG_FAILURE_LIMIT
+          ) {
+            this._disableForConfigFailure(e);
+          } else {
+            this._maybeNotifyFailure();
+          }
+          this.emit("perception-failed", { error: e?.message || String(e), kind });
         })
         .finally(() => {
           // 关键：epoch 比对。只看 this.running 会让"停止期间在途的 tick"
@@ -286,6 +334,46 @@ class PerceptionLoop extends EventEmitter {
     };
     this.timer = setTimeout(tick, this._interval());
     if (this.timer.unref) this.timer.unref();
+  }
+
+  // 视觉提供商预检：每次 start() 只做一次，且**不发任何真实请求**——用一次多模态调用去
+  // 探活只是把浪费提前。预检只读配置，回答"这份配置能不能指望它成功"：
+  //   · 单独配置了视觉提供商：静默通过；
+  //   · 回退到对话提供商（未配 visionProvider）：warn + 每进程一次气泡。回退本身是刻意保留的
+  //     便利，但若该对话模型不支持图片，此前会每轮截屏 + 每轮 400 且用户完全无从察觉；
+  //   · 没有可用提供商 / Key 不可解密：warn。用户可见告知交给失败路径——3 轮内会自动停用
+  //     感知并弹一条带具体原因的气泡，比启动时的猜测更准确，也避免一次开关连弹两条。
+  _precheckVisionProvider() {
+    let info;
+    try {
+      info = resolveVisionProvider();
+    } catch (e) {
+      console.error(
+        "[perception/loop] 视觉提供商预检异常，跳过预检（感知照常启动，配置性失败仍会自动停用）:",
+        e && e.stack ? e.stack : e
+      );
+      return;
+    }
+    if (info.reason === "vision") return;
+    if (info.reason === "fallback-chat") {
+      console.warn(
+        "[perception/loop] 未单独配置视觉提供商，屏幕感知将回退使用对话提供商" +
+          `（${info.cfg.id}/${info.cfg.model}）；该模型若不支持图片，感知会连续失败并` +
+          `在 ${PERCEPTION_CONFIG_FAILURE_LIMIT} 次后自动停用`
+      );
+      if (!this._visionFallbackWarned) {
+        this._visionFallbackWarned = true;
+        this._speak(
+          "我会用对话模型来看屏幕哦～要是它不会看图，我就先不看啦，记得在设置里配一个会看图的模型～",
+          "视觉提供商回退提示"
+        );
+      }
+      return;
+    }
+    console.warn(
+      "[perception/loop] 屏幕感知已开启但没有可用的视觉/对话提供商" +
+        `（原因：${info.reason}），每轮都会失败，将在 ${PERCEPTION_CONFIG_FAILURE_LIMIT} 次后自动停用`
+    );
   }
 
   stop() {
@@ -321,7 +409,7 @@ class PerceptionLoop extends EventEmitter {
     if (n !== 1 && n % PERCEPTION_FAILURE_LOG_EVERY !== 0) return;
     const tail =
       `（连续第 ${n} 次失败，本轮感知跳过，将在退避后重试；` +
-      `连续失败 ${PERCEPTION_FAILURE_NOTIFY_THRESHOLD} 次后会气泡告知用户）:`;
+      `配置类问题连续 ${PERCEPTION_CONFIG_FAILURE_LIMIT} 次会自动停用感知并气泡告知用户）:`;
     if (EXPECTED_PERCEPTION_ERROR_RE.test(e?.message || String(e || ""))) {
       console.warn(`[perception/loop] 屏幕感知失败${tail}`, e?.message || e);
     } else {
@@ -335,20 +423,44 @@ class PerceptionLoop extends EventEmitter {
     if (this._failureNotified) return;
     if (this._failures < PERCEPTION_FAILURE_NOTIFY_THRESHOLD) return;
     this._failureNotified = true; // 先置位：openSpeak 抛错也不重复弹
+    this._speak(
+      "屏幕感知一直失败啦，可能是网络或者云端服务不稳定，我先接着重试～",
+      "感知故障告知"
+    );
+  }
+
+  // 配置性失败连续达阈值：停用感知并告知一次。
+  // 这才是"每轮 400"这个 P0 的根因消除——此前这类必然失败会无限退避重试，
+  // 每轮烧一次截屏 + 一次出网；现在最多浪费 PERCEPTION_CONFIG_FAILURE_LIMIT 轮。
+  // 只 stop() 本进程的循环，**不改写 sys.perceptionEnabled**：设置页的开关值是用户意图，
+  // 由失败路径悄悄改写会让"开关显示开着、实际没跑"的不一致落盘（设置页还缓存着旧值，
+  // 下一次点击会把它再关一次）。用户改好配置后重新开一次感知即可；重启后最多再浪费几轮。
+  _disableForConfigFailure(e) {
+    console.warn(
+      `[perception/loop] 屏幕感知因配置问题连续失败 ${this._configFailures} 次，` +
+        "已自动停用（不再每轮截屏与请求云端），改好配置后请在设置页重新开启:",
+      e?.message || e
+    );
+    this._failureNotified = true; // 本次已用"已停用"文案告知，不再叠加"一直失败"气泡
+    this.stop(); // running=false + epoch 自增：不再排下一条 timer
+    this._speak(
+      "屏幕感知一直失败，我先停下来啦～可能是没配置会看图的模型或者 Key 不对，去设置里检查一下再开启吧～",
+      "感知已停用告知"
+    );
+  }
+
+  // 用户可见气泡的统一出口（openSpeak 不存在时静默跳过；抛错要留日志，否则用户无从察觉）
+  _speak(text, label) {
     if (typeof openSpeak !== "function") return;
     try {
       openSpeak({
-        data: {
-          type: "text",
-          data: "屏幕感知一直失败啦，可能是视觉模型没配置或者不支持看图，去设置里检查一下吧～",
-          submitText: "",
-        },
+        data: { type: "text", data: text, submitText: "" },
         active: "speak",
         nextActiveStr: "speak",
       });
     } catch (err) {
       console.error(
-        "[perception/loop] 感知故障告知气泡失败（用户将无从察觉感知已失效）:",
+        `[perception/loop] ${label}气泡失败（用户将无从察觉感知状态）:`,
         err && err.stack ? err.stack : err
       );
     }
@@ -599,8 +711,10 @@ module.exports = {
   parsePerceptionJson,
   buildPerceptionResult,
   cleanDuplexMessage,
+  classifyPerceptionError,
   SCREEN_IDLE_MESSAGES,
   // 导出供回归测试断言节流/告警阈值，避免测试里硬编码魔法数字
   PERCEPTION_FAILURE_LOG_EVERY,
   PERCEPTION_FAILURE_NOTIFY_THRESHOLD,
+  PERCEPTION_CONFIG_FAILURE_LIMIT,
 };

@@ -162,6 +162,13 @@ class ScreenIdleMonitor {
 
 // —— Electron 截屏（惰性加载，主进程调用）——
 // 返回 { pngBuffer, bitmap, width, height }；bitmap 为 BGRA 原始像素，供指纹用。
+// pngBuffer 是**惰性 getter**：PNG 编码（1280×720 约 10~30ms CPU）只在真的要把这一帧发给
+// 多模态模型时才做。感知循环每 tick 都截屏，但"画面未变 / 上一轮在途 / 未到心跳"的 tick
+// 会把这一帧直接丢掉（默认 2000ms 间隔 → 12 小时约 21600 次截屏，其中绝大多数被丢弃），
+// 旧实现无条件编码，等于把这笔 CPU 全烧在注定被丢弃的帧上。
+// 选 getter 而非 { needPng } 参数的理由：调用方（perception/loop.js 的 frame.pngBuffer、
+// aiWiring.js 的课程关键帧 shot.pngBuffer）一行都不用改，也不存在"忘了传 needPng 导致
+// pngBuffer 为 undefined"的新坑；结果记忆化，同一帧多次读只编码一次。
 async function captureScreen({ maxWidth = 1280 } = {}) {
   const { desktopCapturer, screen } = _require("electron");
   const display = screen.getPrimaryDisplay();
@@ -181,9 +188,13 @@ async function captureScreen({ maxWidth = 1280 } = {}) {
   const image = source.thumbnail;
   if (!image || image.isEmpty()) throw new Error("截屏失败：缩略图为空");
   const size = image.getSize();
+  let png = null;
   return {
-    pngBuffer: image.toPNG(),
-    bitmap: image.toBitmap(), // BGRA 预乘像素
+    get pngBuffer() {
+      if (png === null) png = image.toPNG(); // 首次读取才编码；nativeImage 由闭包持有
+      return png;
+    },
+    bitmap: image.toBitmap(), // BGRA 预乘像素（每 tick 都要用于变化检测，不做惰性）
     width: size.width,
     height: size.height,
   };

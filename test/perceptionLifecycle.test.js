@@ -9,8 +9,10 @@ const assert = require("node:assert");
 const {
   PerceptionLoop,
   buildPerceptionResult,
+  classifyPerceptionError,
   PERCEPTION_FAILURE_LOG_EVERY,
   PERCEPTION_FAILURE_NOTIFY_THRESHOLD,
+  PERCEPTION_CONFIG_FAILURE_LIMIT,
 } = require("../src/service/perception/loop.js");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -292,6 +294,11 @@ function hookConsole() {
     ours(list) {
       return list.filter((line) => line.includes("[perception/loop]"));
     },
+    // 只取"单轮感知失败"那条日志（含 _logFailure 的固定尾巴），从而与 start() 时的
+    // 视觉提供商预检日志区分开：两者都带 [perception/loop] 前缀，但断言的是不同行为。
+    failures(list) {
+      return this.ours(list).filter((line) => line.includes("本轮感知跳过"));
+    },
     restore() {
       console.warn = origWarn;
       console.error = origError;
@@ -320,7 +327,7 @@ test("未配置视觉提供商时的感知失败会留下 warn 日志并写明�
     loop.stop();
     spy.restore();
   }
-  const warns = spy.ours(spy.warns);
+  const warns = spy.failures(spy.warns);
   assert.strictEqual(
     warns.length,
     1,
@@ -351,7 +358,7 @@ test("意料外的感知异常记 error 且带完整堆栈", async () => {
     loop.stop();
     spy.restore();
   }
-  const errors = spy.ours(spy.errors);
+  const errors = spy.failures(spy.errors);
   assert.strictEqual(
     errors.length,
     1,
@@ -367,7 +374,7 @@ test("意料外的感知异常记 error 且带完整堆栈", async () => {
   );
   assert.ok(errors[0].includes("本轮感知跳过"), "日志必须写明降级后的行为");
   assert.deepStrictEqual(
-    spy.ours(spy.warns),
+    spy.failures(spy.warns),
     [],
     "意料外异常不应降级成 warn"
   );
@@ -395,13 +402,13 @@ test("失败日志按固定次数节流，不是每轮都刷屏", () => {
   );
 });
 
-test("连续失败超阈值时经气泡告知用户恰好一次，不每轮弹", async () => {
+test("瞬时失败（5xx）连续超阈值时经气泡告知恰好一次且继续重试，不每轮弹", async () => {
   const spy = hookConsole();
   const prevSpeak = global.openSpeak;
   const spoken = [];
   global.openSpeak = (payload) => spoken.push(payload && payload.data && payload.data.data);
-  // 模型不支持图片时的 400 —— README 承认的"视觉未单独配置回退到对话服务商"路径
-  const loop = failingLoop(() => new Error("openai HTTP 400: image input not supported"));
+  // 云端 5xx：瞬时故障，等一等可能恢复 → 只告知一次，循环必须继续跑
+  const loop = failingLoop(() => new Error("openai HTTP 503: upstream unavailable"));
   try {
     // 未达阈值前不得打扰用户
     loop._failures = PERCEPTION_FAILURE_NOTIFY_THRESHOLD - 1;
@@ -413,6 +420,7 @@ test("连续失败超阈值时经气泡告知用户恰好一次，不每轮弹",
       () => loop._failures >= PERCEPTION_FAILURE_NOTIFY_THRESHOLD + 2,
       "连续失败超过阈值若干轮"
     );
+    assert.strictEqual(loop.running, true, "瞬时失败不得停用感知，必须继续退避重试");
   } finally {
     loop.stop();
     spy.restore();
@@ -428,6 +436,172 @@ test("连续失败超阈值时经气泡告知用户恰好一次，不每轮弹",
     spoken[0].includes("屏幕感知"),
     `气泡文案应指明是屏幕感知失效，实际：${spoken[0]}`
   );
+  assert.strictEqual(loop._configFailures, 0, "5xx 不该被记成配置性失败");
+});
+
+// —— 配置性失败的根因消除（此前：视觉模型不支持图片 → 每轮截屏 + 每轮 400，无限重试）——
+
+test("模型不支持图片（HTTP 400）连续达阈值后自动停用感知，并只告知一次", async () => {
+  const spy = hookConsole();
+  const prevSpeak = global.openSpeak;
+  const spoken = [];
+  global.openSpeak = (payload) => spoken.push(payload && payload.data && payload.data.data);
+  const loop = failingLoop(() => new Error("openai HTTP 400: image input not supported"));
+  const captured = [];
+  const origCapture = loop.captureFn;
+  loop.captureFn = async (...args) => {
+    captured.push(1);
+    return origCapture(...args);
+  };
+  try {
+    loop.start();
+    await waitUntil(() => loop.running === false, "配置性失败达阈值后应自动停用");
+    assert.strictEqual(
+      loop._configFailures,
+      PERCEPTION_CONFIG_FAILURE_LIMIT,
+      "应恰好在连续第 N 次配置性失败时停用，不多浪费一轮"
+    );
+    assert.strictEqual(loop.timer, null, "停用后不得残留 timer");
+    const capturesAtStop = captured.length;
+    await sleep(150);
+    assert.strictEqual(
+      captured.length,
+      capturesAtStop,
+      "停用后不得再截屏（这正是每轮浪费一次截屏 + 一次出网的根因）"
+    );
+  } finally {
+    loop.stop();
+    spy.restore();
+    if (prevSpeak === undefined) delete global.openSpeak;
+    else global.openSpeak = prevSpeak;
+  }
+  assert.strictEqual(
+    spoken.length,
+    1,
+    `停用只应告知一次（不叠加"一直失败"气泡），实际：${JSON.stringify(spoken)}`
+  );
+  assert.ok(
+    spoken[0].includes("停") && spoken[0].includes("设置"),
+    `气泡必须告知已停用并指向设置页，实际：${spoken[0]}`
+  );
+  const stopLog = spy.ours(spy.warns).filter((l) => l.includes("已自动停用"));
+  assert.strictEqual(stopLog.length, 1, `停用必须留一条 warn，实际：${JSON.stringify(spy.warns)}`);
+  assert.ok(
+    stopLog[0].includes("image input not supported"),
+    `停用日志要带上真实原因，实际：${stopLog[0]}`
+  );
+});
+
+test("配置性失败与瞬时失败的判定：4xx（除 408/425/429）与未配置属配置性，其余可重试", () => {
+  const cases = [
+    ["openai HTTP 400: image input not supported", "config"],
+    ["anthropic HTTP 401: invalid x-api-key", "config"],
+    ["openai HTTP 402: 余额不足", "config"],
+    ["openai HTTP 403: forbidden", "config"],
+    ["openai HTTP 404: model not found", "config"],
+    ["未配置 LLM 提供商", "config"],
+    ["提供商「default」缺少 API Key", "config"],
+    ["API 地址无效（空），请在设置页检查服务商配置", "config"],
+    ["openai HTTP 408: request timeout", "transient"],
+    ["openai HTTP 429: rate limit", "transient"],
+    ["openai HTTP 500: internal error", "transient"],
+    ["openai HTTP 503: upstream unavailable", "transient"],
+    ["socket hang up", "transient"],
+    ["timeout", "transient"],
+    ["perception response is not valid JSON: 我看不清", "transient"],
+  ];
+  for (const [message, expected] of cases) {
+    assert.strictEqual(
+      classifyPerceptionError(new Error(message)),
+      expected,
+      `「${message}」应判为 ${expected}`
+    );
+  }
+});
+
+test("单次配置性失败不会停用感知（阈值前必须继续重试，滤掉偶发 400）", async () => {
+  const spy = hookConsole();
+  const loop = failingLoop(() => new Error("openai HTTP 400: bad request"));
+  try {
+    loop.start();
+    await waitUntil(() => loop._configFailures >= 1, "首轮配置性失败");
+    assert.strictEqual(
+      loop.running,
+      true,
+      "第一次配置性失败就停用会把网络抖动误判成配置错"
+    );
+  } finally {
+    loop.stop();
+    spy.restore();
+  }
+});
+
+test("视觉提供商回退到对话提供商时，在启动处（而非每轮）warn + 每进程一次气泡", () => {
+  const prevGetSys = global.getSys;
+  const prevSpeak = global.openSpeak;
+  const spoken = [];
+  const spy = hookConsole();
+  const loop = new PerceptionLoop({ intervalMs: 100000 });
+  try {
+    global.openSpeak = (p) => spoken.push(p && p.data && p.data.data);
+    // 只配了对话提供商、没配 visionProvider —— README 承认的静默回退路径
+    global.getSys = (key) =>
+      ({
+        llmActiveProvider: "default",
+        llmProviders: [
+          {
+            id: "default",
+            type: "openai",
+            baseUrl: "https://api.example.com/v1",
+            apiKey: "sk-plain-not-migrated",
+            model: "chat-only-model",
+          },
+        ],
+      }[key]);
+    loop._precheckVisionProvider();
+    loop._precheckVisionProvider(); // 第二次（模拟再次开关感知）不得重复弹
+  } finally {
+    spy.restore();
+    if (prevGetSys === undefined) delete global.getSys;
+    else global.getSys = prevGetSys;
+    if (prevSpeak === undefined) delete global.openSpeak;
+    else global.openSpeak = prevSpeak;
+  }
+  const warns = spy.ours(spy.warns).filter((l) => l.includes("未单独配置视觉提供商"));
+  assert.strictEqual(warns.length, 2, "每次启动都要留一条可诊断的 warn");
+  assert.ok(
+    warns[0].includes("chat-only-model"),
+    `warn 要写明实际会用哪个模型看图，实际：${warns[0]}`
+  );
+  assert.strictEqual(
+    spoken.length,
+    1,
+    `回退提示气泡每进程只弹一次，实际：${JSON.stringify(spoken)}`
+  );
+  assert.deepStrictEqual(spy.ours(spy.errors), [], "预检本身不该报 error");
+});
+
+test("完全没有可用提供商时，启动预检留 warn 但不弹气泡（告知交给自动停用那条）", () => {
+  const prevGetSys = global.getSys;
+  const prevSpeak = global.openSpeak;
+  const spoken = [];
+  const spy = hookConsole();
+  const loop = new PerceptionLoop({ intervalMs: 100000 });
+  try {
+    global.openSpeak = (p) => spoken.push(p);
+    global.getSys = () => undefined; // 一个提供商都没配
+    loop._precheckVisionProvider();
+  } finally {
+    spy.restore();
+    if (prevGetSys === undefined) delete global.getSys;
+    else global.getSys = prevGetSys;
+    if (prevSpeak === undefined) delete global.openSpeak;
+    else global.openSpeak = prevSpeak;
+  }
+  const warns = spy.ours(spy.warns).filter((l) => l.includes("没有可用的视觉/对话提供商"));
+  assert.strictEqual(warns.length, 1, `应恰好一条 warn，实际：${JSON.stringify(spy.warns)}`);
+  assert.ok(warns[0].includes("no-provider"), `warn 要带上判定原因，实际：${warns[0]}`);
+  assert.deepStrictEqual(spoken, [], "启动预检此时不弹气泡，避免与停用告知重复");
 });
 
 test("stop() 造成的中断不计失败、不留日志、不弹气泡（epoch 语义未被日志改动破坏）", async () => {
@@ -467,9 +641,10 @@ test("stop() 造成的中断不计失败、不留日志、不弹气泡（epoch �
     "stop() 造成的失败不得计入 _failures（否则会污染下一个运行周期的退避）"
   );
   assert.deepStrictEqual(failures, [], "stop() 造成的失败不应上报 perception-failed");
-  assert.deepStrictEqual(spy.ours(spy.warns), [], "stop() 造成的中断不应记 warn");
-  assert.deepStrictEqual(spy.ours(spy.errors), [], "stop() 造成的中断不应记 error");
+  assert.deepStrictEqual(spy.failures(spy.warns), [], "stop() 造成的中断不应记 warn");
+  assert.deepStrictEqual(spy.failures(spy.errors), [], "stop() 造成的中断不应记 error");
   assert.deepStrictEqual(spoken, [], "stop() 造成的中断不应弹故障气泡");
+  assert.strictEqual(loop._configFailures, 0, "stop() 造成的失败不得计入配置性失败");
 });
 
 test("稳定切换到 game 场景时会 emit pet-hide（此前仅有负向断言，删掉这行 emit 也全绿）", async () => {
@@ -502,4 +677,80 @@ test("稳定切换到 game 场景时会 emit pet-hide（此前仅有负向断言
     "stop() 收尾必须补一次 pet-show，否则桌宠永久隐藏"
   );
   assert.strictEqual(loop._petHidden, false, "stop() 后隐藏态应已复位");
+});
+
+// —— 被丢弃的 tick 不该做 PNG 编码 ——
+// 修复前：captureScreen() 无条件 image.toPNG()（1280×720 约 10~30ms CPU），
+// 而"画面未变 / 上一轮在途 / 未到心跳"的判定发生在截屏**之后** ——
+// 默认 2000ms 间隔、12 小时约 21600 次截屏，绝大多数编码结果被直接丢掉。
+// 现在 pngBuffer 是惰性 getter，loop.js 只在真的要发给多模态模型时才读它。
+
+// 一帧"内容恒定"的假截屏：FrameChangeDetector 除首帧外一律判定"未变化"。
+// pngBuffer 用 getter 计数，从而能证明"这一帧到底有没有被编码"。
+function countingFrame(counter, seq = 0) {
+  return {
+    bitmap: Buffer.alloc(400, seq),
+    width: 10,
+    height: 10,
+    get pngBuffer() {
+      counter.png += 1;
+      return Buffer.from("png");
+    },
+  };
+}
+
+test("画面未变化的 tick 不触发 PNG 编码（只有真要发给模型的那一帧才编码）", async () => {
+  const counter = { png: 0, chats: 0 };
+  let frames = 0;
+  const loop = new PerceptionLoop({
+    intervalMs: 10,
+    // 恒定内容：首帧后 detector 一律判定未变化 → 后续 tick 都该被丢弃
+    captureFn: async () => {
+      frames += 1;
+      return countingFrame(counter, 7);
+    },
+    chatFn: async () => {
+      counter.chats += 1;
+      return JSON.stringify({
+        scene: "other",
+        confidence: 0.3,
+        scene_evidence: {},
+        observation: "普通桌面操作，没有课程或游戏",
+      });
+    },
+  });
+  try {
+    loop.start();
+    await waitUntil(() => frames >= 5, "至少跑过 5 次 tick");
+  } finally {
+    loop.stop();
+  }
+  // 首帧 detector.changed 返回 true（无基准帧）→ 恰好一次感知 → 恰好一次 PNG 编码
+  assert.strictEqual(counter.chats, 1, "只有首帧该触发感知请求");
+  assert.strictEqual(
+    counter.png,
+    1,
+    `PNG 编码次数必须等于感知次数，实际 ${counter.png} 次（跑了 ${frames} 次 tick）`
+  );
+});
+
+test("感知请求发出时才读 pngBuffer，且同一帧只编码一次", async () => {
+  const counter = { png: 0 };
+  const loop = new PerceptionLoop({
+    intervalMs: 100000,
+    captureFn: async () => countingFrame(counter, 1),
+    chatFn: async ({ images }) => {
+      assert.ok(Buffer.isBuffer(images[0]), "感知请求必须真的带上 PNG 数据");
+      return JSON.stringify({
+        scene: "other",
+        confidence: 0.3,
+        scene_evidence: {},
+        observation: "普通桌面操作，没有课程或游戏",
+      });
+    },
+  });
+  const frame = countingFrame(counter, 1);
+  assert.strictEqual(counter.png, 0, "构造帧本身不该编码");
+  await loop._perceive(frame, loop._epoch);
+  assert.strictEqual(counter.png, 1, "感知一次只应读一次 pngBuffer");
 });

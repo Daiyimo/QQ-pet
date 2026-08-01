@@ -2,13 +2,19 @@
 // 由 doMain.js require 后挂载 global.achievement；各触发点（喂食/钓鱼/签到/旅游/升级）
 // 调用 achievement.check(trigger) 即可，本模块内部做幂等与庆祝气泡。
 //
-// 存储说明：
+// 存储说明（已核对 src/ini/pet.js 的默认 info 表与 setPetInfo 实现后订正；
+// 本段旧版本称 achievements 会被静默丢弃，那个前提已经不成立，别再照抄）：
 //   规范存储位置是 petInfo.info.achievements = { <成就id>: <解锁ISO时间> }。
-//   但当前 src/ini/pet.js 的 setPetInfo 只合并默认表里已存在的 info 键，
-//   achievements 不在默认表中会被静默丢弃，因此这里做双写：
-//     1) setPetInfo({ info: { achievements } }) —— 按约定写入（将来 pet.js 补字段后即生效）
-//     2) $Store.setItem("achievements", map)    —— 当前真正落盘的兜底存储
-//   读取时两边取并集，保证将来切换存储位置不丢数据。
+//   setPetInfo 只遍历默认 info 表里已有的键，而 pet.js 的默认表**现在已经包含**
+//   achievements:{}；它的写入判据是 `l[t] == e.info[t]` —— 对象走引用比较，
+//   loadUnlocked 每次都新建一份 map，引用恒不相等，所以这一路**确实写得进去**：
+//   内存 info.achievements 被替换，并随 $Store.setItem("pet", ...) 一起落盘。
+//   仍然保留双写，但两路现在都是真实存储：
+//     1) setPetInfo({ info: { achievements } }) —— 规范位置，随 pet 存档落盘
+//     2) $Store.setItem("achievements", map)    —— 独立键的兜底存储（老存档数据在这里）
+//   读取时两边取并集，兼容只有其中一路有数据的存档。
+//   注意：$Store.getItem 读失败会上抛（src/ini/store.js），"读不到" 不等于 "没解锁"，
+//   见 readStore / check 的降级处理。
 const { Level } = require("../windows/util/pet/level.js");
 
 // onLineTime 单位为分钟（stateInfo 中 /60 换算成小时展示），100 小时 = 6000 分钟
@@ -130,14 +136,29 @@ function createAchievementService(deps = {}) {
     },
   };
 
-  // 读取已解锁表：$Store 兜底存储 与 petInfo.info.achievements 取并集
+  // 读兜底存储。$Store.getItem 现在读失败会上抛（src/ini/store.js），而本模块被
+  // aiWiring.js 的 60 秒定时器周期调用 —— 一次瞬时读失败绝不能被当成「一条都没解锁」。
+  // 返回 { ok, map, error }，由调用方各自决定降级行为并留日志（这里不打日志，避免
+  // 同一次失败被记两遍）。
+  function readStore() {
+    try {
+      const m = store.get();
+      return { ok: true, map: m && typeof m === "object" ? m : {} };
+    } catch (e) {
+      return { ok: false, error: e };
+    }
+  }
+
+  // 读取已解锁表：$Store 兜底存储 与 petInfo.info.achievements 取并集。
+  // 返回 { ok, map, error }：ok 为 false 表示兜底存储读失败、解锁状态未知。
   function loadUnlocked(petInfo) {
+    const r = readStore();
+    if (!r.ok) return r;
     const map = {};
-    const fromStore = store.get();
-    if (fromStore && typeof fromStore === "object") Object.assign(map, fromStore);
+    Object.assign(map, r.map);
     const fromInfo = petInfo && petInfo.info && petInfo.info.achievements;
     if (fromInfo && typeof fromInfo === "object") Object.assign(map, fromInfo);
-    return map;
+    return { ok: true, map };
   }
 
   // 持久化已解锁表（双写，见文件头说明）。两路都失败时成就会在下次 check 重新解锁并重复庆祝，
@@ -201,7 +222,18 @@ function createAchievementService(deps = {}) {
   // 返回本次新解锁数组 [{ id, name, desc, icon, unlockedAt }]
   function check(trigger) {
     const petInfo = getPetInfoFn() || {};
-    const unlockedMap = loadUnlocked(petInfo);
+    const loaded = loadUnlocked(petInfo);
+    // 解锁记录读不到 -> 跳过本轮巡检。若退化成空表继续判定，所有早已达成的成就都会
+    // 被当成「新解锁」：60 秒巡检会每分钟刷一批庆祝气泡，persist 还会把这份残缺表
+    // 写回两路存储、污染存档。宁可这一分钟不判，下一轮读成功自然补上（check 幂等）。
+    if (!loaded.ok) {
+      console.error(
+        `[service/achievement] 读取已解锁成就记录失败，跳过本轮巡检（trigger=${trigger}，不判定、不庆祝、不落盘，下一轮读成功后自动补上）:`,
+        (loaded.error && loaded.error.stack) || loaded.error
+      );
+      return [];
+    }
+    const unlockedMap = loaded.map;
     const ctx = buildContext(petInfo);
     const newly = [];
     for (const def of ACHIEVEMENTS) {
@@ -226,9 +258,21 @@ function createAchievementService(deps = {}) {
 
   // 全量成就视图，供成就窗口展示：
   // [{ id, name, desc, icon, unlocked, unlockedAt }]
+  // 兜底存储读失败时不上抛（上层 popups/achievement/main.js 的 sendList 只有 catch +
+  // console.warn，抛出去等于面板永远空白），降级为只用 petInfo.info.achievements 渲染。
+  // 这条路径纯展示：不写存储、不弹气泡，最坏结果是少显示几条已解锁记录。
   function getAll() {
     const petInfo = getPetInfoFn() || {};
-    const unlockedMap = loadUnlocked(petInfo);
+    const loaded = loadUnlocked(petInfo);
+    let unlockedMap = loaded.map;
+    if (!loaded.ok) {
+      console.error(
+        "[service/achievement] 读取已解锁成就记录失败，成就面板改用 petInfo.info.achievements 单路渲染，可能少显示部分已解锁记录:",
+        (loaded.error && loaded.error.stack) || loaded.error
+      );
+      const fromInfo = petInfo.info && petInfo.info.achievements;
+      unlockedMap = fromInfo && typeof fromInfo === "object" ? fromInfo : {};
+    }
     return ACHIEVEMENTS.map((def) => ({
       ...defView(def),
       unlocked: !!unlockedMap[def.id],

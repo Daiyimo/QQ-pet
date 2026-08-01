@@ -201,6 +201,95 @@ test("空 petInfo / 字段全缺失不抛错", () => {
   assert.equal(r.service.getAll().length, ACHIEVEMENTS.length);
 });
 
+// ---- 兜底存储读失败（$Store.getItem 现在上抛，见 src/ini/store.js）----
+// aiWiring.js 用 60 秒定时器周期调 check("timer")。若读失败退化成「空表」，
+// 每一轮都会把已达成的成就重新判成新解锁：气泡刷屏 + 用残缺表覆盖两路存储。
+
+// 读失败的服务实例：store.get 抛错，其余依赖同 makeService
+function makeFailingStoreService(petInfo, sys = {}) {
+  const calls = { setPetInfo: [], openSpeak: [], storeSet: [] };
+  const err = new Error("store read boom");
+  const service = createAchievementService({
+    getPetInfo: () => petInfo,
+    setPetInfo: (d) => calls.setPetInfo.push(d),
+    openSpeak: (opt) => calls.openSpeak.push(opt),
+    getSys: (name) => (name ? sys[name] : sys),
+    store: {
+      get: () => {
+        throw err;
+      },
+      set: (m) => calls.storeSet.push(m),
+    },
+  });
+  return { service, calls, err };
+}
+
+test("兜底存储读失败时 check 跳过本轮：不解锁、不庆祝、不落盘", () => {
+  const r = makeFailingStoreService(pet({ fishing: { harvestfish: 2000 } }));
+  assert.deepEqual(r.service.check("timer"), []);
+  assert.equal(r.calls.openSpeak.length, 0, "读不到记录时不得弹庆祝气泡");
+  assert.equal(r.calls.setPetInfo.length, 0, "不得把残缺表写回 petInfo");
+  assert.equal(r.calls.storeSet.length, 0, "不得把残缺表写回 $Store");
+});
+
+test("兜底存储读失败时 check 不上抛（60 秒巡检不因一次读失败断流）", () => {
+  const r = makeFailingStoreService(pet({ fishing: { harvestfish: 2000 } }));
+  assert.doesNotThrow(() => r.service.check("timer"));
+});
+
+test("连续多轮读失败不会重复庆祝：三轮巡检气泡数仍为 0", () => {
+  const r = makeFailingStoreService(pet({ info: { growth: 216700 }, fishing: { harvestfish: 2000 } }));
+  r.service.check("timer");
+  r.service.check("timer");
+  r.service.check("timer");
+  assert.equal(r.calls.openSpeak.length, 0);
+  assert.equal(r.calls.setPetInfo.length, 0);
+});
+
+test("读失败只是跳过一轮：下一轮读成功后照常解锁并庆祝（幂等补上）", () => {
+  // 前一半用会抛的 store，后一半换成正常内存 store，验证「跳过」不是「永久放弃」
+  const calls = { setPetInfo: [], openSpeak: [] };
+  const mem = { map: {}, fail: true };
+  const petInfo = pet({ fishing: { harvestfish: 2000 } });
+  const service = createAchievementService({
+    getPetInfo: () => petInfo,
+    setPetInfo: (d) => calls.setPetInfo.push(d),
+    openSpeak: (opt) => calls.openSpeak.push(opt),
+    getSys: () => undefined,
+    store: {
+      get: () => {
+        if (mem.fail) throw new Error("store read boom");
+        return mem.map;
+      },
+      set: (m) => {
+        mem.map = m;
+      },
+    },
+  });
+  assert.deepEqual(service.check("timer"), []);
+  mem.fail = false;
+  assert.deepEqual(
+    service.check("timer").map((a) => a.id),
+    ["fishMaster"]
+  );
+  assert.equal(calls.openSpeak.length, 1, "恢复后只庆祝一次");
+  assert.equal(calls.setPetInfo.length, 1);
+});
+
+test("兜底存储读失败时 getAll 不上抛，降级用 petInfo.info.achievements 渲染", () => {
+  const ISO = "2026-01-01T00:00:00.000Z";
+  const r = makeFailingStoreService(pet({ info: { achievements: { hatch: ISO } } }));
+  let all;
+  assert.doesNotThrow(() => {
+    all = r.service.getAll();
+  });
+  assert.equal(all.length, ACHIEVEMENTS.length, "面板不得因读失败变空白");
+  assert.equal(all.find((a) => a.id === "hatch").unlocked, true);
+  assert.equal(all.find((a) => a.id === "hatch").unlockedAt, ISO);
+  assert.equal(all.find((a) => a.id === "fishMaster").unlocked, false);
+  assert.equal(r.calls.setPetInfo.length, 0, "展示路径不得写存储");
+});
+
 // ---- 老存档兼容：已解锁过「小富翁」（id: rich，已从定义表移除）的存档 ----
 // 定义表已无 rich，但老存档的 $Store.achievements / info.achievements 里仍有这条记录。
 
@@ -244,4 +333,36 @@ test("老存档 rich 记录在后续解锁落盘时被原样保留，不覆盖�
   assert.equal(r.calls.setPetInfo.length, 1);
   assert.equal(r.calls.setPetInfo[0].info.achievements.rich, ISO);
   assert.ok(r.calls.setPetInfo[0].info.achievements.hatch);
+});
+
+// ---- 钉死 achievement.js 头注释所述的存储机制（放最后：本用例会加载 src/ini/pet.js 并
+//      覆写 setPetInfo / getPetInfo 等全局，上面的用例全部走注入依赖，不受影响）----
+// 头注释曾断言 info.achievements 会被 setPetInfo 静默丢弃；pet.js 的默认 info 表补上
+// achievements:{} 之后这条已不成立。注释与实现漂移过一次，这里用真实 pet.js 钉住。
+test("info.achievements 经 ini/pet.js 的 setPetInfo 真的写得进去并随 pet 存档落盘", () => {
+  const storeWrites = [];
+  global.$Store = { setItem: (k, v) => storeWrites.push([k, v]), getItem: () => ({}) };
+  global.windowsMain = { setOpacity: () => {} };
+  global.JSONto = (e) => JSON.parse(JSON.stringify(e));
+  const PET_PATH = require.resolve("../src/ini/pet.js");
+  delete require.cache[PET_PATH];
+  require(PET_PATH);
+
+  const ISO = "2026-01-01T00:00:00.000Z";
+  globalThis.setPetInfo({ info: { achievements: { hatch: ISO } } });
+  assert.deepEqual(
+    globalThis.getPetInfo().info.achievements,
+    { hatch: ISO },
+    "achievements 在默认 info 表里，且对象走引用比较，赋值必定生效"
+  );
+  const petWrite = storeWrites.filter(([k]) => k === "pet").pop();
+  assert.ok(petWrite, "写入 achievements 应触发一次 pet 落盘");
+  assert.deepEqual(petWrite[1].info.achievements, { hatch: ISO });
+
+  // 反向对照：不在默认 info 表里的键（signin，见本文件上方签到用例的说明）确实仍被丢弃，
+  // 证明上面的断言不是「setPetInfo 什么都收」的恒真结论。
+  const before = storeWrites.length;
+  globalThis.setPetInfo({ info: { signin: { streak: 7 } } });
+  assert.equal(globalThis.getPetInfo().info.signin, undefined, "signin 不在默认表 -> 丢弃");
+  assert.equal(storeWrites.length, before, "全部字段被丢弃时不产生落盘");
 });

@@ -23,6 +23,21 @@ const ASSISTANT_COOLDOWN_MS = 16 * 1000;
 const ASSISTANT_DEDUP_WINDOW_MS = 60 * 1000;
 const PERCEPTION_MAX_TOKENS = 1500;
 
+// 失败日志节流：感知失败是持续性的（Key 失效、视觉模型不支持图片时每一轮都会失败），
+// 逐轮打日志会把控制台刷满。首次记一条，之后每 N 次记一条。
+// N 取 10 的依据：退避封顶 30s（见 start() 的 backoff），10 次失败 ≈ 5 分钟一条，
+// 与 HEARTBEAT_MS 同量级——足以确认"故障仍在持续"，又不至于刷屏。
+const PERCEPTION_FAILURE_LOG_EVERY = 10;
+// 连续失败达到该次数时向用户弹一次气泡（此前用户开了感知却完全无从察觉它已失效）。
+// 取 3 的依据：默认 interval 2s + 指数退避，3 次失败约 14s 内发生，
+// 既能滤掉单次抖动（网络瞬断、偶发 5xx），又能让"从未配置视觉提供商"这类
+// 必然失败在十几秒内被用户看见。
+const PERCEPTION_FAILURE_NOTIFY_THRESHOLD = 3;
+// 可预期的业务错误特征：均由用户的配置/账户状态导致，改配置即可解决，记 warn 足够。
+// 覆盖 providers.js 抛出的"未配置 LLM 提供商"/"缺少 API Key"，以及 HTTP 4xx
+// （模型不支持图片时的 400、Key 失效的 401、欠费的 402/403、限流的 429）。
+const EXPECTED_PERCEPTION_ERROR_RE = /(?:尚未|未)配置|缺少 API Key|HTTP 4\d\d/;
+
 // 屏幕闲置时的摸鱼吐槽（移植 service.py SCREEN_IDLE_MESSAGES）
 const SCREEN_IDLE_MESSAGES = [
   "是在摸鱼吗？",
@@ -204,7 +219,8 @@ class PerceptionLoop extends EventEmitter {
     this.lastAssistantAt = 0;
     this.recentAssistantMessages = []; // [{text, at}]，最多 6 条
     this._petHidden = false; // 游戏场景下桌宠是否处于隐藏态
-    this._failures = 0; // 连续感知失败计数（用于指数退避）
+    this._failures = 0; // 连续感知失败计数（用于指数退避与失败日志节流）
+    this._failureNotified = false; // 本轮连续失败是否已告知过用户（只弹一次气泡）
   }
 
   _interval() {
@@ -220,11 +236,9 @@ class PerceptionLoop extends EventEmitter {
   }
 
   _barrageEnabled() {
-    // 弹幕默认开启；注意 getSys(key) 会把存储的 false 吞成 undefined（pet.js 用 || 取值），
-    // 必须读整个 sys 对象判原始值
+    // 弹幕默认开启；getSys 已修复为 in 语义，存储的 false 能如实读出
     if (typeof getSys !== "function") return true;
-    const sys = getSys() || {};
-    return sys.barrageEnabled !== false;
+    return getSys("barrageEnabled") !== false;
   }
 
   start() {
@@ -233,18 +247,29 @@ class PerceptionLoop extends EventEmitter {
     this.detector.reset();
     this.idleMonitor.reset();
     this._failures = 0;
+    this._failureNotified = false;
     const epoch = ++this._epoch; // 本次运行周期；旧周期的续作全部作废
     const tick = () => {
       if (!this.running || epoch !== this._epoch) return;
       this._tick(epoch)
         .then(() => {
+          // 同样要比对 epoch：被作废的 tick 若恰好成功，不该把新周期的失败计数清零
+          if (epoch !== this._epoch) return;
           this._failures = 0;
+          this._failureNotified = false;
         })
         .catch((e) => {
+          // 先判 epoch 再自增。本轮已被 stop() 作废（含 stop() 主动 abort 造成的失败）时：
+          // 不计失败、不记日志、不告警、不上报。
+          // 自增原先在 epoch 判定之前，会把被作废 tick 的失败数记到新运行周期上，
+          // 让重新开启后的第一轮就带着不该有的退避。
+          if (epoch !== this._epoch) return;
           // 连续失败指数退避：interval × 2^n，封顶 30s（API key 失效/断网时不至于狂打请求）
           this._failures = (this._failures || 0) + 1;
-          // 本轮已被 stop() 作废（含 stop() 主动 abort 造成的失败）：不再对外上报
-          if (epoch !== this._epoch) return;
+          // perception-failed 事件目前无生产监听者（EventEmitter 对无监听的非 error 事件
+          // 静默返回 false），失败必须在这里无条件落日志，否则整条链路完全不可诊断。
+          this._logFailure(e);
+          this._maybeNotifyFailure();
           this.emit("perception-failed", { error: e?.message || String(e) });
         })
         .finally(() => {
@@ -284,6 +309,49 @@ class PerceptionLoop extends EventEmitter {
     }
     this.emitter.cancel();
     this._restoreFromGame();
+  }
+
+  // 失败日志。分级依据：错误信息命中 EXPECTED_PERCEPTION_ERROR_RE 的属"用户配置/账户
+  // 状态导致的可预期业务错误"（未配置提供商、缺 Key、HTTP 4xx），堆栈对排查无价值，
+  // 记 warn + message；其余（网络栈异常、JSON 解析崩溃、代码缺陷）属意料外，记 error
+  // + 完整堆栈。两条都写明降级后的行为，便于从日志判断桌宠此刻在做什么。
+  _logFailure(e) {
+    const n = this._failures;
+    // 节流：首次 + 每 PERCEPTION_FAILURE_LOG_EVERY 次
+    if (n !== 1 && n % PERCEPTION_FAILURE_LOG_EVERY !== 0) return;
+    const tail =
+      `（连续第 ${n} 次失败，本轮感知跳过，将在退避后重试；` +
+      `连续失败 ${PERCEPTION_FAILURE_NOTIFY_THRESHOLD} 次后会气泡告知用户）:`;
+    if (EXPECTED_PERCEPTION_ERROR_RE.test(e?.message || String(e || ""))) {
+      console.warn(`[perception/loop] 屏幕感知失败${tail}`, e?.message || e);
+    } else {
+      console.error(`[perception/loop] 屏幕感知异常${tail}`, e?.stack || e);
+    }
+  }
+
+  // 连续失败超阈值时经气泡（openSpeak，与主动发言/摸鱼提醒同一条用户可见通道，
+  // 自带免打扰门禁）告知用户一次。只告知一次：下一次成功或 start() 才会复位标志。
+  _maybeNotifyFailure() {
+    if (this._failureNotified) return;
+    if (this._failures < PERCEPTION_FAILURE_NOTIFY_THRESHOLD) return;
+    this._failureNotified = true; // 先置位：openSpeak 抛错也不重复弹
+    if (typeof openSpeak !== "function") return;
+    try {
+      openSpeak({
+        data: {
+          type: "text",
+          data: "屏幕感知一直失败啦，可能是视觉模型没配置或者不支持看图，去设置里检查一下吧～",
+          submitText: "",
+        },
+        active: "speak",
+        nextActiveStr: "speak",
+      });
+    } catch (err) {
+      console.error(
+        "[perception/loop] 感知故障告知气泡失败（用户将无从察觉感知已失效）:",
+        err && err.stack ? err.stack : err
+      );
+    }
   }
 
   async _tick(epoch = this._epoch) {
@@ -461,6 +529,7 @@ class PerceptionLoop extends EventEmitter {
     try {
       openSpeak({
         data: { type: "text", data: cleaned, submitText: "" },
+        active: "speak",
         nextActiveStr: "speak",
       });
     } catch (e) {
@@ -531,4 +600,7 @@ module.exports = {
   buildPerceptionResult,
   cleanDuplexMessage,
   SCREEN_IDLE_MESSAGES,
+  // 导出供回归测试断言节流/告警阈值，避免测试里硬编码魔法数字
+  PERCEPTION_FAILURE_LOG_EVERY,
+  PERCEPTION_FAILURE_NOTIFY_THRESHOLD,
 };

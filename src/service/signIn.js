@@ -54,22 +54,33 @@ function emptyState() {
   return { last: "", streak: 0, total: 0 };
 }
 
-// 读取签到状态，字段容错归一化
+// 读取签到状态，字段容错归一化。
+// 内存态优先规则：writeState 先写 memoryState 再 setSys 落盘，若落盘失败（磁盘满/断电），
+// 奖励已发但 sys 里仍是旧状态，当天会再次判定"未签到"而重复刷奖励。
+// 因此 sys 读到状态后还要与 memoryState 比新旧：last 为定长零填充的 "YYYY-MM-DD"，
+// 字典序即时间序，memoryState.last >= sys.last 时以内存态为准。
+// 已知边界：内存兜底只覆盖本进程内——落盘失败后若重启，sys 仍是旧状态，当天理论上
+// 可再签一次；彻底消除需"先确认落盘成功再发奖励"的时序改造，暂不接受该复杂度。
 function readState() {
+  let sysState = null;
   try {
     if (typeof getSys === "function") {
       const s = getSys("signin");
-      if (s && typeof s === "object") {
-        return {
-          last: typeof s.last === "string" ? s.last : "",
-          streak: Number(s.streak) || 0,
-          total: Number(s.total) || 0,
-        };
-      }
-      return emptyState();
+      sysState =
+        s && typeof s === "object"
+          ? {
+              last: typeof s.last === "string" ? s.last : "",
+              streak: Number(s.streak) || 0,
+              total: Number(s.total) || 0,
+            }
+          : emptyState();
     }
   } catch (e) {
-    console.error("[signIn] readState 读取失败，回退内存态:", (e && e.stack) || e);
+    console.error("[signIn] readState 读取失败，回退内存态:", e?.stack || e);
+  }
+  if (sysState) {
+    if (memoryState && memoryState.last >= sysState.last) return memoryState;
+    return sysState;
   }
   return memoryState || emptyState();
 }
@@ -79,7 +90,7 @@ function writeState(state) {
   try {
     if (typeof setSys === "function") setSys({ name: "signin", value: state });
   } catch (e) {
-    console.error("[signIn] writeState 落盘失败:", (e && e.stack) || e);
+    console.error("[signIn] writeState 落盘失败:", e?.stack || e);
   }
 }
 
@@ -172,7 +183,7 @@ function grantRewards(rewards) {
       },
     });
   } catch (e) {
-    console.log("signIn grantRewards error", e);
+    console.error("[signIn] grantRewards 发放奖励失败:", e?.stack || e);
   }
 }
 
@@ -189,7 +200,7 @@ function celebrate(streak, rewards) {
       nextActiveStr: "speak",
     });
   } catch (e) {
-    console.error("[signIn] celebrate 气泡失败:", (e && e.stack) || e);
+    console.error("[signIn] celebrate 气泡失败:", e?.stack || e);
   }
 }
 
@@ -201,4 +212,9 @@ module.exports = {
   addDays,
   getStatus,
   doSignIn,
+  // —— 单元测试注入点（仅测试调用，生产代码不要用）——
+  // memoryState 是模块级兜底态，测试间必须复位，否则上一个用例的签到状态会泄漏
+  __resetMemoryState() {
+    memoryState = null;
+  },
 };

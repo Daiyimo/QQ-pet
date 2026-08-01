@@ -8,6 +8,7 @@ const signIn = require("../src/service/signIn.js");
 
 // 每个用例前重置一套干净的全局 mock，返回 { store, speaks } 便于断言
 function setup() {
+  signIn.__resetMemoryState(); // 模块级内存兜底态也必须复位，否则跨用例泄漏
   const store = {
     sys: {}, // 模拟 $Store("sys")：setSys({name, value}) -> sys[name] = value
     pet: { info: { yb: 300, growth: 0, name: "小Q" } }, // 模拟宠物数据

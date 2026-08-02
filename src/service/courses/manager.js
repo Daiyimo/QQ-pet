@@ -79,6 +79,19 @@ function isExpectedSummaryError(e) {
   );
 }
 
+// 是否需要（重）生成终稿总结。判据是"有没有真的产出过 summary"，而不是"有没有 summary_error"。
+// 依据：finishSession 先把 status 置 finalizing、再 await _generateFinalSummary（这个顺序不可换，
+// 见该处注释），所以"总结途中崩溃/断电"在磁盘上留下的正是 finalizing + 空 summary +
+// summary_error=null。按 summary_error 判会把它误当成"只差导出"，直接导出一份既没有总结、
+// 也没写失败说明的 README 并置 complete，此后 repo.recoverable() 再也不列出它
+// → 那节课的总结永久丢失且无法重试，而 state 显示一切正常。
+// 反向也成立：summary 非空 ⟺ _generateFinalSummary 真的成功过（_askSummarizer 对空响应抛错），
+// 因此"summary 完好、只是导出环节失败"的会话不会被拖去白跑一次 LLM。
+function needsSummaryRerun(state) {
+  if (!state) return false;
+  return !String(state.summary || "").trim() || !!state.summary_error;
+}
+
 function speakBubble(text) {
   if (typeof openSpeak !== "function") return;
   openSpeak({
@@ -161,15 +174,20 @@ class CourseManager extends EventEmitter {
       (s) => s && s.id && !(this.currentSession && this.currentSession.id === s.id)
     );
     if (!targets.length) return result; // 正常启动的常态：不留任何日志
-    // 需要重跑总结的会话才吃 LLM；"只差导出"的（finalizing/failed 且无 summary_error）
-    // 沿用已有 summary 直接重导，未配置提供商也照样能恢复
-    const needsSummary = (s) => s.status === "recording" || !!s.summary_error;
-    const summarizerReady = targets.some(needsSummary) ? this._hasSummarizer() : true;
+    // 需要重跑总结的会话才吃 LLM 门禁；"只差导出"的（summary 完好、只是导出/落盘失败）
+    // 沿用已有 summary 直接重导，未配置提供商也照样能恢复。
+    // 判据见 needsSummaryRerun（原先的 `s.status === "recording"` 是死分支：recoverable()
+    // 只返回 finalizing/failed/complete+summary_error，永远不含 recording；真有滞留的
+    // recording 会话由 handleCoursePerception 的僵尸收养接手，不走恢复）。
+    // 转写为空的会话虽然 summary 也为空，但 _generateFinalSummary 读到空转写会直接返回、
+    // 一次 LLM 都不打，所以未配置提供商时它照样该被恢复导出——门禁额外要求转写非空。
+    const needsLlm = (s) => needsSummaryRerun(s) && !!this.repo.readTranscript(s.id).trim();
+    const summarizerReady = targets.some(needsLlm) ? this._hasSummarizer() : true;
     const batch = [];
     const overBound = [];
     const noProvider = [];
     for (const session of targets) {
-      if (needsSummary(session) && !summarizerReady) {
+      if (needsLlm(session) && !summarizerReady) {
         noProvider.push(session.id);
       } else if (batch.length >= MAX_RECOVERY_PER_STARTUP) {
         overBound.push(session.id);
@@ -420,9 +438,10 @@ class CourseManager extends EventEmitter {
       // 已完成且总结齐备的会话直接返回（幂等，避免重复导出）；
       // 但"总结失败的 complete 会话"必须放行重试，否则 complete 会永久掩盖缺失的总结
       if (state.status === "complete" && !state.summary_error) return state;
-      // 需要（重）生成总结：录制中的新会话，或上次总结失败的会话。
-      // finalizing/failed 且无 summary_error 时是导出环节失败，沿用已有 summary 直接重导。
-      const needSummary = state.status === "recording" || !!state.summary_error;
+      // 需要（重）生成总结：尚未真的产出过 summary（新会话、或总结途中崩溃遗留的
+      // finalizing/failed 会话），或上次总结失败留下了 summary_error。
+      // summary 完好而 status 是 finalizing/failed 时才是纯导出环节失败，沿用已有 summary 直接重导。
+      const needSummary = needsSummaryRerun(state);
       // 关键：置 finalizing 必须发生在 _generateFinalSummary 之前。总结是串行 N 次 LLM
       // 调用（每次上限 CHAT_TIMEOUT_MS），期间若 status 仍是 recording，
       // repo.findRecordingSession() 会把正在结稿的会话再"收养"回去 → 新转写写进已总结的
@@ -673,6 +692,7 @@ class CourseManager extends EventEmitter {
 
 module.exports = {
   CourseManager,
+  needsSummaryRerun,
   STARTUP_RECOVERY_DELAY_MS,
   MAX_RECOVERY_PER_STARTUP,
   MAX_EXPORTED_COURSES,

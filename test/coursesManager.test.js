@@ -12,6 +12,7 @@ const path = require("node:path");
 
 const {
   CourseManager,
+  needsSummaryRerun,
   STARTUP_RECOVERY_DELAY_MS,
   MAX_RECOVERY_PER_STARTUP,
   MAX_EXPORTED_COURSES,
@@ -416,12 +417,18 @@ test("看门狗触发的结稿即使总结失败也不会形成重试风暴", as
 // 依旧只替换 _askSummarizer / _hasSummarizer（云端调用层与配置门禁）与时钟、定时器。
 // ===========================================================================
 
-// 造一个"崩溃遗留"的会话：写好转写后把 status 直接改成目标状态（模拟进程被杀）
-function makeStrandedSession(repo, { id, status, summaryError = null, text = "遗留的转写" }) {
+// 造一个"崩溃遗留"的会话：写好转写后把 status 直接改成目标状态（模拟进程被杀）。
+// summary 是关键参数：非空 = 总结早已成功、只是导出/落盘环节失败（恢复不该再吃 LLM）；
+// 空 = 总结根本没产出过（含"总结途中崩溃"这一档），恢复必须重跑总结。
+function makeStrandedSession(
+  repo,
+  { id, status, summaryError = null, summary = "", text = "遗留的转写" }
+) {
   repo.createSession({ title: `遗留课程 ${id}`, sessionId: id });
   if (text) repo.appendTranscript(id, text);
   const state = repo.getState(id);
   state.status = status;
+  state.summary = summary;
   state.summary_error = summaryError;
   return repo.saveState(id, state);
 }
@@ -429,8 +436,13 @@ function makeStrandedSession(repo, { id, status, summaryError = null, text = "�
 test("启动恢复：构造时只挂 unref 延迟定时器，不在启动路径上做任何同步恢复", async () => {
   await withTempWorkspace(async (root) => {
     const repo = new CourseRepo(path.join(root, "sessions"));
-    // finalizing 且无 summary_error = 只差导出，恢复不需要 LLM
-    makeStrandedSession(repo, { id: "auto-strand1", status: "finalizing" });
+    // finalizing + summary 完好 + 无 summary_error = 总结早已产出、只差导出，恢复不需要 LLM
+    //（这也是本用例没有替换 _askSummarizer 的前提：真调云端必然失败）
+    makeStrandedSession(repo, {
+      id: "auto-strand1",
+      status: "finalizing",
+      summary: "### 课程概览\n崩溃前已经生成好的总结",
+    });
     let recoverableCalls = 0;
     const listRecoverable = repo.recoverable.bind(repo);
     repo.recoverable = () => {
@@ -544,7 +556,11 @@ test("未配置 LLM 提供商时：需重跑总结的会话跳过且只提示一
       status: "failed",
       summaryError: "Error: 缺少 API Key",
     });
-    makeStrandedSession(w.repo, { id: "auto-n3", status: "finalizing" }); // 只差导出
+    makeStrandedSession(w.repo, {
+      id: "auto-n3",
+      status: "finalizing",
+      summary: "### 课程概览\n总结早就写好了",
+    }); // 只差导出
 
     let result;
     const logs = await captureConsole(async () => {
@@ -588,6 +604,135 @@ test("列举可恢复会话失败时启动恢复只记 error 不抛错（不阻�
     assert.equal(errors.length, 1);
     assert.match(errors[0], /\n\s+at /, "意外异常必须带堆栈");
   });
+});
+
+// —— P1：总结途中崩溃遗留的会话（finalizing + 空 summary + summary_error=null）——
+// finishSession 先置 finalizing 再跑总结，所以这三项同时成立时是"总结途中被杀"，
+// 而不是"只差导出"。按 summary_error 判会直接导出一份没有总结的稿子并置 complete，
+// 此后 recoverable() 再也不列出它 —— 总结永久丢失且不可重试。
+
+test("崩溃遗留的 finalizing 会话（summary 为空、summary_error 为 null）恢复时必须重跑总结", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, {
+      summarize: async () => "### 课程概览\n补跑出来的总结\n\n### 知识点\n- 崩溃前没来得及总结",
+    });
+    w.mgr._hasSummarizer = () => true;
+    const stranded = makeStrandedSession(w.repo, {
+      id: "auto-crash1",
+      status: "finalizing",
+      text: "崩溃前记下的转写内容",
+    });
+    assert.equal(stranded.summary, "", "前提：总结途中被杀，summary 还是空的");
+    assert.equal(stranded.summary_error, null, "前提：崩溃来不及写 summary_error");
+
+    let result;
+    await captureConsole(async () => {
+      result = await w.mgr.recoverPending();
+    });
+
+    assert.equal(w.asks.length, 1, "总结缺失的会话恢复时必须重跑总结（桩 LLM 应被调用）");
+    assert.deepEqual(result, { recovered: 1, retried: 1, skipped: 0 });
+    const state = w.repo.getState("auto-crash1");
+    assert.equal(state.status, "complete");
+    assert.equal(state.summary_error, null);
+    assert.match(state.summary, /补跑出来的总结/);
+    const readme = fs.readFileSync(state.output_path, "utf8");
+    assert.match(readme, /## 课程总结\n\n### 课程概览/, "导出稿必须含总结小节");
+    assert.match(readme, /崩溃前没来得及总结/);
+    assert.deepEqual(w.mgr.recoverable(), [], "补上总结后不再是待重试会话");
+  });
+});
+
+test("崩溃遗留会话重跑总结仍失败：写 summary_error 且保持可恢复（不焊死恢复入口）", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, {
+      summarize: async () => {
+        throw new Error("openai HTTP 429: rate limited");
+      },
+    });
+    w.mgr._hasSummarizer = () => true;
+    makeStrandedSession(w.repo, {
+      id: "auto-crash2",
+      status: "finalizing",
+      text: "崩溃前记下的转写内容",
+    });
+
+    let result;
+    const logs = await captureConsole(async () => {
+      result = await w.mgr.recoverPending();
+    });
+
+    assert.equal(w.asks.length, 1, "重跑了一次总结");
+    assert.deepEqual(result, { recovered: 0, retried: 1, skipped: 0 });
+    const state = w.repo.getState("auto-crash2");
+    assert.match(state.summary_error, /HTTP 429/, "重跑仍失败必须留痕");
+    assert.equal(state.summary, "", "失败时不得凭空产出总结");
+    assert.deepEqual(
+      w.mgr.recoverable().map((s) => s.id),
+      ["auto-crash2"],
+      "重跑失败的会话必须仍被 recoverable() 列出，恢复入口不能被 complete 焊死"
+    );
+    const readme = fs.readFileSync(state.output_path, "utf8");
+    assert.match(readme, /总结生成失败：Error: openai HTTP 429/, "导出稿必须写明总结缺失与原因");
+    assert.equal(
+      logs.warn.filter((m) => m.includes("生成课程总结失败")).length,
+      1,
+      "失败必须留且只留一条 warn"
+    );
+  });
+});
+
+test("summary 完好、只是导出失败的会话恢复时不重跑 LLM（防止修过头白花钱）", async () => {
+  await withTempWorkspace(async (root) => {
+    const w = makeRealWorld(root, {
+      summarize: async () => {
+        throw new Error("summary 完好的会话不该再打 LLM");
+      },
+    });
+    // 提供商可用也不该调用：判据是"有没有产出过 summary"，不是"能不能调 LLM"
+    w.mgr._hasSummarizer = () => true;
+    makeStrandedSession(w.repo, {
+      id: "auto-export1",
+      status: "failed",
+      summary: "### 课程概览\n上次已经总结好的内容\n\n### 知识点\n- 只是写盘失败",
+      text: "导出失败会话的转写",
+    });
+
+    let result;
+    await captureConsole(async () => {
+      result = await w.mgr.recoverPending();
+    });
+
+    assert.equal(w.asks.length, 0, "summary 完好只差导出的会话绝不能重跑总结（白花钱）");
+    assert.deepEqual(result, { recovered: 1, retried: 1, skipped: 0 });
+    const state = w.repo.getState("auto-export1");
+    assert.equal(state.status, "complete");
+    assert.equal(state.summary_error, null);
+    assert.match(state.summary, /上次已经总结好的内容/, "沿用已有 summary，不得被覆盖");
+    assert.match(
+      fs.readFileSync(state.output_path, "utf8"),
+      /## 课程总结\n\n### 课程概览\n上次已经总结好的内容/,
+      "重导出的稿子直接用已有总结"
+    );
+  });
+});
+
+test("needsSummaryRerun：判据是产出过 summary，而不是有没有 summary_error", () => {
+  // 崩溃遗留的三件套：finalizing + 空 summary + summary_error=null
+  assert.equal(needsSummaryRerun({ status: "finalizing", summary: "", summary_error: null }), true);
+  assert.equal(needsSummaryRerun({ status: "recording", summary: "", summary_error: null }), true);
+  assert.equal(needsSummaryRerun({ status: "failed", summary: "   ", summary_error: null }), true);
+  // 总结失败留痕的会话：重试
+  assert.equal(
+    needsSummaryRerun({ status: "complete", summary: "有总结", summary_error: "Error: HTTP 429" }),
+    true
+  );
+  // summary 完好、只是导出/落盘失败：不重跑
+  assert.equal(needsSummaryRerun({ status: "failed", summary: "有总结", summary_error: null }), false);
+  assert.equal(
+    needsSummaryRerun({ status: "finalizing", summary: "有总结", summary_error: null }),
+    false
+  );
 });
 
 // —— 多块总结的部分成功保留 ——

@@ -17,6 +17,7 @@ const {
   DEBOUNCE_MS,
   DEBOUNCED_KEYS,
   SAVE_SIZE_WARN_BYTES,
+  SAVE_SIZE_CHECK_EVERY_FLUSHES,
   /* 被测源码路径可用 QQ_STORE_CACHE_SRC 覆盖，专为"变异测试/回滚验证"准备：
      把修复回滚后的版本写进临时文件，再
      `QQ_STORE_CACHE_SRC=<临时文件> node --test test/storeCache.test.js`，
@@ -537,4 +538,115 @@ test("createStoreCache：启动即做一次体积检查，并把 flush 钩子挂
   assert.equal(app.handlers["will-quit"].length, 1);
   assert.equal(app.handlers["quit"].length, 1);
   assert.notEqual(app.exit, undefined);
+});
+
+/* ------------------------------------------------------------------ *
+ * 运行期体积护栏：周期抽检 + 用户可见告知一次
+ *
+ * 修复的缺陷：原来体积检查只在 createStoreCache（启动期）跑一次，长会话里涨过阈值当场
+ * 无感；而且只 console.warn —— 用户看不到日志，等于没有护栏。
+ * ------------------------------------------------------------------ */
+
+/** 记录 openSpeak 气泡内容（生产里 openSpeak 是主进程全局，与 courses/manager.js 同一通道） */
+function withSpeakStub(fn) {
+  const bubbles = [];
+  const prev = global.openSpeak;
+  global.openSpeak = (opt) => bubbles.push(opt && opt.data && opt.data.data);
+  try {
+    fn(bubbles);
+  } finally {
+    if (prev === undefined) delete global.openSpeak;
+    else global.openSpeak = prev;
+  }
+  return bubbles;
+}
+
+/** 每次写穿一个非防抖键 = 一次成功落盘；用它把 flush 次数推到抽检点 */
+function flushTimes(cache, count, keyPrefix = "sys") {
+  for (let i = 0; i < count; i++) cache.set(keyPrefix, { i });
+}
+
+test("运行期体积抽检：flush 到抽检点才 statSync，超阈值恰好一次 warn + 一次气泡，之后不重复", () => {
+  const bundle = makeOwner();
+  let statCalls = 0;
+  const { cache } = makeCache(bundle, {
+    fs: {
+      statSync: () => {
+        statCalls += 1;
+        return { size: 3 * 1024 * 1024 }; // 3MB > 2MB 阈值
+      },
+    },
+  });
+
+  withSpeakStub((bubbles) => {
+    const logs = captureConsole(() => {
+      flushTimes(cache, SAVE_SIZE_CHECK_EVERY_FLUSHES - 1);
+      assert.equal(statCalls, 0, "抽检点之前绝不许在 flush 热路径上做同步 statSync");
+      assert.deepEqual(bubbles, []);
+
+      flushTimes(cache, 1); // 第 N 次成功落盘 → 抽检
+      assert.equal(statCalls, 1, "到抽检点必须真的查一次体积");
+
+      // 再刷两个完整周期：日志与气泡都不许重复（否则变成骚扰）
+      flushTimes(cache, SAVE_SIZE_CHECK_EVERY_FLUSHES * 2);
+    });
+
+    const hits = logs.warn.filter((m) => m.includes("存档体积"));
+    assert.equal(hits.length, 1, "超阈值的日志每进程只该出现一次");
+    assert.ok(hits[0].includes("3.00MB") && hits[0].includes(CONFIG_PATH), hits[0]);
+    assert.equal(statCalls, 3, "抽检严格按周期发生，不是每次 flush 都查");
+    assert.equal(bubbles.length, 1, "必须对用户可见，且只提示一次");
+    assert.match(bubbles[0], /3\.0MB/);
+    assert.match(bubbles[0], /存档/);
+  });
+});
+
+test("运行期体积抽检：正常体积下到抽检点也零 warn 零气泡", () => {
+  const bundle = makeOwner();
+  const { cache } = makeCache(bundle, { fs: { statSync: () => ({ size: 40 * 1024 }) } });
+
+  withSpeakStub((bubbles) => {
+    const logs = captureConsole(() => flushTimes(cache, SAVE_SIZE_CHECK_EVERY_FLUSHES * 3));
+    assert.deepEqual(logs.warn, [], "健康存档不许有任何告警刷屏");
+    assert.deepEqual(logs.error, []);
+    assert.deepEqual(bubbles, [], "健康存档不许弹气泡");
+  });
+});
+
+test("运行期体积抽检：启动期没有 openSpeak（气泡未送达）时，后续抽检要补上提示", () => {
+  const bundle = makeOwner();
+  const size = SAVE_SIZE_WARN_BYTES + 1;
+  const { cache } = makeCache(bundle, { fs: { statSync: () => ({ size }) } });
+
+  // 启动期这次检查跑在 openSpeak 挂上全局之前（store.js 由 init.js 最早加载）
+  captureConsole(() => assert.equal(cache.warnIfSaveTooLarge(), size));
+
+  withSpeakStub((bubbles) => {
+    captureConsole(() => flushTimes(cache, SAVE_SIZE_CHECK_EVERY_FLUSHES));
+    assert.equal(bubbles.length, 1, "气泡通道一旦可用就必须补上提示，否则用户永远收不到");
+    captureConsole(() => flushTimes(cache, SAVE_SIZE_CHECK_EVERY_FLUSHES));
+    assert.equal(bubbles.length, 1, "补上之后依旧只提示一次");
+  });
+});
+
+test("运行期体积抽检：失败的 flush 不计入抽检次数（没落盘就没有新增体积）", () => {
+  let fail = true;
+  const bundle = makeOwner({}, { onSet: () => (fail ? new Error("EBUSY: locked") : null) });
+  let statCalls = 0;
+  const { cache } = makeCache(bundle, {
+    fs: {
+      statSync: () => {
+        statCalls += 1;
+        return { size: 1024 };
+      },
+    },
+  });
+
+  captureConsole(() => {
+    for (let i = 0; i < SAVE_SIZE_CHECK_EVERY_FLUSHES + 5; i++) cache.set("sys", { i });
+    assert.equal(statCalls, 0, "落盘失败的路径不该触发体积抽检");
+    fail = false;
+    flushTimes(cache, SAVE_SIZE_CHECK_EVERY_FLUSHES);
+    assert.equal(statCalls, 1);
+  });
 });

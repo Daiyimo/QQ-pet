@@ -13,6 +13,7 @@ const {
 const {
   MemoryActivityRecorder,
   cleanActivityText,
+  MAX_THROTTLE_SLOTS,
 } = require("../src/service/memory/activity.js");
 const { MemoryStore, localDayString } = require("../src/service/memory/store.js");
 
@@ -201,6 +202,100 @@ test("recorder：900s 内相似文本去重，超窗放行", () => {
   advance(801); // 累计 1001s > 900s 窗口，相似文本也放行
   assert.ok(
     recorder.record({ scene: "other", confidence: 0.9, text: "用户正在浏览哔哩哔哩的视频" })
+  );
+  assert.equal(events.length, 2);
+});
+
+// —— 节流按场景分槽（回归：单槽实现下场景交替会让两道闸门同时失效）——
+// sceneStabilizer 只需连续 2 帧就翻面，"看游戏实况视频"会让 scene 在 game/other 之间反复
+// 抖动。单槽实现里节流与去重都带"与上一次场景相同"的前置条件，交替时每次 record 都直落
+// store.appendEvent（主进程同步 fsync），事件量暴涨 10 倍以上，把 store.js 的轮转窗口从
+// ~42 天压到几天 —— 回补历史天的记忆会因为源数据被轮转掉而静默丢失。
+test("recorder：场景在 game/other 之间交替时，各自的 120s 节流仍然生效（不被穿透）", () => {
+  const { recorder, events, advance } = makeRecorder();
+  // 首轮两个场景各记一条（各自开窗）
+  assert.ok(recorder.record({ scene: "game", confidence: 0.9, text: "玩家正在操作角色攻击怪物" }));
+  advance(10);
+  assert.ok(recorder.record({ scene: "other", confidence: 0.9, text: "用户在编写项目代码并调试程序" }));
+  assert.equal(events.length, 2);
+
+  // 之后交替喂 5 轮（每轮 game/other 各一次、各间隔 10s，全部落在两个槽各自的 120s 窗口内）：
+  // 单槽实现下这 10 次会全部落库（每次 scene 都 ≠ 上一次，两道闸门同时被跳过）
+  for (let i = 0; i < 5; i++) {
+    advance(10);
+    assert.equal(
+      recorder.record({ scene: "game", confidence: 0.9, text: `玩家正在操作角色释放技能第${i}次` }),
+      null,
+      "game 槽仍在 120s 节流窗口内，必须被拦下"
+    );
+    advance(10);
+    assert.equal(
+      recorder.record({ scene: "other", confidence: 0.9, text: `用户在编写项目代码修改模块${i}` }),
+      null,
+      "other 槽仍在 120s 节流窗口内，必须被拦下"
+    );
+  }
+  assert.equal(events.length, 2, "场景交替不得穿透节流（单槽实现这里会是 12）");
+});
+
+test("recorder：分槽后同场景节流依旧生效，且一个场景的记录不重置另一个场景的窗口", () => {
+  const { recorder, events, advance } = makeRecorder();
+  assert.ok(recorder.record({ scene: "game", confidence: 0.9, text: "玩家正在操作角色攻击怪物" }));
+
+  advance(130); // game 已过 120s；先让 other 记一条，不能因此重置 game 的计时
+  assert.ok(recorder.record({ scene: "other", confidence: 0.9, text: "用户在编写项目代码并调试程序" }));
+  assert.ok(
+    recorder.record({ scene: "game", confidence: 0.9, text: "玩家正在驾驶载具穿越城市街道" }),
+    "game 槽自己的窗口已过期，必须放行"
+  );
+  assert.equal(events.length, 3);
+
+  advance(60); // game 槽刚记录过，60s < 120s
+  assert.equal(
+    recorder.record({ scene: "game", confidence: 0.9, text: "玩家正在整理背包里的道具装备" }),
+    null,
+    "同场景节流不得因为改成 Map 而失灵"
+  );
+  assert.equal(events.length, 3);
+});
+
+test("recorder：场景值异常增长时槽位有上限，不会无限占用内存", () => {
+  const { recorder, advance } = makeRecorder();
+  for (let i = 0; i < 50; i++) {
+    advance(1);
+    recorder.record({ scene: `weird-${i}`, confidence: 0.9, text: `外部传入的异常场景值第${i}次` });
+  }
+  assert.ok(
+    recorder.lastByScene.size <= MAX_THROTTLE_SLOTS,
+    `槽位数必须钉在 ${MAX_THROTTLE_SLOTS} 以内，实际 ${recorder.lastByScene.size}`
+  );
+});
+
+test("recorder：系统时钟被回拨时事件不被静默丢弃（放行并留日志）", () => {
+  const { recorder, events, advance } = makeRecorder();
+  assert.ok(recorder.record({ scene: "other", confidence: 0.9, text: "用户在编写项目代码并调试程序" }));
+
+  advance(-3600); // NTP 大步长校正 / 用户手动改时间：回拨一小时
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args.map((a) => String(a)).join(" "));
+  let result;
+  try {
+    result = recorder.record({ scene: "other", confidence: 0.9, text: "用户在观看在线电影片段内容" });
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.ok(result, "时钟回拨期间的记忆事件绝不能被静默吞掉");
+  assert.equal(events.length, 2);
+  assert.equal(warns.length, 1, "回拨必须留下一条可检索的日志");
+  assert.match(warns[0], /\[memory\/activity\] .*时钟回拨/);
+
+  // 放行时已用新的 now 重新计时：紧接着的同场景写入照旧被节流，不会变成"每次都放行"
+  advance(30);
+  assert.equal(
+    recorder.record({ scene: "other", confidence: 0.9, text: "用户在整理硬盘里的照片文件" }),
+    null,
+    "回拨放行后必须以新时钟重新开窗"
   );
   assert.equal(events.length, 2);
 });

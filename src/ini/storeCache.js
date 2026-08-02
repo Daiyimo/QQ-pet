@@ -74,6 +74,30 @@ const DEBOUNCED_KEYS = new Set(["pet"]);
 const SAVE_SIZE_WARN_BYTES = 2 * 1024 * 1024;
 const BYTES_PER_MB = 1024 * 1024;
 
+/* 体积抽检周期（按成功落盘次数计）。依据：稳态落盘频率由 GrowUp.js 的 60s 心跳主导，
+   每 20 次成功 flush ≈ 20 分钟检查一次 —— 存档是"只增不减"的慢变量（背包 / 鱼 / 成就），
+   分钟级的发现延迟毫无代价，而每次 flush 都 statSync 等于在热路径上加一次同步 IO，
+   恰恰是本模块存在的理由所要消除的东西。20 次 statSync 摊到 20 分钟，开销可忽略。
+   只在启动期查一次是不够的：桌宠常驻数小时到数天，长会话内涨过阈值会完全无感。 */
+const SAVE_SIZE_CHECK_EVERY_FLUSHES = 20;
+
+/* 用户可见告知（气泡）。console.warn 用户根本看不到，等于没有护栏 —— 与 courses/manager.js
+   的桌面导出上限用的是同一条通道、同一套"每进程只提示一次"的取舍：每次落盘都弹会变成骚扰，
+   重启后允许再提示一次，正好覆盖"用户一直没清理"的情形。 */
+function speakBubble(text) {
+  if (typeof openSpeak !== "function") return false;
+  try {
+    openSpeak({
+      data: { type: "text", data: text, submitText: "" },
+      nextActiveStr: "speak",
+    });
+    return true;
+  } catch (e) {
+    logError("存档体积提示气泡弹出失败（仅日志可见）:", e);
+    return false;
+  }
+}
+
 function logError(message, error) {
   console.error(`[ini/storeCache] ${message}`, error && error.stack ? error.stack : error);
 }
@@ -109,6 +133,12 @@ class StoreCache {
     /** 待落盘写入 key -> value。flush 成功即清空；flush 失败保留原值以便下次重试。 */
     this._pending_cache = new Map();
     this._timer = null;
+    /** 体积抽检：成功落盘计数（每 SAVE_SIZE_CHECK_EVERY_FLUSHES 次查一次，不在热路径 statSync）。 */
+    this._flushesSinceSizeCheck = 0;
+    /** 超阈值日志只记一次（每 20 分钟重复一条只会淹没日志，而用户根本看不到日志）。 */
+    this._sizeWarnLogged = false;
+    /** 超阈值气泡只弹一次（每进程）；只有气泡真的送达才置位，见 warnIfSaveTooLarge。 */
+    this._sizeOverflowNotified = false;
     /** 可观测性：线上排查与测试都靠它判断"读写到底降没降"。 */
     this.stats = { backendReads: 0, backendWrites: 0, flushes: 0, coalesced: 0 };
   }
@@ -180,6 +210,7 @@ class StoreCache {
       else backend.set(Object.fromEntries(entries));
       this.stats.flushes += 1;
       this.stats.backendWrites += 1;
+      this._maybeCheckSaveSize();
       return true;
     } catch (e) {
       this._restorePending(batch);
@@ -271,7 +302,8 @@ class StoreCache {
   }
 
   /**
-   * 启动时对存档体积做一次告警检查（不阻断启动）。
+   * 存档体积检查（启动时一次 + 落盘后周期抽检；不阻断任何流程）。
+   * 超阈值时除了 warn 还会经 openSpeak 气泡告知用户一次 —— 只写日志等于没有护栏。
    * @returns {number|null} 字节数；取不到返回 null
    */
   warnIfSaveTooLarge() {
@@ -279,7 +311,7 @@ class StoreCache {
     try {
       filePath = this.owner.configFilePath();
     } catch (e) {
-      logError("取存档路径失败，跳过启动体积检查:", e);
+      logError("取存档路径失败，跳过本次体积检查:", e);
       return null;
     }
     let size;
@@ -288,19 +320,42 @@ class StoreCache {
     } catch (e) {
       // ENOENT 是首次启动的正常态（存档还没写出）
       if (!e || e.code !== "ENOENT") {
-        logError(`读取存档体积失败（${filePath}），跳过启动体积检查:`, e);
+        logError(`读取存档体积失败（${filePath}），跳过本次体积检查:`, e);
       }
       return null;
     }
     if (size > SAVE_SIZE_WARN_BYTES) {
-      console.warn(
-        `[ini/storeCache] 存档体积 ${(size / BYTES_PER_MB).toFixed(2)}MB 已超过告警阈值 ` +
-          `${(SAVE_SIZE_WARN_BYTES / BYTES_PER_MB).toFixed(2)}MB（${filePath}）：每次落盘都是` +
-          `主进程同步全量读写，会造成桌宠卡顿。常见成因：fishing.fishes、cache.store 背包、` +
-          `achievements 只增不减且无体积上界。`
-      );
+      if (!this._sizeWarnLogged) {
+        this._sizeWarnLogged = true;
+        console.warn(
+          `[ini/storeCache] 存档体积 ${(size / BYTES_PER_MB).toFixed(2)}MB 已超过告警阈值 ` +
+            `${(SAVE_SIZE_WARN_BYTES / BYTES_PER_MB).toFixed(2)}MB（${filePath}）：每次落盘都是` +
+            `主进程同步全量读写，会造成桌宠卡顿。常见成因：fishing.fishes、cache.store 背包、` +
+            `achievements 只增不减且无体积上界。`
+        );
+      }
+      /* 气泡送达才算"已告知"：启动期这次检查跑在 openSpeak 挂上全局之前（store.js 由
+         init.js 最早加载），此时置位会让用户永远收不到提示；留着标志位，下一次周期抽检补上。 */
+      if (!this._sizeOverflowNotified) {
+        this._sizeOverflowNotified = speakBubble(
+          `[host]，我的存档已经涨到 ${(size / BYTES_PER_MB).toFixed(1)}MB 啦，` +
+            "每次存进度都会卡一下～有空清一清背包和钓到的鱼吧（我不会自己删你的东西哦）"
+        );
+      }
     }
     return size;
+  }
+
+  /**
+   * 落盘后的周期性体积抽检。
+   * 为什么不每次 flush 都查：statSync 是同步 IO，而 flush 正是本模块要保护的热路径
+   *（心跳 + 每次交互都会走到），在这里加一次无节流的同步 IO 等于重犯本模块要治的病。
+   */
+  _maybeCheckSaveSize() {
+    this._flushesSinceSizeCheck += 1;
+    if (this._flushesSinceSizeCheck < SAVE_SIZE_CHECK_EVERY_FLUSHES) return null;
+    this._flushesSinceSizeCheck = 0;
+    return this.warnIfSaveTooLarge();
   }
 
   /**
@@ -377,4 +432,5 @@ module.exports = {
   DEBOUNCE_MS,
   DEBOUNCED_KEYS,
   SAVE_SIZE_WARN_BYTES,
+  SAVE_SIZE_CHECK_EVERY_FLUSHES,
 };

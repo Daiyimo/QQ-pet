@@ -34,7 +34,7 @@ const PERCEPTION_MAX_TOKENS = 1500;
 const PERCEPTION_FAILURE_LOG_EVERY = 10;
 // 连续失败达到该次数时向用户弹一次气泡（此前用户开了感知却完全无从察觉它已失效）。
 // 取 3 的依据：默认 interval 2s + 指数退避，3 次失败约 14s 内发生，
-// 既能滤掉单次抖动（网络瞬断、偶发 5xx），又能让"从未配置视觉提供商"这类
+// 既能滤掉单次抖动（网络瞬断、偶发 5xx），又能让"从未配置提供商"这类
 // 必然失败在十几秒内被用户看见。
 const PERCEPTION_FAILURE_NOTIFY_THRESHOLD = 3;
 // 可预期的业务错误特征：均由用户的配置/账户状态导致，改配置即可解决，记 warn 足够。
@@ -44,7 +44,7 @@ const EXPECTED_PERCEPTION_ERROR_RE = /(?:尚未|未)配置|缺少 API Key|HTTP 4
 
 // —— 配置性失败 vs 瞬时失败 ——
 // 这两类失败该走的路完全相反，此前实现只按"要不要打堆栈"分级，两类混在一起无限退避重试：
-//   · 配置性失败（未配置视觉提供商 / 模型不支持图片 / Key 无效 / 欠费 / 地址写错）：
+//   · 配置性失败（未配置提供商 / 模型不支持图片 / Key 无效 / 欠费 / 地址写错）：
 //     不改配置永远不会成功，每一轮都是纯浪费（一次截屏 + 一次出网 + 一条日志），
 //     达 PERCEPTION_CONFIG_FAILURE_LIMIT 次即自动停用感知并告知用户。
 //   · 瞬时失败（限流 / 5xx / 网络抖动 / 超时 / 模型偶发不吐 JSON）：等一等就能恢复，
@@ -55,7 +55,27 @@ const EXPECTED_PERCEPTION_ERROR_RE = /(?:尚未|未)配置|缺少 API Key|HTTP 4
 // 「未配置 LLM 提供商」「缺少 API Key」「API 地址…」属配置性，其余（socket hang up、
 // timeout、响应解析失败）按瞬时。
 const TRANSIENT_HTTP_CODES = new Set([408, 425, 429]);
+// 感知响应解析失败的固定前缀（parsePerceptionJson 抛出，后接模型原文片段）。
+// 抽成常量是因为 classifyPerceptionError 要靠它把这条错误排除在关键词判定之外。
+const PERCEPTION_PARSE_FAILURE_PREFIX = "perception response is not valid JSON";
 const CONFIG_PERCEPTION_ERROR_RE = /(?:尚未|未)配置|缺少 API Key|API 地址/;
+// 图片能力关键词：HTTP 200 + body 带 error 字段的失败专用。不少 OpenAI 兼容网关
+// （以及部分 Anthropic 兼容端点）不用状态码报错，而是回 200 且把原因写在 body.error 里，
+// providers.js 的 chatOpenAI/chatAnthropic 对这类响应抛的是**不含状态码的裸服务商文案**
+// （见 providers.js `if (parsed.error) throw new Error(...)`），上面的 HTTP 分支抓不到 →
+// 此前一律判 transient → 无限退避重试、永不触发自动停用，对这类网关整条修复等于没生效。
+// 逐项收录依据（都是"不改配置永远不会成功"的图片能力问题，且都是真实见过的报错形态）：
+//   · 不支持…图片/图像/视觉/多模态：中文网关文案，如「模型 x 不支持图片输入」；
+//   · image/vision/multimodal 与 not supported/unsupported/not allowed… 同现：英文文案，
+//     如 "This model does not support image input"、"vision is not supported for this model"、
+//     "multimodal input is not allowed"；
+//   · invalid_image / invalid image：错误码形态（body.error.code），如 invalid_image_url；
+//   · image_url：内容类型被拒的文案，如 "Invalid content type image_url for model x"。
+// 刻意**不**收录裸 image / vision / multimodal，也不收录裸 not supported：前者会命中
+// 「图片下载失败」这类瞬时错误与模型原文，后者会命中与图片无关的临时性拒绝。
+// 误判成配置性的代价是感知被错误停用（要用户手动重开），比多重试几轮严重得多。
+const IMAGE_CAPABILITY_ERROR_RE =
+  /不支持[^，。；;]{0,8}(?:图片|图像|视觉|多模态)|(?:image|vision|multi-?modal)[\s\S]{0,32}?(?:not supported|unsupported|not allowed|not available|not enabled)|(?:not support|does ?n[o']?t support|can ?not support|unsupported)[\s\S]{0,32}?(?:image|vision|multi-?modal)|invalid[_ ]image|image_url/i;
 // 连续配置性失败达到该次数即停用感知。与 PERCEPTION_FAILURE_NOTIFY_THRESHOLD 同值：
 // "该告知用户"与"确认这不是抖动而是配置错"是同一时机，于是这类故障全程只弹一次气泡
 // （告知内容换成"已自动停用"），不会既弹"一直失败"又弹"已停用"。
@@ -64,13 +84,19 @@ const PERCEPTION_CONFIG_FAILURE_LIMIT = PERCEPTION_FAILURE_NOTIFY_THRESHOLD;
 // 返回 "config"（要用户改配置）| "transient"（可重试）
 function classifyPerceptionError(err) {
   const msg = err && err.message ? String(err.message) : String(err || "");
+  // 解析失败必须最先短路：这条错误的后半截是**模型原文片段**（见 parsePerceptionJson），
+  // 不是服务商的诊断信息，不能拿去做任何关键词/状态码判定。模型用英文描述屏幕时原文里
+  // 就带 image，会被图片能力关键词命中，把"这轮没吐 JSON"（下一轮就可能好）误判成
+  // 配置错并停用感知。
+  if (msg.startsWith(PERCEPTION_PARSE_FAILURE_PREFIX)) return "transient";
   const http = msg.match(/HTTP (\d{3})/);
   if (http) {
     const code = Number(http[1]);
     if (TRANSIENT_HTTP_CODES.has(code)) return "transient";
     return code >= 400 && code < 500 ? "config" : "transient";
   }
-  return CONFIG_PERCEPTION_ERROR_RE.test(msg) ? "config" : "transient";
+  if (CONFIG_PERCEPTION_ERROR_RE.test(msg)) return "config";
+  return IMAGE_CAPABILITY_ERROR_RE.test(msg) ? "config" : "transient";
 }
 
 // 屏幕闲置时的摸鱼吐槽（移植 service.py SCREEN_IDLE_MESSAGES）
@@ -147,7 +173,8 @@ function parsePerceptionJson(text) {
   }
   if (!isPlainObject(value)) {
     throw new Error(
-      "perception response is not valid JSON: " +
+      PERCEPTION_PARSE_FAILURE_PREFIX +
+        ": " +
         source.replace(/\s+/g, " ").slice(0, 200)
     );
   }
@@ -254,7 +281,7 @@ class PerceptionLoop extends EventEmitter {
     this._failures = 0; // 连续感知失败计数（用于指数退避与失败日志节流）
     this._failureNotified = false; // 本轮连续失败是否已告知过用户（只弹一次气泡）
     this._configFailures = 0; // 连续"配置性失败"计数（达阈值即自动停用感知）
-    this._visionFallbackWarned = false; // 视觉提供商回退提示是否已给过（每进程一次，避免开关一次刷一条）
+    this._visionNoticeGiven = false; // 看图模型提示是否已给过（每进程一次，避免开关一次刷一条）
   }
 
   _interval() {
@@ -336,11 +363,11 @@ class PerceptionLoop extends EventEmitter {
     if (this.timer.unref) this.timer.unref();
   }
 
-  // 视觉提供商预检：每次 start() 只做一次，且**不发任何真实请求**——用一次多模态调用去
+  // 看图提供商预检：每次 start() 只做一次，且**不发任何真实请求**——用一次多模态调用去
   // 探活只是把浪费提前。预检只读配置，回答"这份配置能不能指望它成功"：
-  //   · 单独配置了视觉提供商：静默通过；
-  //   · 回退到对话提供商（未配 visionProvider）：warn + 每进程一次气泡。回退本身是刻意保留的
-  //     便利，但若该对话模型不支持图片，此前会每轮截屏 + 每轮 400 且用户完全无从察觉；
+  //   · 有可用提供商（reason=chat）：warn + 每进程一次气泡。感知与对话共用同一个模型
+  //     （设置页只有这一处服务商表单），若该模型不支持图片，此前会每轮截屏 + 每轮 400
+  //     且用户完全无从察觉；气泡指向真实存在的入口——设置页的对话模型那一栏；
   //   · 没有可用提供商 / Key 不可解密：warn。用户可见告知交给失败路径——3 轮内会自动停用
   //     感知并弹一条带具体原因的气泡，比启动时的猜测更准确，也避免一次开关连弹两条。
   _precheckVisionProvider() {
@@ -349,29 +376,29 @@ class PerceptionLoop extends EventEmitter {
       info = resolveVisionProvider();
     } catch (e) {
       console.error(
-        "[perception/loop] 视觉提供商预检异常，跳过预检（感知照常启动，配置性失败仍会自动停用）:",
+        "[perception/loop] 看图提供商预检异常，跳过预检（感知照常启动，配置性失败仍会自动停用）:",
         e && e.stack ? e.stack : e
       );
       return;
     }
-    if (info.reason === "vision") return;
-    if (info.reason === "fallback-chat") {
+    if (info.reason === "chat") {
       console.warn(
-        "[perception/loop] 未单独配置视觉提供商，屏幕感知将回退使用对话提供商" +
+        "[perception/loop] 屏幕感知将使用对话提供商看图" +
           `（${info.cfg.id}/${info.cfg.model}）；该模型若不支持图片，感知会连续失败并` +
           `在 ${PERCEPTION_CONFIG_FAILURE_LIMIT} 次后自动停用`
       );
-      if (!this._visionFallbackWarned) {
-        this._visionFallbackWarned = true;
+      if (!this._visionNoticeGiven) {
+        this._visionNoticeGiven = true;
         this._speak(
-          "我会用对话模型来看屏幕哦～要是它不会看图，我就先不看啦，记得在设置里配一个会看图的模型～",
-          "视觉提供商回退提示"
+          "我会用对话模型来看屏幕哦～要是它不会看图，我就先不看啦，" +
+            "可以在设置里把对话模型换成支持看图的型号～",
+          "看图模型提示"
         );
       }
       return;
     }
     console.warn(
-      "[perception/loop] 屏幕感知已开启但没有可用的视觉/对话提供商" +
+      "[perception/loop] 屏幕感知已开启但没有可用的对话提供商" +
         `（原因：${info.reason}），每轮都会失败，将在 ${PERCEPTION_CONFIG_FAILURE_LIMIT} 次后自动停用`
     );
   }
@@ -443,10 +470,32 @@ class PerceptionLoop extends EventEmitter {
     );
     this._failureNotified = true; // 本次已用"已停用"文案告知，不再叠加"一直失败"气泡
     this.stop(); // running=false + epoch 自增：不再排下一条 timer
+    // 停止只 hide 弹幕窗，销毁要另外做（见 destroyBarrageWindow 的注释）：
+    // 自动停用后设置页的开关仍显示"开"，用户点它只会走"关闭"分支再关一次，
+    // stopPerception() 那条销毁路径不会被走到，弹幕窗会一直活到进程结束。
+    this.destroyBarrageWindow();
     this._speak(
-      "屏幕感知一直失败，我先停下来啦～可能是没配置会看图的模型或者 Key 不对，去设置里检查一下再开启吧～",
+      "屏幕感知一直失败，我先停下来啦～可能是当前模型不会看图或者 Key 不对，" +
+        "去设置里换个会看图的模型再开启吧～",
       "感知已停用告知"
     );
+  }
+
+  // 销毁弹幕覆盖层（区别于 _restoreFromGame 的 hide）：那是个全屏透明、
+  // backgroundThrottling:false 的 BrowserWindow，只 hide 会让它连同渲染进程活到进程结束。
+  // perception/index.js 的 stopPerception() 与本文件的 _disableForConfigFailure 共用这一份
+  // 实现（走 global.barrageWindow，不 require index.js，避免 loop ↔ index 循环依赖）。
+  destroyBarrageWindow() {
+    const bw = global.barrageWindow;
+    if (!bw || typeof bw.destroy !== "function") return;
+    try {
+      bw.destroy();
+    } catch (e) {
+      console.error(
+        "[perception/loop] 销毁弹幕覆盖层失败（该窗口与其渲染进程会残留到退出）:",
+        e && e.stack ? e.stack : e
+      );
+    }
   }
 
   // 用户可见气泡的统一出口（openSpeak 不存在时静默跳过；抛错要留日志，否则用户无从察觉）

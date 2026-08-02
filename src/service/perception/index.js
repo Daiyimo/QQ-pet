@@ -17,9 +17,9 @@ function startPerception() {
 
 function stopPerception() {
   perceptionLoop.stop();
-  if (global.barrageWindow && typeof global.barrageWindow.destroy === "function") {
-    global.barrageWindow.destroy();
-  }
+  // 销毁走 loop 上的同一份实现：自动停用（loop 内部触发，不经过本文件）也要销毁弹幕窗，
+  // 两处必须同口径，否则会重演"停用后窗口残留"的泄漏。
+  perceptionLoop.destroyBarrageWindow();
 }
 
 module.exports = {

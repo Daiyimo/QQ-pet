@@ -531,7 +531,7 @@ function ensureLegacyMigrated() {
   _legacyMigrateTried = true;
 }
 
-// —— 提供商配置读取（sys: llmProviders / llmActiveProvider / visionProvider）——
+// —— 提供商配置读取（sys: llmProviders / llmActiveProvider）——
 function getProvider(providerId) {
   const list = sysGet("llmProviders");
   if (!providerId || !Array.isArray(list)) return null;
@@ -558,26 +558,26 @@ function hasChatProvider() {
   return !!(cfg && cfg.apiKey);
 }
 
-// 感知专用视觉提供商解析（带诊断信息）：未单独配置 visionProvider 时回退到对话提供商。
-// 回退本身是刻意保留的便利（多数对话模型也支持图片），但**回退且该模型不支持图片**时
-// 感知会每轮 400 —— 调用方（perception/loop.js）需要在启动时就知道自己处于回退态，
-// 因此这里除 cfg 之外还回报 fallback / reason，避免"静默回退 + 每轮失败"。
-// reason: "vision" 单独配置的视觉提供商 | "fallback-chat" 回退到对话提供商
-//       | "missing-vision" 配了 visionProvider 但列表里查不到 | "no-provider" 一个都没配
-//       | "no-key" 查到了但 apiKey 为空/不可解密
+// 感知看图用的提供商解析（带诊断信息）：**就是对话提供商**，没有第二套配置。
+// 历史上这里先读 sys.visionProvider、读不到才回退对话提供商，但设置页全程只有一处服务商
+// 表单（saveProviders([{id:"default"}]) + llmActiveProvider），全仓没有任何地方写
+// sys.visionProvider —— 它是个"读得到、写不进"的死键，于是每个开启感知的用户都必然走
+// 回退分支、必然吃到一条指向不存在设置项的提示。该键与其分支已一并删除。
+// 调用方（perception/loop.js）仍需要诊断信息：对话模型不支持图片时感知会每轮失败，
+// 启动预检要据此决定 warn/气泡。
+// reason: "chat" 有可用提供商（看不看得懂图要等真实请求才知道）
+//       | "no-provider" 一个都没配 | "no-key" 查到了但 apiKey 为空/不可解密
 function resolveVisionProvider() {
   ensureLegacyMigrated();
-  const vid = sysGet("visionProvider");
-  const fallback = !vid;
-  const cfg = vid ? getProvider(vid) : getChatProvider();
+  const cfg = getChatProvider();
   let reason;
-  if (!cfg) reason = fallback ? "no-provider" : "missing-vision";
+  if (!cfg) reason = "no-provider";
   else if (!cfg.apiKey) reason = "no-key";
-  else reason = fallback ? "fallback-chat" : "vision";
-  return { cfg, fallback, reason };
+  else reason = "chat";
+  return { cfg, reason };
 }
 
-// 感知专用视觉提供商；未单独配置时回退到对话提供商
+// 感知看图用的提供商（与对话共用同一份配置）
 function getVisionProvider() {
   return resolveVisionProvider().cfg;
 }

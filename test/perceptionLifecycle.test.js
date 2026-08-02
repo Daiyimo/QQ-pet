@@ -317,7 +317,7 @@ function failingLoop(error, intervalMs = 10) {
   });
 }
 
-test("未配置视觉提供商时的感知失败会留下 warn 日志并写明降级行为（此前 100% 静默）", async () => {
+test("未配置提供商时的感知失败会留下 warn 日志并写明降级行为（此前 100% 静默）", async () => {
   const spy = hookConsole();
   const loop = failingLoop(() => new Error("未配置 LLM 提供商"));
   try {
@@ -536,7 +536,200 @@ test("单次配置性失败不会停用感知（阈值前必须继续重试，�
   }
 });
 
-test("视觉提供商回退到对话提供商时，在启动处（而非每轮）warn + 每进程一次气泡", () => {
+// —— 缺陷 2：HTTP 200 + body 带 error 的失败 ——
+// 不少 OpenAI 兼容网关用「200 + body.error」报"模型不支持图片"，providers.js 对这类响应
+// 抛的是不含状态码的裸文案 → 此前只认 /HTTP \d{3}/ 的判定把它当瞬时错误 → 无限退避重试，
+// 自动停用永不触发，对这些网关整条修复等于没做。
+
+test("模型不支持图片但服务商回 200（错误信息不含状态码）时，同样在阈值后自动停用并告知一次", async () => {
+  const spy = hookConsole();
+  const prevSpeak = global.openSpeak;
+  const spoken = [];
+  global.openSpeak = (payload) => spoken.push(payload && payload.data && payload.data.data);
+  // providers.js 对 200 + body.error 抛的就是这样一条裸文案（无 "HTTP xxx"）
+  const message = "model does not support image input";
+  assert.ok(!/HTTP \d{3}/.test(message), "这条用例的前提就是错误信息里没有状态码");
+  const loop = failingLoop(() => new Error(message));
+  const captured = [];
+  const origCapture = loop.captureFn;
+  loop.captureFn = async (...args) => {
+    captured.push(1);
+    return origCapture(...args);
+  };
+  try {
+    loop.start();
+    await waitUntil(
+      () => loop.running === false,
+      "200 + body error 的图片能力失败也必须在阈值后自动停用"
+    );
+    assert.strictEqual(
+      loop._configFailures,
+      PERCEPTION_CONFIG_FAILURE_LIMIT,
+      "应恰好在连续第 N 次配置性失败时停用"
+    );
+    assert.strictEqual(loop.timer, null, "停用后不得残留 timer");
+    const capturesAtStop = captured.length;
+    await sleep(150);
+    assert.strictEqual(
+      captured.length,
+      capturesAtStop,
+      "停用后不得再截屏（此前这类网关会被无限重试）"
+    );
+  } finally {
+    loop.stop();
+    spy.restore();
+    if (prevSpeak === undefined) delete global.openSpeak;
+    else global.openSpeak = prevSpeak;
+  }
+  assert.strictEqual(
+    spoken.length,
+    1,
+    `停用只应告知一次（不叠加"一直失败"气泡），实际：${JSON.stringify(spoken)}`
+  );
+  assert.ok(
+    spoken[0].includes("停") && spoken[0].includes("设置"),
+    `气泡必须告知已停用并指向设置页，实际：${spoken[0]}`
+  );
+});
+
+test("图片能力关键词不得误伤瞬时失败：模型没吐 JSON / 超时 / 5xx 一律继续重试", () => {
+  const cases = [
+    // —— 该判 config 的图片能力失败（均为 200 + body.error 的裸文案形态）——
+    ["model does not support image input", "config"],
+    ["This model doesn't support vision", "config"],
+    ["模型 glm-x 不支持图片输入，请更换模型", "config"],
+    ["multimodal input is not allowed for this endpoint", "config"],
+    ["invalid_image_url: failed to process the provided image", "config"],
+    ["Invalid content type image_url for model deepseek-chat", "config"],
+    // —— 必须仍判 transient（正则改宽就会在这里变红）——
+    // 解析失败的错误信息后半截是**模型原文**：模型用英文描述屏幕时会带 image/vision，
+    // 若拿去做关键词判定，"这轮没吐 JSON"会被误判成配置错并停用感知。
+    [
+      "perception response is not valid JSON: The image shows a browser; multimodal is not supported by me",
+      "transient",
+    ],
+    ["perception response is not valid JSON: 画面里是一张图片，我不支持描述细节", "transient"],
+    // 与"模型不会看图"无关的瞬时故障，即使句子里出现 image/图片
+    ["failed to download image: socket hang up", "transient"],
+    ["图片上传超时，请重试", "transient"],
+    ["openai HTTP 502: bad gateway", "transient"],
+    ["request to https://api.example.com timed out after 30000ms", "transient"],
+    ["openai 响应缺少文本内容", "transient"],
+  ];
+  for (const [message, expected] of cases) {
+    assert.strictEqual(
+      classifyPerceptionError(new Error(message)),
+      expected,
+      `「${message}」应判为 ${expected}`
+    );
+  }
+});
+
+test("非配置性的持续失败（网络超时）不停用感知，继续退避重试", async () => {
+  const spy = hookConsole();
+  const prevSpeak = global.openSpeak;
+  global.openSpeak = () => {};
+  const loop = failingLoop(() => new Error("request timed out after 30000ms"));
+  try {
+    loop.start();
+    await waitUntil(
+      () => loop._failures >= PERCEPTION_CONFIG_FAILURE_LIMIT + 2,
+      "连续超过停用阈值若干轮"
+    );
+    assert.strictEqual(
+      loop.running,
+      true,
+      "瞬时失败被误判成配置性会让感知在网络抖动时被错误停用"
+    );
+    assert.strictEqual(loop._configFailures, 0, "超时不该被记成配置性失败");
+  } finally {
+    loop.stop();
+    spy.restore();
+    if (prevSpeak === undefined) delete global.openSpeak;
+    else global.openSpeak = prevSpeak;
+  }
+});
+
+// —— 缺陷 3：自动停用后弹幕窗泄漏 ——
+// stop() 只 hide 弹幕窗，销毁在 perception/index.js 的 stopPerception() 里。自动停用走的是
+// loop 内部的 stop()，那个全屏透明、backgroundThrottling:false 的 BrowserWindow 连同渲染
+// 进程会活到进程结束，而设置页开关此时显示"开"，用户点它只会走关闭分支——已无回收途径。
+
+test("配置性失败自动停用时销毁弹幕覆盖层（只 hide 会让全屏透明窗与其渲染进程残留到退出）", async () => {
+  const spy = hookConsole();
+  const prevSpeak = global.openSpeak;
+  const prevWindow = global.barrageWindow;
+  const calls = [];
+  global.openSpeak = () => {};
+  global.barrageWindow = {
+    show: () => calls.push("show"),
+    hide: () => calls.push("hide"),
+    destroy: () => calls.push("destroy"),
+  };
+  const loop = failingLoop(() => new Error("openai HTTP 400: image input not supported"));
+  try {
+    loop.start();
+    await waitUntil(() => loop.running === false, "配置性失败达阈值后应自动停用");
+  } finally {
+    loop.stop();
+    spy.restore();
+    if (prevSpeak === undefined) delete global.openSpeak;
+    else global.openSpeak = prevSpeak;
+    if (prevWindow === undefined) delete global.barrageWindow;
+    else global.barrageWindow = prevWindow;
+  }
+  assert.ok(
+    calls.includes("destroy"),
+    `自动停用必须销毁弹幕窗，实际只调用了：${JSON.stringify(calls)}`
+  );
+});
+
+test("stopPerception() 与自动停用共用同一份销毁实现（两条停止路径不得分叉）", () => {
+  const prevWindow = global.barrageWindow;
+  const calls = [];
+  global.barrageWindow = {
+    hide: () => calls.push("hide"),
+    destroy: () => calls.push("destroy"),
+  };
+  try {
+    const perception = require("../src/service/perception/index.js");
+    perception.stopPerception();
+    assert.ok(
+      typeof perception.perceptionLoop.destroyBarrageWindow === "function",
+      "销毁实现应挂在 loop 上，供 index.js 与自动停用共用"
+    );
+    assert.ok(
+      calls.includes("destroy"),
+      `stopPerception() 必须销毁弹幕窗，实际：${JSON.stringify(calls)}`
+    );
+  } finally {
+    if (prevWindow === undefined) delete global.barrageWindow;
+    else global.barrageWindow = prevWindow;
+  }
+});
+
+test("弹幕窗销毁抛错时留 error 日志且不影响停用流程（不得静默吞）", () => {
+  const prevWindow = global.barrageWindow;
+  const spy = hookConsole();
+  const loop = new PerceptionLoop({ intervalMs: 100000 });
+  global.barrageWindow = {
+    destroy: () => {
+      throw new Error("window already destroyed");
+    },
+  };
+  try {
+    loop.destroyBarrageWindow(); // 不得抛出
+  } finally {
+    spy.restore();
+    if (prevWindow === undefined) delete global.barrageWindow;
+    else global.barrageWindow = prevWindow;
+  }
+  const errors = spy.ours(spy.errors).filter((l) => l.includes("销毁弹幕覆盖层失败"));
+  assert.strictEqual(errors.length, 1, `销毁失败必须留 error，实际：${JSON.stringify(spy.errors)}`);
+  assert.ok(errors[0].includes("\n    at "), "意外异常必须记完整堆栈");
+});
+
+test("感知看图用的就是对话提供商：启动处（而非每轮）warn + 每进程一次气泡，且气泡指向真实存在的设置项", () => {
   const prevGetSys = global.getSys;
   const prevSpeak = global.openSpeak;
   const spoken = [];
@@ -544,7 +737,7 @@ test("视觉提供商回退到对话提供商时，在启动处（而非每轮�
   const loop = new PerceptionLoop({ intervalMs: 100000 });
   try {
     global.openSpeak = (p) => spoken.push(p && p.data && p.data.data);
-    // 只配了对话提供商、没配 visionProvider —— README 承认的静默回退路径
+    // 设置页唯一能写出来的形态：saveProviders([{id:"default"}]) + llmActiveProvider
     global.getSys = (key) =>
       ({
         llmActiveProvider: "default",
@@ -567,7 +760,7 @@ test("视觉提供商回退到对话提供商时，在启动处（而非每轮�
     if (prevSpeak === undefined) delete global.openSpeak;
     else global.openSpeak = prevSpeak;
   }
-  const warns = spy.ours(spy.warns).filter((l) => l.includes("未单独配置视觉提供商"));
+  const warns = spy.ours(spy.warns).filter((l) => l.includes("使用对话提供商看图"));
   assert.strictEqual(warns.length, 2, "每次启动都要留一条可诊断的 warn");
   assert.ok(
     warns[0].includes("chat-only-model"),
@@ -576,9 +769,64 @@ test("视觉提供商回退到对话提供商时，在启动处（而非每轮�
   assert.strictEqual(
     spoken.length,
     1,
-    `回退提示气泡每进程只弹一次，实际：${JSON.stringify(spoken)}`
+    `看图模型提示气泡每进程只弹一次，实际：${JSON.stringify(spoken)}`
+  );
+  // 缺陷 1 的核心：气泡曾指向一个用户根本无法配置的"视觉模型"设置项
+  // （sys.visionProvider 全仓无写入点），现在必须指向真实存在的入口——对话模型那一栏。
+  assert.ok(
+    spoken[0].includes("设置") &&
+      /(?:对话模型换成|换成支持看图|换个支持看图)/.test(spoken[0]),
+    `气泡必须指向真实存在的入口（把对话模型换成支持看图的型号），实际：${spoken[0]}`
+  );
+  assert.ok(
+    !/配(?:置)?一个|视觉模型|视觉提供商/.test(spoken[0]),
+    `气泡不得再指向那个用户根本配不出来的独立视觉模型设置项，实际：${spoken[0]}`
   );
   assert.deepStrictEqual(spy.ours(spy.errors), [], "预检本身不该报 error");
+});
+
+// 缺陷 1 的结构性防线：sys.visionProvider 是个"读得到、写不进"的死键
+// （resolveVisionProvider 读它，全仓无任何写入点），已随本次修复删除。
+// 这条断言防止这个键名以字符串字面量的形式（sysGet/setSys/UI 表单项）复活；
+// 只查带引号的字面量，源码注释里追述这段历史不算命中。
+test("死配置 sys.visionProvider 已从全仓消失（没有写入点的配置键不得被读写）", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const root = path.join(__dirname, "..");
+  // 只扫我方源码与测试：三方压缩产物（windows/lib、windows/js）不在治理范围内
+  const skipDirs = new Set([
+    "node_modules",
+    ".git",
+    "lib",
+    "js",
+    "out",
+    "dist",
+    "release",
+  ]);
+  const KEY_LITERAL_RE = /["'`]visionProvider["'`]/;
+  const hits = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue;
+        walk(path.join(dir, entry.name));
+        continue;
+      }
+      if (!/\.(js|json|html|md)$/.test(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (full === __filename) continue; // 本文件自身带着这个正则，不算命中
+      if (KEY_LITERAL_RE.test(fs.readFileSync(full, "utf8"))) {
+        hits.push(path.relative(root, full));
+      }
+    }
+  };
+  walk(path.join(root, "src"));
+  walk(path.join(root, "test"));
+  assert.deepStrictEqual(
+    hits,
+    [],
+    `sys.visionProvider 没有任何写入点，不得再被读写，命中：${hits.join(", ")}`
+  );
 });
 
 test("完全没有可用提供商时，启动预检留 warn 但不弹气泡（告知交给自动停用那条）", () => {
@@ -598,7 +846,7 @@ test("完全没有可用提供商时，启动预检留 warn 但不弹气泡（�
     if (prevSpeak === undefined) delete global.openSpeak;
     else global.openSpeak = prevSpeak;
   }
-  const warns = spy.ours(spy.warns).filter((l) => l.includes("没有可用的视觉/对话提供商"));
+  const warns = spy.ours(spy.warns).filter((l) => l.includes("没有可用的对话提供商"));
   assert.strictEqual(warns.length, 1, `应恰好一条 warn，实际：${JSON.stringify(spy.warns)}`);
   assert.ok(warns[0].includes("no-provider"), `warn 要带上判定原因，实际：${warns[0]}`);
   assert.deepStrictEqual(spoken, [], "启动预检此时不弹气泡，避免与停用告知重复");

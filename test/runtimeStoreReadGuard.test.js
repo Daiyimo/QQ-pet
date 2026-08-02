@@ -11,10 +11,16 @@
 //        这个 setTimeout 永不执行 → 按钮永久失灵，所以异常路径必须走到锁复位。
 //
 //   处 2 src/windows/tool/floatStyle/main.js —— 读的是纯 UI 参数 tool.floatStyle，
-//        后续只是渲染窗口，没有不可逆写操作，故回落内置默认值是安全且正确的。
+//        窗口照常打开、回落内置默认值是对的；但同一个 created 闭包里有防抖回写
+//        （_() → 2s 后 $Store.setItem("tool.floatStyle", a) 整体写回内存对象 a），
+//        所以【只回落还不够】：读失败后用户任一次微调（ALT+↑ 快捷键 / 面板保存）
+//        都会把「内置默认 + 这次微调」写回磁盘，静默吃掉原有的整套样式。
+//        故读失败时置闭包标志 _readFailed，_() 一律拒绝回写，本次会话改动只在内存生效。
 //        原先异常被外层 .catch(e=>console.log(e)) 兜住 → 窗口创建失败且用户毫无提示。
 //
-// 两处处理相反，区分依据只有一条：读失败后紧接着要做的事是否具有破坏性。
+// 两处处理不同，区分依据不是「紧接着要做的事是否具破坏性」（那条判据在处 2 判错过，
+// 导致过一轮 P0 数据丢失），而是：读失败后落在内存里的那个对象，后续会不会被任何
+// 路径整体回写磁盘。会 → 必须禁写（处 2）；紧跟不可逆写 → 必须中止（处 1）。
 //
 // 两个被测文件都是 webpack 压缩单行产物，因此全部用行为断言（桩 windowsMain 捕获
 // preloads 注册的 IPC 处理器后真实调用），只补两条结构护栏防后续再加裸调用。
@@ -25,6 +31,7 @@
 "use strict";
 
 const test = require("node:test");
+const { mock } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -217,10 +224,15 @@ const FLOAT_DEFAULT = { much: 100, op: 0.3, opmou: 1, opline: 0.3, pointSize: 5,
 
 /**
  * 加载 floatStyle/main.js 并驱动 created + mounted，
- * 返回 { sends, logs }：sends 为发往渲染层的 background 数据（即生效的样式对象）。
+ * 返回 { style, logs, writes }：style 为发往渲染层的 background 数据（即生效的样式对象），
+ * writes 为 $Store.setItem 的调用记录（深拷贝，防止后续 mutation 污染断言）。
+ *
+ * after 可选：在 mounted 之后、全局桩仍然装着时被调用，签名 ({ handlers, writes }) => void，
+ * 用于触发保存路径并推进假定时器（回写发生在 $Store 桩上，必须在恢复全局前完成）。
  */
-function openFloatStyle(getItem) {
+function openFloatStyle(getItem, after) {
   const sends = [];
+  const writes = [];
   const fakeWin = {
     webContents: { send: (ch, payload) => sends.push({ ch, payload }), reload() {} },
     setIgnoreMouseEvents() {},
@@ -232,7 +244,10 @@ function openFloatStyle(getItem) {
     shotycutsMain: global.shotycutsMain,
   };
   global.getScreenSize = () => [1920, 1080];
-  global.$Store = { getItem, setItem() {} };
+  global.$Store = {
+    getItem,
+    setItem: (key, value) => writes.push([key, JSON.parse(JSON.stringify(value))]),
+  };
   global.shotycutsMain = { AddLoop: () => {}, upShotycut: () => {}, loopShortcut: () => {} };
   let handlers = {};
   global.windowsMain = {
@@ -252,12 +267,13 @@ function openFloatStyle(getItem) {
       require(FLOAT_PATH).cleate();
       delete require.cache[FLOAT_PATH];
       handlers["floatStyle_h_bus_m"](null, { event: "mounted" });
+      if (after) after({ handlers, writes });
     })
   );
   Object.assign(global, origGlobals);
   const bg = sends.filter((s) => s.payload?.type === "background");
   assert.equal(bg.length, 1, "mounted 应把生效样式下发渲染层恰好一次");
-  return { style: bg[0].payload.data, logs };
+  return { style: bg[0].payload.data, logs, writes };
 }
 
 test("[Critical] 悬浮特效样式读失败：窗口照常打开并回落到内置默认值", () => {
@@ -276,7 +292,55 @@ test("[Critical] 悬浮特效样式读失败：窗口照常打开并回落到内
   assert.equal(logs.warn.length, 1, `可预期的降级应记恰好 1 条 warn，实际 ${logs.warn.length} 条`);
   assert.match(logs.warn[0], /\[tool\/floatStyle\]/, "日志前缀须为模块路径 [tool/floatStyle]");
   assert.match(logs.warn[0], /read boom/, "warn 须带错误信息");
+  assert.match(
+    logs.warn[0],
+    /不会保存|不保存|不再保存/,
+    "warn 必须告知「本次会话不会保存样式改动」这层后果——只说回落默认会让用户以为改动照常保存"
+  );
   assert.deepEqual(logs.log, [], "不得再用 console.log 兜错（不符合日志约定）");
+});
+
+test("[Critical] 悬浮特效样式读失败后：任何保存路径都不得回写磁盘（否则内置默认值会吃掉用户原有样式）", (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+
+  const { writes } = openFloatStyle(
+    () => {
+      throw new Error("read boom");
+    },
+    ({ handlers }) => {
+      // 用户在面板上改了一个参数并保存（等价于按一次 ALT+↑，两者都走同一个防抖 _()）
+      handlers["floatStyle_h_save_m"](null, JSON.stringify({ much: 42 }));
+      mock.timers.tick(2000); // 防抖到点
+      mock.timers.tick(10000); // 再多等等，确认不是延后写
+    }
+  );
+
+  assert.deepEqual(
+    writes,
+    [],
+    "读失败后禁止任何回写：此时内存里只有「内置默认 + 本次微调」，写回去会永久覆盖用户原有的整套悬浮特效样式"
+  );
+});
+
+test("悬浮特效样式读成功后：保存路径 2 秒防抖回写恰好一次，且带上用户这次的改动", (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+
+  const { writes } = openFloatStyle(
+    () => ({ much: 7, starContent: "#" }),
+    ({ handlers, writes }) => {
+      handlers["floatStyle_h_save_m"](null, JSON.stringify({ much: 42 }));
+      assert.deepEqual(writes, [], "防抖未到点前不该写盘");
+      mock.timers.tick(2000);
+    }
+  );
+
+  assert.equal(writes.length, 1, `读成功时保存必须真的落盘恰好一次，实际 ${writes.length} 次（若为 0，说明禁写守卫写成了永不保存）`);
+  assert.equal(writes[0][0], "tool.floatStyle");
+  assert.equal(writes[0][1].much, 42, "写入值必须包含用户这次的改动");
+  assert.equal(writes[0][1].starContent, "#", "存档里的其它键不得丢失");
+  assert.equal(writes[0][1].op, FLOAT_DEFAULT.op, "未存的键按内置默认写回（原语义不变）");
 });
 
 test("悬浮特效样式读成功：存档值覆盖默认值，未存的键仍取默认", () => {

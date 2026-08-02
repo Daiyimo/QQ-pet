@@ -595,6 +595,31 @@ test("窗口工厂：ipcMain 注册必须过发送方校验（窗口身份 + 顶
   );
 });
 
+test("窗口工厂：ipcMain.on 注册点必须唯一（不许再出现绕过 _guardIpc 的裸注册通道）", () => {
+  const src = stripComments(readSource(WINDOW_FACTORY));
+
+  /* 曾经存在 setPreload(e={})：对每个 key 直接 ipcMain.removeListener + ipcMain.on，**不过 _guardIpc**。
+     它当时零调用故不可利用，但与守卫同处一文件，任何人调一次就整体退回「约 70 条通道无发送方校验」；
+     且它拿不到 window entry（守卫的第一层要 entry.win.webContents 比对），结构上无法被守卫包住——
+     所以是删掉而不是包一层。这条断言钉住的是「注册点唯一」这个性质本身：
+     唯一的 ipcMain.on 必须是 created 回调里那处已过 _guardIpc 的注册（由上一条用例校验）。 */
+  const registrations = (src.match(/ipcMain\.on\(/g) || []).length;
+  assert.equal(
+    registrations,
+    1,
+    `${WINDOW_FACTORY}: ipcMain.on( 出现 ${registrations} 次，要求恰好 1 次。` +
+      `多出来的注册点几乎必然绕过 _guardIpc（守卫需要 window entry 才能做第一层 WebContents 比对，` +
+      `脱离 created 回调的注册拿不到它）。确需新增注册路径，请让它同样经过 _guardIpc 并把本断言的` +
+      `期望值与理由一起更新，不要直接放宽成 >= 1。`
+  );
+  assert.doesNotMatch(
+    src,
+    /setPreload\s*\(/,
+    `${WINDOW_FACTORY}: setPreload 又回来了。它是绕过 _guardIpc 的裸注册通道，已被删除；` +
+      `窗口通道一律走 created 回调的 preloads（那条路径会逐个 _guardIpc 包装）。`
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 5. 危险开关零命中
 // ---------------------------------------------------------------------------

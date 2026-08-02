@@ -1,9 +1,15 @@
 // 记忆系统汇总入口 + global.memoryService 单例。
 // 接线（主会话完成）：
 //   require("./service/memory/index.js");            // 主进程启动时装载，注册 global.memoryService
-//   感知模块每次产出结果后发 'activity' 事件：
-//   global.memoryService.handlePerceptionActivity(result);
-//   其中 result = {scene, confidence, observation, course_title, timestamp?}
+//   感知结果并不直接进来，中间隔着 aiWiring.js：
+//     perception/loop.js 的 _dispatch 在 **confidence≥0.6 且 observation 非空** 时
+//     才 emit 'activity'（低置信/空观察的帧压根不发），事件载荷里的观察字段名是 `text`；
+//     aiWiring.js 监听该事件，把 text 改名成 observation 后调
+//     global.memoryService.handlePerceptionActivity({scene, confidence, observation,
+//     course_title, timestamp})。
+//   recordActivity/handlePerceptionActivity 两个字段名都收（observation 优先，
+//   缺省回落 text），所以直接拿 loop 的原始载荷调用也能工作。
+//   注意：loop 的门槛之外，activity.js 内部还有一层节流/去重门槛。
 const _require = eval("require");
 const { MemoryStore, localDayString } = _require("./store.js");
 const { MemoryActivityRecorder } = _require("./activity.js");

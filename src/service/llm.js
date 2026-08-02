@@ -8,12 +8,14 @@ const MAX_QUEUE = 3;
 // 台词链超时：原值 8000 与本文件的 512 max_tokens 预算自相矛盾——512 的依据正是
 // "推理模型的 thinking 也吃输出额度"，而推理模型 8 秒内几乎出不完 thinking + 正文，
 // 结果是服务端已生成并计费、客户端一律掐断降级。取 30000 与 llm/providers.js 的
-// DEFAULT_TIMEOUT_MS、perception/loop.js 的感知超时同值（不引入第三个量级）：
-// 台词是预取/异步、失败即离线兜底，不阻塞 UI；且 _pending 互斥保证同一 tolkName
-// 最多一条在途，拉长超时不会堆积请求。
+// DEFAULT_TIMEOUT_MS 同值（不引入第二个量级）：感知链路（perception/loop.js）自己
+// 没有超时常量、也不传 timeoutMs，同样继承 providers 的默认值，所以全仓实际只有
+// 这一个 30s 口径。台词是预取/异步、失败即离线兜底，不阻塞 UI；且 prefetch 的
+// _pending 互斥保证同一 tolkName 最多一条在途，拉长超时不会堆积请求。
 const TIMEOUT_MS = 30000;
-// 台词字段长度上限：提示词要求 tolk ≤15 字、submitText ≤5 字，这里留约 3~4 倍余量
-// 只兜住"模型跑飞写出长篇"，正常输出不会被截。气泡正文与按钮宽度都有限。
+// 台词字段长度上限。提示词要求 tolk ≤15 字、submitText ≤5 字，这里的余量并不齐平：
+// tolk 4 倍（60/15），submitText 只有 2 倍（10/5）——按钮宽度硬得多，超长直接把布局撑坏，
+// 所以卡得更紧。两者都只兜"模型跑飞写出长篇"，正常输出不会被截。
 const MAX_TOLK_LEN = 60;
 const MAX_SUBMIT_LEN = 10;
 
@@ -23,7 +25,11 @@ const MAX_SUBMIT_LEN = 10;
 // 足以滤掉单次网络抖动，又能快速识别"必然失败"的配置错误。
 const FAILURE_THRESHOLD = 3;
 // 冷却 5 分钟：用户发现台词变离线 → 打开设置页改配置的典型耗时量级；
-// 冷却到期后放一次请求探活（不清零计数），恢复后首次成功即完全复位，无需重启。
+// 冷却到期后自然放行后续请求探活（不清零计数），恢复后首次成功即完全复位，无需重启。
+// 注意"放一次"是不准确的说法：_inCooldown() 是全局判定，而 prefetch 的 _pending
+// 互斥只按 tolkName 分，冷却刚过时多个 tolkName 同时预取会有多条在途；
+// generateOnce 更是完全无互斥，冷却期外每次调用都直接发请求。真正的止损靠
+// FAILURE_THRESHOLD——第 3 次失败会立刻把冷却窗口重新推到 5 分钟后。
 const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 // 日志节流，与 loop.js 的 PERCEPTION_FAILURE_LOG_EVERY 同值：首次 + 进入冷却时各一条，
 // 之后每 10 次一条（配合 5 分钟冷却≈每 50 分钟一条，足够确认故障仍在持续又不刷屏）。
@@ -94,8 +100,9 @@ function resolveProvider() {
 // 解析走 llm/jsonParse.js 的健壮实现（模型带前置解释文字 / markdown 围栏 / 被截断都能救回），
 // 与 perception/loop.js 共用同一套标准。
 // 解析出的字段还要过一层类型/长度归一：tolk 归一后为空即视为本次生成失败（抛错 → 调用方
-// 走离线兜底），submitText 归一后为空则交给调用方既有的 `|| "嗯"` 兜底——
-// 只是按钮文案缺失，没必要让整条台词作废。
+// 走离线兜底），submitText 归一后为空则原样交回调用方，由各调用点自己兜底——口径并不统一：
+// 剪贴板评论用 `|| "嗯"`、上帝模式用 `|| "哦"`（均在 src/windows/main/main.js），
+// 其余主路径是 `|| ""`（即不显示按钮文案）。只是按钮文案缺失，没必要让整条台词作废。
 function callLLM(providerCfg, messages) {
   return providers
     .chat({

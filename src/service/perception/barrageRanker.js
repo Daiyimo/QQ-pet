@@ -59,8 +59,12 @@ function sequenceRatio(a, b) {
   return (2 * _matchingBlocks(a, b)) / total;
 }
 
-// 相似判定：归一化后完全相同，或 ratio≥0.78，
-// 或（共享字符覆盖率≥0.9 且长度比≥0.65）。归一化后任一为空 / 短于 4 → 不相似。
+// 相似判定，按代码里的实际顺序：
+//   ① 归一化后任一为空 → 不相似；
+//   ② 归一化后完全相同 → 相似（**先于长度门槛**：逐字相同的两条弹幕无论多短都算重复，
+//      "666" 连发两次就该被去重，所以不让长度门槛把它放行）；
+//   ③ 较短一侧短于 4 → 不相似（太短的文本 ratio/覆盖率都不可信，只认 ② 的全等）；
+//   ④ ratio≥0.78，或（共享字符覆盖率≥0.9 且长度比≥0.65）→ 相似。
 function textsAreSimilar(left, right) {
   const l = normalizeText(left);
   const r = normalizeText(right);

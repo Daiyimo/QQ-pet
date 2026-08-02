@@ -1,6 +1,13 @@
 // 成就系统逻辑层（主进程）。
-// 由 doMain.js require 后挂载 global.achievement；各触发点（喂食/钓鱼/签到/旅游/升级）
-// 调用 achievement.check(trigger) 即可，本模块内部做幂等与庆祝气泡。
+// 由 doMain.js require 后挂载 global.achievement；调用 achievement.check(trigger)
+// 即可，本模块内部做幂等与庆祝气泡。
+//
+// 现役调用点只有两个（全仓 grep 可复核，别照着"喂食/钓鱼/签到都会调"去排查）：
+//   1) aiWiring.js 的 60s 定时巡检 —— check("timer")，覆盖喂食/钓鱼/升级/元宝/在线时长
+//      等所有散落在 webpack 压缩产物里、没法插桩的触发点；
+//   2) travel.js 的 finishTravel —— check("travel")。
+// 签到（signIn.js）没有任何 achievement 调用，签到类成就同样靠 timer 巡检兜住：
+// 判定读的是存档里的连续签到数（readSigninStreak），最坏延迟一分钟解锁。
 //
 // 存储说明（已核对 src/ini/pet.js 的默认 info 表与 setPetInfo 实现后订正；
 // 本段旧版本称 achievements 会被静默丢弃，那个前提已经不成立，别再照抄）：
@@ -217,7 +224,8 @@ function createAchievementService(deps = {}) {
   }
 
   // 遍历全部定义，对新达成的成就执行解锁（写存储 + 庆祝气泡）。
-  // trigger 为触发来源标识（如 "feed" / "fishing" / "signin"），仅作日志语义，不过滤定义。
+  // trigger 为触发来源标识，仅作日志语义，不过滤定义。现役取值只有 "timer"
+  // （aiWiring 的 60s 巡检）与 "travel"（travel.finishTravel），见文件头注释。
   // 幂等：已解锁的成就不会重复写入、不会重复庆祝。
   // 返回本次新解锁数组 [{ id, name, desc, icon, unlockedAt }]
   function check(trigger) {

@@ -248,7 +248,10 @@ function llmDeps() {
 }
 
 // —— in-flight 去重（同一 key 的并发调用复用同一个 Promise）——
-// 场景：右键菜单"生成今日记忆"点一次、菜单关闭、再点一次（间隔 >300ms 防抖窗口，人手可及），
+// 场景：连点两次"生成今日记忆"。两个入口的闸门强度不一样，这一层要兜住更弱的那个：
+//   · 设置页（setup/main.js 的 buts 分支）有一道 300ms 的重入闸门，只挡住手抖双击；
+//   · 右键菜单（rightMenu/main.js 的 genDailyMemory 分支）**没有任何闸门**，
+//     点完菜单就关，重开再点即可立刻发起第二次。
 // 裸 async 会并发跑两次 compactTimeline + 两次 120s 的 LLM 调用（重复计费，
 // 且两次 writeDaily 后写覆盖先写）。成功与失败都要清理，否则一次失败后当天再也无法重试。
 function dedupeByKey(map, key, factory) {

@@ -135,7 +135,10 @@ class CourseManager extends EventEmitter {
     if (autoRecover !== false) this._scheduleStartupRecovery();
   }
 
-  // ---- 启动恢复：把崩溃遗留的会话重新结稿（唯一的 repo.recoverable() 调用者）----
+  // ---- 启动恢复：把崩溃遗留的会话重新结稿 ----
+  // repo.recoverable() 共两个调用者：这条恢复链路（recoverPending 内部），以及本类
+  // 对外暴露的同名 recoverable() 透传（供设置页/测试只查询不恢复）。两者读同一份判据，
+  // 差别只在"查完是否接着结稿"。
   // 只挂一个 unref 定时器，启动路径上零同步工作；恢复内部的任何失败都不向外冒泡。
   _scheduleStartupRecovery() {
     const timer = this._setTimeoutFn(() => {

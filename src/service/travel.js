@@ -2,9 +2,16 @@
 // 玩法参考原版 QQ 宠物：宠物出门旅游一段时间后回家，带回一个省份收集。
 //
 // 存储结构：
-//   activeOption.trip = { place, provinceId, startTime, duration }  // 进行中的旅行（State.js 视为“有状态”，右键“停止状态”可终止）
+//   activeOption.trip = { place, provinceId, startTime, duration }  // 进行中的旅行
+//     右键菜单/状态面板的"停止状态"能终止它，但链路不在 State.js：rightMenu / stateInfo
+//     遍历 activeOption 挑出唯一非 ill 的活动键（ipcInputGuard.pickActiveOptionKey），
+//     置 stopNow=true，真正把 trip 清成 null 的是 GrowUp.js 的 countdownActiveTime
+//     的 stopNow 分支；本服务靠 _trip() 发现档案里 trip 没了再收摊（见 _trip 注释）。
+//     State.js 只管生病/死亡那条路，它直接调 global.travelService.cancelTravel。
 //   $Store["travel_china"] = { collected: [省份id...] }             // 收集进度的权威存储（本服务自管）
-//   setPetInfo({ info: { travel_china, travel_china_num } })        // 同步进宠物档案（需在 ini/pet.js 默认 info 里加这两个键后生效，见接线说明）
+//   setPetInfo({ info: { travel_china, travel_china_num } })        // 同步进宠物档案
+//     （这两个键已在 ini/pet.js 的默认 info 表内，无需再接线；setPetInfo 只写默认表里
+//       已有的键，故不能随手加新键，见 :328）
 //
 // 测试友好：createTravelService(deps) 可注入时钟 / 随机数 / 定时器 / petInfo / 主窗口等桩。
 const _require = eval("require");
@@ -204,9 +211,14 @@ class TravelService {
   // 且不改 mw.show。于是"旅游中 → 感知判定进入 game 场景 → 用户关掉屏幕感知
   //（stop() → _restoreFromGame() → pet-show）"会把还在旅游的宠物放回桌面，而 mw.show
   // 仍是 false（isStop / 托盘 / 贴边逻辑继续按隐藏处理）。
-  // 仲裁规则：**旅游态优先**——旅游期间任何来源的"显示"请求都被拒绝，直到结算/召回；
-  // 显隐一律经此入口，show 标志与窗口真实状态同进同退。
-  // 返回是否真的执行了请求（false = 被仲裁拒绝，或窗口不可用）。
+  // 仲裁规则：**旅游态优先**——旅游期间任何来源的"显示"请求都被拒绝，直到结算/召回。
+  // 适用范围（别照抄成"一律"）：**跨模块**的显隐请求必须经此入口（目前只有 aiWiring 的
+  // pet-hide/pet-show，经 module.exports.requestMainWindowVisible 转发）。本服务内部
+  // 的四处显隐是刻意直连 _hideMain/_showMain 的：startTravel 的 exit 动画后隐藏
+  //（:432）、finishTravel 结算时恢复（:447）、cancelTravel 召回时恢复（:517）、
+  // init 恢复旅行时补隐藏（:561）——它们本身就是旅游态的持有者，走仲裁只会被自己拒掉。
+  // 返回是否真的执行了请求；false 有三种情况：窗口不可用 / 被旅游态仲裁拒绝 /
+  // 执行过程中抛错（已在 catch 里留完整堆栈）。
   setMainWindowVisible(visible, reason = "") {
     try {
       const mw = this._mainWindow();
@@ -309,8 +321,12 @@ class TravelService {
     }
   }
   // 落盘收集进度。返回是否成功写入权威存储（$Store）——失败时**不能当成功处理**，
-  // 置 dirty 标志供下次 finishTravel 重试，且必须留堆栈（收集进度静默丢失会让
-  // 「环游中国」成就永远不解锁且无任何线索）。
+  // 必须留堆栈（收集进度静默丢失会让「环游中国」成就永远不解锁且无任何线索）。
+  // saveDirty 只做两件事，都**不是**重试：
+  //   ① finishTravel 读它决定要不要多播一条"纪念品没收好"的气泡（让用户看得见）；
+  //   ② 它是纯内存标志，重启即丢。
+  // 真正的补偿在 _loadCollected：写 $Store 失败时新进度仍进了宠物档案，下次启动两源
+  // 取并集重写 $Store，那一步才是对这次失败写入的重试。
   _saveCollected() {
     let ok = false;
     try {
@@ -353,12 +369,16 @@ class TravelService {
     this._epoch += 1; // 旅行结束：作废 init() 挂起的窗口就绪回调
   }
 
-  // 当前旅行。**档案 activeOption.trip 是唯一权威，内存 currentTrip 只是缓存。**
+  // 当前旅行。**档案 activeOption.trip 优先于内存 currentTrip**（后者只是缓存）；
+  // 唯一的例外见下面 _petInfoReadable 那一行。
   // 依据：activeOption 由多方写入——State.js 的病情/死亡分支（doActive 的 ill 分支）
   // 会在生病时把 trip 清空并播"我不能旅游了~"。原先内存优先，于是那次取消被撤销：
   // finishTimer 到点仍从内存拿到 currentTrip，照样收集省份 + mood/yb 奖励（可刷）。
   // 档案里没有 trip 而内存里有 → 旅行已被外部终止：清回家/隐藏定时器、作废缓存与
   // init() 挂起的窗口就绪回调。两者都在但不一致时，同样以档案为准（缓存对齐）。
+  // 例外：档案整体读不到（getPetInfo 抛错 / 环境里根本没有 getPetInfo，见
+  // _petInfoReadable）时回退内存 currentTrip——"读失败"不等于"档案里没有 trip"，
+  // 一次瞬时读失败不该把进行中的旅行判成已取消。
   _trip() {
     const petInfo = this._getPetInfo();
     // 档案读不到（getPetInfo 抛错 / 环境里没有 getPetInfo）时不做"已被取消"判定
@@ -437,7 +457,11 @@ class TravelService {
   }
 
   // 旅行结束（定时器到期自动触发，也可手动调用）。
-  // 回家 -> 收集 -> 清状态 -> 气泡播报 -> 奖励 -> 成就联动。
+  // 实际顺序：清定时器 → 恢复窗口 + enter 动画 → 收集省份并落盘
+  //   →（落盘失败才多播一条"纪念品没收好"气泡）→ 清 activeOption.trip
+  //   → 发放 mood/yb 奖励 → 播"带回纪念品"气泡 → 成就联动。
+  // 注意奖励在气泡之前：气泡只是播报，不参与结算，把它排在奖励后面是为了让
+  // "落盘失败"那条提示先出、"带回纪念品"那条后出，用户看到的最后一句是好消息。
   finishTravel() {
     const trip = this._trip();
     if (!trip) return { ok: false, reason: "not_traveling" };
@@ -472,8 +496,13 @@ class TravelService {
       "[host]，我从" + province.name + "回来啦，给你带了纪念品~",
     );
     // 成就系统联动（判空调用）
-    // 全局名兼容：规范挂载是 global.achievement（src/service/achievement.js），
-    // achievementService 作为别名兜底，两者都没有则跳过
+    // 解析顺序就是下面代码的顺序：deps.achievementService（测试注入）→
+    // global.achievementService → global.achievement，都没有则跳过。
+    // 已知缺口：生产环境里**只有** global.achievement 会被赋值（src/service/achievement.js
+    // 尾部），全仓没有任何代码给 global.achievementService 赋值，它目前只有测试桩会用到
+    //（test/travel.test.js、test/stateIllCancel.test.js 走的是 deps 那一路）。
+    // 也就是说这条 || 的左半边在生产上恒为 undefined，保留它纯属兼容余量，别据此以为
+    // achievementService 是规范挂载名。
     const ach =
       this.deps.achievementService !== undefined
         ? this.deps.achievementService

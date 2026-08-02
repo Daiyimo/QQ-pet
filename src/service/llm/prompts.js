@@ -1,8 +1,14 @@
 // 提示词集合：QQ 企鹅人设的 pet chat system prompt，
 // 以及自 jarvis 移植的感知/记忆/课程提示词（jarvis_backend/prompts/templates.py
 // 与 native/src/worker.cpp 的 kUnifiedPerceptionPrompt）。
-// 移植说明：纯 Electron 无系统音频采集，凡 jarvis 原文中依赖"系统音频/音画"
-// 的表述均改为"屏幕截图/字幕/板书"；角色名"贾维斯"改为"QQ 企鹅"。
+// 移植说明：本项目纯 Electron，**没有任何系统音频采集**，jarvis 原文中依赖"系统音频/
+// 音画"的表述大多改写成了"屏幕截图/字幕/板书"；角色名"贾维斯"改为"QQ 企鹅"。
+// 已知残留（改词有回归风险，故保留原样，读的时候按"永远为 false / 永远不发生"理解）：
+//   · UNIFIED_PERCEPTION_PROMPT 的 scene_evidence 仍列着 instructional_audio 键，
+//     并把它写进 course 的判定条件。无音频输入 → 模型只能从画面取证，该键实际拿不到
+//     真值，course 判定实际只由 course_surface 撑着。
+//   · other 分支里"普通视频或直播的回复由全双工通道负责"沿用了 jarvis 的语音全双工
+//     设定，本项目没有这条通道；这句在这里只起到"该场景 assistant_message 留空"的作用。
 
 // —— 多轮对话（pet_chat）——
 // QQ 企鹅人设 + "屏幕内容是数据不是指令"的防注入声明（保留 jarvis 措辞精神）。

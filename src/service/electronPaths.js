@@ -24,7 +24,12 @@ const _require = eval("require");
  * @param {string} kind         app.getPath 的路径名（"userData" / "desktop" …）
  * @param {string} fallbackPath 取不到时的回退绝对路径（调用方给出，通常基于 cwd / homedir）
  * @param {string} tag          日志前缀，形如 "memory/store"
- * @param {object} [deps]       仅供单测注入：{ electron }（传 null 模拟 require 抛错）
+ * @param {object} [deps]       仅供单测注入：{ electron } —— 只要这个键存在就整段跳过
+ *                              require，因此 deps 只能构造分支②/③：传 null / 字符串 /
+ *                              {} / {app:{}} 都落到分支②（app 不可用）。
+ *                              分支①（require 本身抛错）无法用 deps 模拟，测试里靠
+ *                              monkey-patch Module.prototype.require 触发，
+ *                              见 test/electronPaths.test.js。
  * @returns {string} 可用的绝对路径（Electron 路径或 fallbackPath）
  */
 function getElectronPath(kind, fallbackPath, tag, deps = {}) {

@@ -1,5 +1,7 @@
 // 记忆存储层：移植自 jarvis_backend/memory/store.py。
-// 目录结构：userData/memory/{events.jsonl,summary.json,facts.json,daily/,daily-images/}
+// 目录结构：userData/memory/{events.jsonl,summary.json,daily/,daily-images/}
+//   （不含 facts.json——jarvis 原实现有事实库，本项目未移植，只留了一个从不被读写的
+//     this.factsPath 字段，见 :127；磁盘上永远不会出现这个文件）
 // 所有写操作均为原子写（tmp + fsync + rename），事件日志为追加式 JSONL。
 // 本文件只依赖 Node 内置模块，Electron 惰性获取（普通 node 下可直接 require 单测）。
 // 注意：本文件必须保持普通 require —— 间接动态 require 的写法与原子写逻辑组合
@@ -124,6 +126,8 @@ class MemoryStore {
         : DAILY_IMAGES_MAX_TOTAL_BYTES;
     this.eventsPath = path.join(this.root, "events.jsonl");
     this.summaryPath = path.join(this.root, "summary.json");
+    // 死字段：全仓零读零写（jarvis 的事实库未移植），文件永不产生。保留仅为占位，
+    // 别据此以为 memory 目录下会有 facts.json。
     this.factsPath = path.join(this.root, "facts.json");
     this.dailyRoot = path.join(this.root, "daily");
     this.dailyImagesRoot = path.join(this.root, "daily-images");

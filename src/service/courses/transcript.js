@@ -101,7 +101,10 @@ function noteInteractionFallback(note) {
   return candidate ? candidate.slice(0, 80) + "。" : "";
 }
 
-// 转写分块：按行聚合，每块 ≤ limit 字符，绝不拆行
+// 转写分块：按行聚合，绝不拆行；在此前提下每块尽量 ≤ limit 字符。
+// 两条约束在"单行本身就超过 limit"时互斥，代码选择不拆行 —— 那一行会被独占成一块并
+// **超出 limit**。可以接受：上游喂进来的是 transcriptDelta 产出的增量字幕/板书，单行
+// 都是句级短文本，实践中触发不到；拆行则会把一句话腰斩，对下游总结的伤害更大。
 function splitTranscript(text, limit = 3200) {
   const chunks = [];
   let current = [];

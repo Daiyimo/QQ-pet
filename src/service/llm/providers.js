@@ -341,7 +341,11 @@ const ENDPOINT_SUFFIX = {
 //   1. 末段已是本协议的完整 endpoint → 原样使用（不再追加任何路径）；
 //   2. 末段是版本段（/v1、/v2…）→ 直接拼 endpoint；
 //   3. 其余（含网关路径前缀）→ 补 /v1 再拼 endpoint。
-// 大小写不敏感地判定末段，但返回值保留用户原文（路径大小写由服务商决定，不擅自改写）。
+// 大小写：只有第 1 步（endpoint 末段）做了大小写不敏感比较；第 2 步的版本段判定走
+// API_VERSION_SEGMENT_RE = /\/v\d+$/，**大小写敏感**，所以 ".../V1" 不会被认成版本段，
+// 会掉进第 3 步拼成 ".../V1/v1/chat/completions"。已知缺口，服务商文档里的版本段
+// 一律是小写 v，实际没踩到过；真要修就把正则改成 /i，不要只改注释。
+// 返回值一律保留用户原文（路径大小写由服务商决定，不擅自改写）。
 function resolveEndpoint(baseUrl, type) {
   const suffix = ENDPOINT_SUFFIX[type] || ENDPOINT_SUFFIX.openai;
   const base = String(baseUrl || "").replace(/\/+$/, "");
@@ -513,7 +517,10 @@ function migrateLegacyApiKey() {
   if (!sysGet("llmActiveProvider")) {
     sysSet("llmActiveProvider", LEGACY_PROVIDER_ID);
   }
-  sysSet(LEGACY_API_KEY_KEY, ""); // 清除明文（pet.js 的 getSys 对空串返回 undefined）
+  // 清除明文。注意 pet.js 的 getSys 是 `key in e.system` 语义，会如实返回这个空串
+  // （不是 undefined）；幂等靠函数开头的 `if (!plain) return no-legacy` 兜住，空串与
+  // 键不存在在那里等价。
+  sysSet(LEGACY_API_KEY_KEY, "");
   console.log(
     "[llm/providers] 已把旧版明文 API Key 迁移到加密存储，并清除明文键 " +
       LEGACY_API_KEY_KEY

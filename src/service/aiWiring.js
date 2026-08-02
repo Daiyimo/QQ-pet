@@ -1,10 +1,20 @@
 // AI 功能统一接线：把感知/记忆/课程/弹幕/对话窗各模块桥接进主进程。
-// 在 src/ini/doMain.js 中 require 本文件（require 顺序：各服务模块已先挂载 global 单例）。
+// 在 src/ini/doMain.js 中 require 本文件。
+//
+// require 顺序（doMain.js 实测顺序）：
+//   llm → focusGuard → llm/chat → perception → courses → memory → **aiWiring**
+//   → achievement → travel
+// 即本文件被 require 时，global.memoryService / global.courseManager 已挂载，
+// 但 global.achievement **尚未**挂载——所以下面只在 60s 定时回调里判空取它，
+// 绝不能改成模块顶层解构。travel 同理尚未 require，这里直接 require("./travel.js")
+// 取模块导出（把它提前加载一次，与 doMain 后面那次 require 命中同一个模块缓存），
+// 不走 global。
 //
 // 桥接内容：
-//   感知 activity         → 记忆系统记录 + 课程模块非课程计数
+//   感知 activity          → 记忆系统记录 + 课程模块非课程计数
 //   感知 course-perception → 课程管理器
-//   感知 keyframe-requested → 截屏回调课程关键帧
+//   **课程管理器** keyframe-capture → 截屏回调课程关键帧（事件由 courseManager 发出，
+//                            不是感知循环；全仓没有 "keyframe-requested" 这个事件名）
 //   感知 pet-hide/pet-show → 游戏场景隐藏/恢复桌宠窗口
 //   Ctrl+M 快捷键          → 开关 AI 对话窗
 //   perceptionEnabled      → 启动感知循环
@@ -30,7 +40,11 @@
           timestamp: payload.timestamp,
         });
       }
-      // 每次非课程感知都计入课程自动退出判定（连续 4 次且 ≥90s 自动 finish）
+      // 计入课程自动退出判定（连续 4 次且 ≥90s 自动 finish）。
+      // 注意这里只覆盖**发得出 activity 事件**的那部分非课程感知：loop.js 的
+      // _dispatch 要求 confidence≥0.6 且 observation 非空才 emit，被挡掉的低置信
+      // 帧（屏幕持续模糊等）根本不会走到这里，那种情况由 courseManager 的
+      // 无课程信号看门狗兜底（见 courses/manager.js 的 WATCHDOG_INTERVAL_MS）。
       if (payload.scene !== "course" && global.courseManager) {
         global.courseManager.handleNonCourse();
       }

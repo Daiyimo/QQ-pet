@@ -66,7 +66,9 @@ function buildEndpoint(baseUrl) {
   return value.endsWith("/images/edits") ? value : value + "/images/edits";
 }
 
-// multipart/form-data 拼装（_multipart）：字段 + 恰好 2 张参考图（重复 image[] 字段）
+// multipart/form-data 拼装（_multipart）：字段 + 任意张参考图（重复 image[] 字段）。
+// 本函数对张数不做任何约束，images 传几个就拼几段；"恰好 2 张"的校验在 generate()
+// （见 :296），别在这里再加一道。
 function buildMultipart(fields, images) {
   const boundary = `----QQLocal${crypto.randomUUID().replace(/-/g, "")}`;
   const chunks = [];
@@ -395,8 +397,18 @@ function sysGet(key) {
 }
 
 // 从 sys 读取两张参考图（getSys("imageGenRefs")：[角色图路径, 风格图路径]）。
-// 返回 null 表示不可用（调用方降级为 reason:"no-reference"），但"配置缺失"与
-// "路径读不出来/格式不对"是两回事，必须分别落日志，否则用户永远查不出真实原因。
+// 返回 null 表示不可用（调用方降级为 reason:"no-reference"）。三条 null 路径**故意**
+// 不是同一个可观测级别：
+//   ① 压根没配（imageGenRefs 缺失 / 不是长度为 2 的非空路径数组）→ **静默返回**。
+//      记忆配图是可选功能，绝大多数用户从未配置过，这是常态而非错误；在这里打日志
+//      等于给每个没用过该功能的用户刷噪音。用户侧不会一头雾水：设置页拿到
+//      reason:"no-reference" 会明确回一句"先填两张参考图路径哦"。
+//   ② 配了但内容不合法（空文件 / 超 MAX_IMAGE_BYTES / 不是 PNG-JPEG-WEBP）→ 落日志。
+//   ③ 配了但读不出来（路径不存在 / 无权限）→ 落日志 + 完整堆栈。
+//   ②③ 是"用户明确配置过却没生效"，不留痕就永远查不出原因，必须可见。
+// 已知缺口：①里"数组长度不是 2"这种手改 sys 才可能出现的非法配置，会和"没配过"
+// 一样静默；设置页写入前已强制恰好两张（见 setup/main.js 的 imageGenRefs 分支），
+// 实际走不到，故不为它单开一条日志。
 function loadReferenceImages() {
   const refs = sysGet("imageGenRefs");
   if (!Array.isArray(refs) || refs.length !== 2 || refs.some((p) => !p)) return null;

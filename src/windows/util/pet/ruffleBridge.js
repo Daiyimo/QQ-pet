@@ -37,7 +37,8 @@
  *     证据：swfPet.js 里"播完"判定为 `totalFrames == currentFrame + lastTimeCut`（默认 cut=1），
  *     只有 0 基才等价于"停在最后一帧"；且素材中 Stand.swf/Die.swf 只有 1 帧，
  *     0 基下 `1 == 0 + 1` 恒真（随时可切下一动作），与老版实际表现一致。
- *   - `finish` 判定点为 `currentFrame == numFrames - lastTimeCut - 1`（倒数第二帧附近）。
+ *   - `finish` 判定点为 `currentFrame == numFrames - lastTimeCut - 1`（倒数第二帧附近）；
+ *     lastTimeCut 由 `effectiveLastTimeCut` 钳到可达范围（素材配置里有 600 这种越界值）。
  *   - 虚拟帧循环递增（Ruffle 的 AVM1 根时间轴默认也是循环播放），
  *     因此判定点每播完一轮都会再次出现，单次采样错过也能补上。
  *
@@ -100,7 +101,11 @@
 
   /**
    * 兜底虚拟时间轴帧数：24 帧 @12fps = 2s。
-   * 取值依据：必须 > 常见 lastTimeCut(1~5) + 1，才能让 finish 判定点（总帧-cut-1）存在且可达；
+   * 取值依据：必须 ≥ TAIL_FORCE_FRAMES（8），才能让 finish 判定点（总帧-cut-1）落进
+   * "逐帧不跳号"的尾段、从而必被观测到——素材配置里实测的 lastTimeCut 取值为
+   * 1（默认）/ 5（bury）/ 7（etoj、jtoc）/ 600（MM Kid 的 sickOption），
+   * 前三档在 24 帧下判定点分别是 22 / 18 / 16，都在尾段内；600 那档由
+   * effectiveLastTimeCut 的钳制兜底（见其注释）。
    * 同时尽量短，避免加载失败时把退出流程拖长。
    */
   const FALLBACK_NUM_FRAMES = 24;
@@ -110,12 +115,27 @@
    *
    * 依据：swfPet.js 里所有帧等值判定都落在尾段——
    *   切下一动作 `总帧 == 当前帧 + cut`、finish `总帧 == 当前帧 + cut + 1`，
-   *   cut 即 lastTimeCut，素材配置中最大为 5（bury）。取 8 覆盖 cut ≤ 6 并留余量。
+   *   cut 即 lastTimeCut。**素材配置中的实测取值**（src/windows/util/pet/swfPet.js 压缩区，
+   *   由 test/ruffleBridge.test.js 的跨引用断言钉死）：
+   *     1   —— 默认值（配置里不写 lastTimeCut 时 `||1`）
+   *     5   —— bury（Bury.swf）
+   *     7   —— etoj / jtoc（Etoj.swf / Jtoc.swf）
+   *     600 —— MM / Kid 的 sickOption.opt（Sick.swf 只有 101 帧，判定点为负 → 不可达）
+   *   取 8 恰好覆盖 cut ≤ 7：cut=7 时判定点 = 总帧-8 = 尾段起点，**零余量**（再大一档就会
+   *   落到中段、可能被追赶式跳号跨过）。cut=600 这种超出帧域的配置无法靠加大本常量解决
+   *   （只是把不可达点往后挪），由 effectiveLastTimeCut 钳制。
    * 中段帧号对逻辑无影响（只有不等式判定），因此中段允许"追赶式"跳号，
    * 这样即使采样被拖慢（窗口隐藏时 rAF 会被 Chromium 降到约 1fps，实测 30s 仅 31 次采样），
    * 也能在有限时间内走到尾段并触发 finish，而不是被 EXIT_FALLBACK_MS 硬兜底截断。
    */
   const TAIL_FORCE_FRAMES = 8;
+
+  /**
+   * lastTimeCut 的**与素材无关**的硬上界：判定点必须落在逐帧走的尾段内才保证被观测到，
+   * 即 `总帧-cut-1 ≥ 总帧-TAIL_FORCE_FRAMES` ⟺ `cut ≤ TAIL_FORCE_FRAMES-1`。
+   * 与 EXIT_FALLBACK_MS 同一思路：不信任素材配置能不能自圆其说，直接给一条死线。
+   */
+  const MAX_EFFECTIVE_LAST_TIME_CUT = TAIL_FORCE_FRAMES - 1;
 
   /**
    * 走完尾段最坏需要的时间（ms）。
@@ -232,23 +252,66 @@
   }
 
   /**
+   * 把素材配置的 lastTimeCut 钳到"判定点一定可达"的范围内（与素材无关的兜底）。
+   *
+   * 为什么需要：finish 判定 `总帧 == 当前帧 + cut + 1` 要求判定点
+   * `当前帧 = 总帧-cut-1` 既落在帧域 [0, 总帧-1] 内，又落在逐帧走的尾段内
+   * （否则中段的追赶式跳号可能跨过它）。素材配置里 MM/Kid 的 sickOption 写的是
+   * `lastTimeCut:600`，而 MM/Kid/Sick.swf 只有 101 帧 → 判定点 = -500，
+   * **任何**帧序列都不可能命中 → finish 回调永不触发（配置里的 `notNum` 只决定
+   * 文件名要不要带序号，与本判定无关，不是豁免开关）。
+   * 加大 TAIL_FORCE_FRAMES 治不了这种情形（只是把不可达点往后挪），所以在判定入口钳住。
+   *
+   * 钳制规则（只在配置值不可达时生效，正常档 1/5/7 原样返回，既有时序不受影响）：
+   *   上界 = min(MAX_EFFECTIVE_LAST_TIME_CUT, 总帧-1)
+   *   上界 < 1（单帧素材 Stand.swf/Die.swf，本就不存在 finish 判定点）时原样返回，
+   *   维持"单帧素材不触发 finish"的既有行为，不平白多出一次回调。
+   *
+   * @param {number} numFrames 总帧数
+   * @param {number} [lastTimeCut=1] 素材配置的尾部截断帧数
+   * @returns {number} 实际参与判定的 cut
+   */
+  function effectiveLastTimeCut(numFrames, lastTimeCut) {
+    const raw = Number(lastTimeCut) > 0 ? Number(lastTimeCut) : 1; // 与 swfPet.js 的 `||1` 同义
+    const n = Number(numFrames);
+    if (!Number.isFinite(n) || n <= 0) return raw;
+    const cap = Math.min(MAX_EFFECTIVE_LAST_TIME_CUT, n - 1);
+    if (cap < 1 || raw <= cap) return raw;
+    staticWarnOnce(
+      "lasttimecut-clamp:" + n + ":" + raw,
+      "warn",
+      "素材配置的 lastTimeCut=" +
+        raw +
+        " 在 " +
+        n +
+        " 帧的动画上不可达（finish 判定点为 " +
+        (n - raw - 1) +
+        "），已钳到 " +
+        cap +
+        "，否则 finish 回调永不触发"
+    );
+    return cap;
+  }
+
+  /**
    * 是否处于 swfPet.js 的 finish 判定点。
    *
-   * 与 swfPet.js `setState` 中 `a == e + (lastTimeCut||1) + 1` 严格等价
+   * 与 swfPet.js `setState` 中
+   * `a == e + (RuffleBridge.effectiveLastTimeCut(a, lastTimeCut) || (lastTimeCut||1)) + 1` 严格等价
    * （a=totalFrames，e=currentFrame）。生产判定仍在 swfPet.js 内，本函数供单测与诊断使用，
    * 保证"虚拟帧序列一定会经过该判定点"这一契约可被自动验证。
    *
    * @param {object} opt
    * @param {number} opt.numFrames    总帧数
    * @param {number} opt.currentFrame 当前帧（0 基）
-   * @param {number} [opt.lastTimeCut=1] 动作配置的尾部截断帧数
+   * @param {number} [opt.lastTimeCut=1] 动作配置的尾部截断帧数（超出帧域时按 effectiveLastTimeCut 钳制）
    * @returns {boolean} 是否应触发 finish
    */
   function isFinishFrame(opt) {
     const numFrames = Number(opt && opt.numFrames);
     const currentFrame = Number(opt && opt.currentFrame);
-    const cut = Number(opt && opt.lastTimeCut) || 1;
     if (!Number.isFinite(numFrames) || !Number.isFinite(currentFrame)) return false;
+    const cut = effectiveLastTimeCut(numFrames, opt && opt.lastTimeCut);
     return numFrames === currentFrame + cut + 1;
   }
 
@@ -622,9 +685,11 @@
   RuffleBridge.FALLBACK_NUM_FRAMES = FALLBACK_NUM_FRAMES;
   RuffleBridge.MAX_SAMPLE_GAP_MS = MAX_SAMPLE_GAP_MS;
   RuffleBridge.TAIL_FORCE_FRAMES = TAIL_FORCE_FRAMES;
+  RuffleBridge.MAX_EFFECTIVE_LAST_TIME_CUT = MAX_EFFECTIVE_LAST_TIME_CUT;
   RuffleBridge.frameIntervalMs = frameIntervalMs;
   RuffleBridge.animationDurationMs = animationDurationMs;
   RuffleBridge.nextVirtualFrame = nextVirtualFrame;
+  RuffleBridge.effectiveLastTimeCut = effectiveLastTimeCut;
   RuffleBridge.isFinishFrame = isFinishFrame;
   RuffleBridge.tailWalkBudgetMs = tailWalkBudgetMs;
   RuffleBridge.midSectionDeadlineMs = midSectionDeadlineMs;
@@ -636,6 +701,7 @@
       frameIntervalMs,
       animationDurationMs,
       nextVirtualFrame,
+      effectiveLastTimeCut,
       isFinishFrame,
       tailWalkBudgetMs,
       midSectionDeadlineMs,

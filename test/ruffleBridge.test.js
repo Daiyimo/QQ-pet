@@ -26,6 +26,7 @@ const {
   frameIntervalMs,
   animationDurationMs,
   nextVirtualFrame,
+  effectiveLastTimeCut,
   isFinishFrame,
   tailWalkBudgetMs,
   midSectionDeadlineMs,
@@ -124,16 +125,45 @@ test("跨引用：main/main.js 的退出硬兜底字面量与 RuffleBridge.EXIT_
 
 test("跨引用：swfPet.js 压缩区的 finish 判定式与 isFinishFrame 等价（防两侧漂移）", () => {
   // isFinishFrame 是 swfPet.js 判定式的可测复刻；swfPet.js 为压缩产物不可 require，
-  // 因此断言其源码里的等值式仍是 `总帧 == 当前帧 + (lastTimeCut||1) + 1`。
+  // 因此断言其源码里的等值式仍是 `总帧 == 当前帧 + 钳制后的 cut + 1`
+  //（钳制走 RuffleBridge.effectiveLastTimeCut，桥不可用时回落到原来的 `lastTimeCut||1`）。
   const src = readSource("src/windows/util/pet/swfPet.js");
   assert.ok(
-    src.includes("a==e+(this.oldNext?.opt?.lastTimeCut||1)+1&&(this.oldNext.callBack.finish()"),
-    "swfPet.js 的 finish 判定式已变化，isFinishFrame 需同步"
+    src.includes(
+      "a==e+(window.RuffleBridge?.effectiveLastTimeCut?.(a,this.oldNext?.opt?.lastTimeCut)??" +
+        "(this.oldNext?.opt?.lastTimeCut||1))+1&&(this.oldNext.callBack.finish()"
+    ),
+    "swfPet.js 的 finish 判定式已变化，isFinishFrame / effectiveLastTimeCut 需同步"
   );
   assert.ok(
     src.includes("a==e+t||"),
     "swfPet.js 的『切下一动作』判定式（总帧==当前帧+cut）已变化"
   );
+});
+
+test("跨引用：注释里的 lastTimeCut 实测取值必须与 swfPet.js 配置一致（注释是唯一导航工具）", () => {
+  // swfPet.js 是无 sourcemap 的压缩产物，ruffleBridge.js 的注释是读者唯一的导航；
+  // 这里不设第二份基准，而是把注释里写的取值与压缩区里真实的字面量互校：
+  // 任一侧改动（新素材加一档 cut、或注释没跟上）本条立刻红。
+  const swfSrc = readSource("src/windows/util/pet/swfPet.js");
+  const configured = [
+    ...new Set([...swfSrc.matchAll(/lastTimeCut:(\d+)/g)].map((m) => Number(m[1]))),
+  ].sort((a, b) => a - b);
+  assert.ok(configured.length > 0, "swfPet.js 里找不到任何 lastTimeCut 配置（压缩产物结构已变）");
+
+  const bridgeSrc = readSource("src/windows/util/pet/ruffleBridge.js");
+  const block = bridgeSrc.match(/\*\*素材配置中的实测取值\*\*[\s\S]*?取 8 恰好覆盖/);
+  assert.ok(block, "ruffleBridge.js 的 lastTimeCut 实测取值清单注释已被改动/删除");
+  const documented = [
+    ...new Set([...block[0].matchAll(/^\s*\*\s{4,}(\d+)\s+——/gm)].map((m) => Number(m[1]))),
+  ].sort((a, b) => a - b);
+  // 注释里额外列了默认值 1（配置里不写 lastTimeCut 时的 `||1`），配置字面量中不出现
+  assert.deepStrictEqual(
+    documented.filter((v) => v !== 1),
+    configured,
+    `注释记的 lastTimeCut 取值 ${documented} 与 swfPet.js 实际配置 ${configured} 不一致`
+  );
+  assert.ok(documented.includes(1), "注释必须说明默认档 cut=1");
 });
 
 test("退场时间轴预算：安全余量为正，且中段截止随采样间隔收紧", () => {
@@ -179,6 +209,104 @@ test("isFinishFrame：与 swfPet.js 的 `总帧 == 当前帧 + cut + 1` 等价",
   assert.strictEqual(isFinishFrame({ numFrames: 90, currentFrame: 84, lastTimeCut: 5 }), true);
   // 单帧素材（Stand.swf/Die.swf）不存在 finish 判定点
   assert.strictEqual(isFinishFrame({ numFrames: 1, currentFrame: 0, lastTimeCut: 1 }), false);
+});
+
+// —— P1：素材配置的 lastTimeCut 越界导致 finish 判定点不可达（MM/Kid 的 sickOption=600）——
+// 证据：src/assets/Action/MM/Kid/Sick.swf 实测 101 帧 @12fps，判定点 = 101-600-1 = -500，
+// 任何帧序列都不可能命中；配置里的 notNum 只决定文件名带不带序号（`${name}${notNum?"":序号}.swf`），
+// 与本判定无关，不是豁免开关。
+const SICK_MM_KID_FRAMES = 101; // src/assets/Action/MM/Kid/Sick.swf 的 SWF 头实测帧数
+const SICK_MM_KID_CUT = 600; // swfPet.js: MM.Kid.sickOption.opt.lastTimeCut
+
+test("effectiveLastTimeCut：正常档 1/5/7 原样返回，越界档钳进尾段并只告警一次", () => {
+  const logger = makeLogger();
+  RuffleBridge.setLogger(logger);
+  try {
+    // 素材实测的三个正常档：判定点本就落在尾段内，必须原样返回（既有时序不受影响）
+    for (const cut of [1, 5, 7]) {
+      assert.strictEqual(effectiveLastTimeCut(91, cut), cut, `cut=${cut} 不该被钳制`);
+      assert.strictEqual(effectiveLastTimeCut(SICK_MM_KID_FRAMES, cut), cut);
+    }
+    // 缺省/非法值等同 swfPet.js 的 `||1`
+    for (const bad of [undefined, null, 0, -3, NaN, "x"]) {
+      assert.strictEqual(effectiveLastTimeCut(91, bad), 1, `非法 cut=${bad} 未回落到 1`);
+    }
+    // 越界档：钳到 TAIL_FORCE_FRAMES-1，判定点正好是尾段起点（可达）
+    assert.strictEqual(
+      effectiveLastTimeCut(SICK_MM_KID_FRAMES, SICK_MM_KID_CUT),
+      RuffleBridge.MAX_EFFECTIVE_LAST_TIME_CUT
+    );
+    assert.strictEqual(RuffleBridge.MAX_EFFECTIVE_LAST_TIME_CUT, RuffleBridge.TAIL_FORCE_FRAMES - 1);
+    // 极短素材：上界再收到 总帧-1，判定点仍 ≥ 0
+    assert.strictEqual(effectiveLastTimeCut(5, 600), 4);
+    assert.strictEqual(effectiveLastTimeCut(2, 600), 1);
+    // 单帧素材（Stand.swf/Die.swf）本就不存在判定点：原样返回，不平白多出一次 finish
+    assert.strictEqual(effectiveLastTimeCut(1, 1), 1);
+    assert.strictEqual(effectiveLastTimeCut(1, 600), 600);
+    assert.strictEqual(isFinishFrame({ numFrames: 1, currentFrame: 0, lastTimeCut: 1 }), false);
+    // 帧数未知时不臆测
+    assert.strictEqual(effectiveLastTimeCut(0, 600), 600);
+    // 同一素材的钳制只告警一次（判定跑在 24fps 轮询里，绝不能刷屏）
+    for (let i = 0; i < 50; i++) effectiveLastTimeCut(SICK_MM_KID_FRAMES, SICK_MM_KID_CUT);
+    const clampWarns = logger.warns.filter((a) =>
+      a.join(" ").includes(`lastTimeCut=600 在 ${SICK_MM_KID_FRAMES} 帧`)
+    );
+    assert.strictEqual(clampWarns.length, 1, `钳制告警次数应为 1，实为 ${clampWarns.length}`);
+    assert.ok(clampWarns[0].join(" ").includes("finish 回调永不触发"), "告警必须说明后果");
+  } finally {
+    RuffleBridge.setLogger(null);
+  }
+});
+
+test("P1：MM/Kid sickOption（cut=600 @ 101 帧 Sick.swf）的 finish 不再永不触发", () => {
+  const logger = makeLogger();
+  RuffleBridge.setLogger(logger);
+  try {
+    // 修复前的判定式（原样用配置里的 600）在整条帧序列上恒 false —— 这就是缺陷本身
+    const clock = makeClock();
+    const bridge = new RuffleBridge({ now: clock.now, logger: makeLogger() });
+    bridge.setDom(makeFakeDom({ metadata: { numFrames: SICK_MM_KID_FRAMES, frameRate: 12 } }));
+    const steps = Math.ceil(EXIT_FALLBACK_MS / SAMPLE_INTERVAL_MS);
+    const { frames, finishAtMs } = pollBridge(bridge, clock, {
+      steps,
+      lastTimeCut: SICK_MM_KID_CUT,
+    });
+    const rawHit = frames.some((f) => SICK_MM_KID_FRAMES === f + SICK_MM_KID_CUT + 1);
+    assert.strictEqual(rawHit, false, "未钳制的 600 本就不可能命中（前提失效则本用例失去意义）");
+    // 钳制后：判定点确实出现，且早于生产硬兜底
+    assert.ok(finishAtMs !== null, "cut=600 档的 finish 判定点仍未出现 —— 缺陷未修复");
+    assert.ok(
+      finishAtMs <= EXIT_FINISH_DEADLINE_MS,
+      `cut=600 档 finish 在 ${finishAtMs}ms 触发，晚于截止 ${EXIT_FINISH_DEADLINE_MS}ms`
+    );
+    // 命中的正是钳制后的判定点（= 尾段起点）
+    const expectedFrame =
+      SICK_MM_KID_FRAMES - RuffleBridge.MAX_EFFECTIVE_LAST_TIME_CUT - 1;
+    assert.strictEqual(expectedFrame, SICK_MM_KID_FRAMES - RuffleBridge.TAIL_FORCE_FRAMES);
+    assert.ok(frames.includes(expectedFrame), `钳制后的判定帧 ${expectedFrame} 未被观测到`);
+  } finally {
+    RuffleBridge.setLogger(null);
+  }
+});
+
+test("钳制不影响正常档：cut=1/5/7 的 finish 仍落在各自原判定帧、时刻不变", () => {
+  for (const lastTimeCut of [1, 5, 7]) {
+    const clock = makeClock();
+    const bridge = new RuffleBridge({ now: clock.now, logger: makeLogger() });
+    bridge.setDom(makeFakeDom({ metadata: { numFrames: SICK_MM_KID_FRAMES, frameRate: 12 } }));
+    const steps = Math.ceil(EXIT_FALLBACK_MS / SAMPLE_INTERVAL_MS);
+    const { frames, finishAtMs } = pollBridge(bridge, clock, { steps, lastTimeCut });
+    // 判定帧就是未经钳制的原值（cut ≤ 7 时 effectiveLastTimeCut 恒等）
+    const expectedFrame = SICK_MM_KID_FRAMES - lastTimeCut - 1;
+    assert.ok(frames.includes(expectedFrame), `cut=${lastTimeCut} 的原判定帧 ${expectedFrame} 未被观测到`);
+    assert.ok(finishAtMs !== null, `cut=${lastTimeCut} 的 finish 判定点消失`);
+    // 时刻仍贴着真实动画时长（没有被兜底提前/推后）
+    const naturalMs = (expectedFrame * 1000) / 12;
+    assert.ok(
+      Math.abs(finishAtMs - naturalMs) <= SAMPLE_INTERVAL_MS * 3,
+      `cut=${lastTimeCut} 的 finish 时刻 ${finishAtMs}ms 偏离自然时刻 ${naturalMs}ms 过多`
+    );
+  }
 });
 
 test("nextVirtualFrame：0 基循环；中段可追赶，尾段逐帧不跳号", () => {
@@ -281,28 +409,34 @@ test("P0 最坏情况：采样被降到 1fps（窗口隐藏时 rAF 被节流）�
 
 // 参数化：换素材（帧数变化）不得让 finish 越过生产硬兜底 —— 这是防 P0 复活的锚。
 // 91=真实 Exit1.swf；100/150/300/600=假想更长的退场素材；8/24=极短素材与兜底帧数。
-// cut 取 1（默认）与 5（bury 的 lastTimeCut，配置中最大值）。
+// cut 取素材配置里的全部实测档：1（默认）/ 5（bury）/ 7（etoj、jtoc）/ 600（MM Kid sick，
+// 越界档，靠 effectiveLastTimeCut 钳制才可达）。
 for (const numFrames of [8, 24, 91, 100, 150, 300, 600]) {
-  for (const lastTimeCut of [1, 5]) {
+  for (const lastTimeCut of [1, 5, 7, 600]) {
     for (const [rateName, intervalMs] of [
       ["24fps 正常轮询", SAMPLE_INTERVAL_MS],
       ["1fps 被节流", 1000],
     ]) {
       test(`不变量：${numFrames}帧@12fps / cut=${lastTimeCut} / ${rateName} → finish 必在生产硬兜底前触发`, () => {
-        const clock = makeClock();
-        const bridge = new RuffleBridge({ now: clock.now, logger: makeLogger() });
-        bridge.setDom(makeFakeDom({ metadata: { numFrames, frameRate: 12 } }));
-        // 采样到硬兜底时刻为止：兜底一到进程就被强杀，之后触发的 finish 对用户毫无意义
-        const steps = Math.ceil(EXIT_FALLBACK_MS / intervalMs);
-        const { finishAtMs, frames } = pollBridge(bridge, clock, { steps, lastTimeCut, intervalMs });
-        assert.ok(
-          finishAtMs !== null,
-          `${numFrames}帧 cut=${lastTimeCut} 在 ${EXIT_FALLBACK_MS}ms 内 finish 判定点从未出现（帧序列尾部：${frames.slice(-12)}）`
-        );
-        assert.ok(
-          finishAtMs <= EXIT_FINISH_DEADLINE_MS,
-          `${numFrames}帧 cut=${lastTimeCut} 的 finish 在 ${finishAtMs}ms 触发，晚于截止 ${EXIT_FINISH_DEADLINE_MS}ms（生产硬兜底 ${EXIT_FALLBACK_MS}ms）`
-        );
+        RuffleBridge.setLogger(makeLogger()); // 钳制告警不打进测试输出
+        try {
+          const clock = makeClock();
+          const bridge = new RuffleBridge({ now: clock.now, logger: makeLogger() });
+          bridge.setDom(makeFakeDom({ metadata: { numFrames, frameRate: 12 } }));
+          // 采样到硬兜底时刻为止：兜底一到进程就被强杀，之后触发的 finish 对用户毫无意义
+          const steps = Math.ceil(EXIT_FALLBACK_MS / intervalMs);
+          const { finishAtMs, frames } = pollBridge(bridge, clock, { steps, lastTimeCut, intervalMs });
+          assert.ok(
+            finishAtMs !== null,
+            `${numFrames}帧 cut=${lastTimeCut} 在 ${EXIT_FALLBACK_MS}ms 内 finish 判定点从未出现（帧序列尾部：${frames.slice(-12)}）`
+          );
+          assert.ok(
+            finishAtMs <= EXIT_FINISH_DEADLINE_MS,
+            `${numFrames}帧 cut=${lastTimeCut} 的 finish 在 ${finishAtMs}ms 触发，晚于截止 ${EXIT_FINISH_DEADLINE_MS}ms（生产硬兜底 ${EXIT_FALLBACK_MS}ms）`
+          );
+        } finally {
+          RuffleBridge.setLogger(null);
+        }
       });
     }
   }

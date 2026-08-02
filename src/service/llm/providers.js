@@ -321,7 +321,9 @@ function redact(value, secret) {
 // 否则同一个 baseUrl 换个 type 就得到不同结果——本文件此前只有 anthropic 侧判了
 // endsWith("/v1")，openai 侧裸拼 /chat/completions，用户填不带 /v1 的地址永久 404。
 // 口径与原 anthropic 分支一致（只看末段），仅把写死的 /v1 放宽为 /v{数字}。
-const API_VERSION_SEGMENT_RE = /\/v\d+$/;
+// 大小写不敏感（/i）：与下面第 1 步的 endpoint 末段判定同口径，用户粘进来的
+// ".../V1" 也认成版本段，不会被再补一层 /v1。
+const API_VERSION_SEGMENT_RE = /\/v\d+$/i;
 
 function hasApiVersionSegment(base) {
   return API_VERSION_SEGMENT_RE.test(base);
@@ -341,10 +343,9 @@ const ENDPOINT_SUFFIX = {
 //   1. 末段已是本协议的完整 endpoint → 原样使用（不再追加任何路径）；
 //   2. 末段是版本段（/v1、/v2…）→ 直接拼 endpoint；
 //   3. 其余（含网关路径前缀）→ 补 /v1 再拼 endpoint。
-// 大小写：只有第 1 步（endpoint 末段）做了大小写不敏感比较；第 2 步的版本段判定走
-// API_VERSION_SEGMENT_RE = /\/v\d+$/，**大小写敏感**，所以 ".../V1" 不会被认成版本段，
-// 会掉进第 3 步拼成 ".../V1/v1/chat/completions"。已知缺口，服务商文档里的版本段
-// 一律是小写 v，实际没踩到过；真要修就把正则改成 /i，不要只改注释。
+// 大小写：三步判定统一走大小写不敏感比较（第 1 步 toLowerCase() 后比末段，第 2 步
+// API_VERSION_SEGMENT_RE 带 /i），所以 ".../V1" 与 ".../v1" 同样被认成版本段，
+// 不会掉进第 3 步拼成 ".../V1/v1/chat/completions"。
 // 返回值一律保留用户原文（路径大小写由服务商决定，不擅自改写）。
 function resolveEndpoint(baseUrl, type) {
   const suffix = ENDPOINT_SUFFIX[type] || ENDPOINT_SUFFIX.openai;

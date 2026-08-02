@@ -444,3 +444,53 @@ test("anthropic 未填 baseUrl 时仍走官方地址（默认值不被新判定�
     "空 baseUrl 由 chatAnthropic 用官方默认值兜底，resolveEndpoint 本身不猜"
   );
 });
+
+// —— 大写版本段 / 大写完整 endpoint（用户从文档或浏览器地址栏粘进来的大小写不定）——
+// 判定一律大小写不敏感，但返回值保留用户原文：路径大小写由服务商决定，不擅自改写。
+// 对照表：[baseUrl 后缀, openai 期望路径, anthropic 期望路径]
+const ENDPOINT_CASE_INSENSITIVE_CASES = [
+  ["/V1", "/V1/chat/completions", "/V1/messages"], // 大写版本段：认成版本段，不再补 /v1
+  ["/v1", "/v1/chat/completions", "/v1/messages"], // 回归护栏：小写行为一字不变
+  ["/V2", "/V2/chat/completions", "/V2/messages"], // 大写 + 非 1 的版本号
+  ["/v10", "/v10/chat/completions", "/v10/messages"], // 多位版本号仍是版本段
+  ["/V1/", "/V1/chat/completions", "/V1/messages"], // 尾斜杠先剥再判
+  ["/GW/OPENAI", "/GW/OPENAI/v1/chat/completions", "/GW/OPENAI/v1/messages"], // 大写网关前缀无版本段：仍补 /v1
+  // 大写的完整 endpoint：末段判定同样不敏感，原样使用、不再追加
+  [
+    "/V1/CHAT/COMPLETIONS",
+    "/V1/CHAT/COMPLETIONS",
+    "/V1/CHAT/COMPLETIONS/v1/messages",
+  ],
+  ["/V1/MESSAGES", "/V1/MESSAGES/v1/chat/completions", "/V1/MESSAGES"],
+];
+
+test("大写版本段不被重复补 v1，且返回值保留用户原文大小写", () => {
+  for (const [suffix, expectOpenai, expectAnthropic] of ENDPOINT_CASE_INSENSITIVE_CASES) {
+    const base = `https://api.example.com${suffix}`;
+    assert.strictEqual(
+      providers.resolveEndpoint(base, "openai"),
+      `https://api.example.com${expectOpenai}`,
+      `openai：baseUrl 后缀「${suffix}」`
+    );
+    assert.strictEqual(
+      providers.resolveEndpoint(base, "anthropic"),
+      `https://api.example.com${expectAnthropic}`,
+      `anthropic：baseUrl 后缀「${suffix}」`
+    );
+  }
+});
+
+test("大写与小写版本段只有原文大小写之差，判定结果一致", () => {
+  for (const [upper, lower] of [
+    ["/V1", "/v1"],
+    ["/V2", "/v2"],
+  ]) {
+    for (const type of ["openai", "anthropic"]) {
+      const got = providers.resolveEndpoint(`https://api.example.com${upper}`, type);
+      const expected = providers
+        .resolveEndpoint(`https://api.example.com${lower}`, type)
+        .replace(lower, upper);
+      assert.strictEqual(got, expected, `${type}：「${upper}」与「${lower}」判定不一致`);
+    }
+  }
+});

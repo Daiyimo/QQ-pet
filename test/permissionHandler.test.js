@@ -12,6 +12,7 @@ const {
   PERMISSION_ALLOW_LIST,
   isPermissionAllowed,
   installPermissionHandlers,
+  installRemoteSessionGuards,
 } = require("../src/ini/security.js");
 
 /**
@@ -224,6 +225,181 @@ test("request handler 必定调用 callback（漏调会让页面永久挂在 pen
   const { granted } = callRequest(stub, "midi", {});
   assert.notEqual(granted, "callback-not-called");
   assert.equal(granted, false);
+});
+
+// ---------------------------------------------------------------------------
+// installRemoteSessionGuards：远程页面专用 session（urlWindow 的 persist:remote-url 分区）
+//
+// 为什么这几条是安全断言而不是锦上添花：远程子窗一旦从 defaultSession 拆出去，
+// main.js 里那次 installPermissionHandlers(session.defaultSession) 就不再覆盖它。
+// 若新 session 没补装门禁，摄像头/麦克风/定位会回到 Electron 默认放行且无权限气泡 UI，
+// 「存储隔离」反而把门禁绕过去了。所以下面第 3 条（与 defaultSession 同策略）是核心。
+// ---------------------------------------------------------------------------
+
+/** 桩远程 session：在 setupStub 的基础上多一个 on()，把事件监听器记进 Map */
+function setupRemoteStub() {
+  const listeners = new Map();
+  const stub = {
+    requestHandler: null,
+    checkHandler: null,
+    listeners,
+    setPermissionRequestHandler(fn) {
+      this.requestHandler = fn;
+    },
+    setPermissionCheckHandler(fn) {
+      this.checkHandler = fn;
+    },
+    on(event, fn) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(fn);
+      return this;
+    },
+  };
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args);
+  let installed;
+  try {
+    installed = installRemoteSessionGuards(stub);
+  } finally {
+    console.warn = origWarn;
+  }
+  return { stub, warns, installed };
+}
+
+/** 触发 will-download，返回是否被 preventDefault 与期间的 warn 记录 */
+function fireWillDownload(stub, item) {
+  const handlers = stub.listeners.get("will-download") || [];
+  assert.equal(handlers.length, 1, "will-download 监听器应恰好 1 个");
+  let prevented = false;
+  const event = {
+    preventDefault() {
+      prevented = true;
+    },
+  };
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args);
+  try {
+    handlers[0](event, item, { id: 1 });
+  } finally {
+    console.warn = origWarn;
+  }
+  return { prevented, warns };
+}
+
+test("installRemoteSessionGuards：注册 will-download 观测，且放行默认的系统保存对话框", () => {
+  const { stub, installed, warns } = setupRemoteStub();
+  assert.equal(installed, true);
+  assert.equal(warns.length, 0, "正常安装路径不该有 warn");
+  assert.equal(stub.listeners.has("will-download"), true, "必须注册 will-download 观测");
+
+  const { prevented, warns: dlWarns } = fireWillDownload(stub, {
+    getURL: () => "https://files.evil.example/a/b.exe?token=SECRET_CREDENTIAL",
+    getFilename: () => "b.exe",
+  });
+
+  assert.equal(
+    prevented,
+    false,
+    "will-download 必须只观测不拦截：Electron 默认行为就是弹系统保存对话框（用户确认后才落盘），" +
+      "preventDefault 会把这个窗口的下载能力整个砍掉，是功能回退而不是加固。"
+  );
+  assert.equal(dlWarns.length, 1, `一次下载应恰好一条日志，实测 ${dlWarns.length} 条`);
+  assert.equal(dlWarns[0][0], "[ini/security]");
+  const line = dlWarns[0].join(" ");
+  assert.match(line, /files\.evil\.example/, "日志必须能看出下载来源 host，否则不可诊断");
+  assert.match(line, /b\.exe/, "日志必须带文件名");
+  assert.doesNotMatch(
+    line,
+    /SECRET_CREDENTIAL/,
+    "刻意只记 host + 文件名：下载直链的 query 常带一次性 token/签名，整串 URL 进日志等于把凭据写到磁盘"
+  );
+});
+
+test("installRemoteSessionGuards：item 缺失或取不到文件名时不抛（日志代码不许拖垮下载）", () => {
+  const { stub } = setupRemoteStub();
+  const items = [
+    undefined,
+    null,
+    {},
+    { getURL: () => undefined, getFilename: () => undefined },
+    { getURL: () => "not-a-url", getFilename: () => "" },
+    {
+      getURL() {
+        throw new Error("boom");
+      },
+      getFilename: () => "x.bin",
+    },
+  ];
+  for (const item of items) {
+    const { prevented, warns } = fireWillDownload(stub, item);
+    assert.equal(prevented, false, "任何情况下都不拦截");
+    assert.ok(warns.length >= 1, "即使元信息取不到，也要留下「有下载发生」这条记录");
+  }
+});
+
+test("远程 session 的两个权限 handler 与 defaultSession 同策略（隔离不许顺手放宽）", () => {
+  const { stub: remote } = setupRemoteStub();
+  const { stub: dflt } = setupStub();
+  assert.equal(typeof remote.requestHandler, "function", "远程 session 必须也装上 request handler");
+  assert.equal(typeof remote.checkHandler, "function", "远程 session 必须也装上 check handler");
+
+  const union = Array.from(new Set([...REQUEST_PERMISSIONS, ...CHECK_PERMISSIONS]));
+  assert.equal(union.length, 21);
+  for (const p of union) {
+    const remoteReq = callRequest(remote, p, {}).granted;
+    const remoteChk = callCheck(remote, p, "https://evil.example").result;
+    assert.equal(
+      remoteReq,
+      false,
+      `远程 session 的权限请求 ${p} 必须被拒：这是全应用唯一加载任意网址的窗口`
+    );
+    assert.equal(remoteChk, false, `远程 session 的权限查询 ${p} 必须返回 false`);
+    // 与 defaultSession 逐项对齐：防「加了 partition 顺手给远程窗放宽一项」
+    assert.equal(remoteReq, callRequest(dflt, p, {}).granted, `权限 ${p} 远程与默认 session 策略不一致`);
+    assert.equal(
+      remoteChk,
+      callCheck(dflt, p, "https://evil.example").result,
+      `权限 ${p} 远程与默认 session 的 check 策略不一致`
+    );
+  }
+});
+
+test("installRemoteSessionGuards：session 不可用时返回 false 并留日志（fail-closed 可见）", () => {
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args);
+  const r1 = installRemoteSessionGuards(null);
+  const r2 = installRemoteSessionGuards({}); // 无 on
+  const r3 = installRemoteSessionGuards({ on() {} }); // 有 on 但没有权限 setter
+  console.warn = origWarn;
+  assert.equal(r1, false);
+  assert.equal(r2, false);
+  assert.equal(r3, false, "权限门禁装不上时整体必须失败——只有下载日志没有门禁是负收益");
+  assert.equal(warns.length, 3);
+  assert.equal(warns[0][0], "[ini/security]");
+  assert.match(warns[0][1], /远程会话守卫未生效/);
+  assert.match(warns[2][1], /权限门禁未生效/);
+});
+
+test("installRemoteSessionGuards：重复调用不重复注册 will-download（监听器不许叠加）", () => {
+  const { stub } = setupRemoteStub();
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(installRemoteSessionGuards(stub), true);
+    assert.equal(installRemoteSessionGuards(stub), true);
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(
+    stub.listeners.get("will-download").length,
+    1,
+    "远程窗会被反复开关，_mkSub 每次都会调本函数；监听器叠加会让一次下载打出 N 条日志"
+  );
+  // 幂等之后监听器仍然可用，且仍然不拦截
+  assert.equal(fireWillDownload(stub, { getURL: () => "https://a.example/f", getFilename: () => "f" }).prevented, false);
 });
 
 test("main.js 在创建任何窗口之前接入权限门禁（结构断言，防接入点被摘掉）", () => {

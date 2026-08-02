@@ -5,7 +5,8 @@
  * Electron 未设 handler 时走默认策略，放行绝大多数权限请求（media / geolocation /
  * notifications 等），而 Electron **没有 Chrome 那样的权限气泡 UI**。
  * 同时 src/windows/tool/urlWindow/main.js 的设计用途就是 loadURL(用户输入的任意网址)
- * （仅过 http/https 白名单），且未设 partition —— 远程页面与本地窗共用 defaultSession。
+ * （仅过 http/https 白名单）。远程子窗现已迁到独立的 persist 分区（见下方
+ * installRemoteSessionGuards），存储不再与本地窗共用，但**权限门禁必须随之补装**。
  * 结果：用户在 urlWindow 里打开一个恶意页面，该页面可以无任何提示取用摄像头 / 麦克风 /
  * 定位。触发门槛只是「用户访问了坏网站」，而这个窗口就是为访问任意网站而存在的。
  *
@@ -43,6 +44,13 @@ const PERMISSION_ALLOW_LIST = Object.freeze([]);
 
 /** 日志前缀：相对 src/ 的模块路径 */
 const LOG_TAG = "[ini/security]";
+
+/**
+ * 已经装过 will-download 观测的 session 集合。
+ * 两个权限 handler 是 setter，重复调用只是覆盖，无害；而 will-download 是事件监听器，
+ * 重复注册会让同一次下载打出多条日志（且随窗口反复开关无限叠加），故按 session 去重。
+ */
+const REMOTE_DOWNLOAD_WATCHED = new WeakSet();
 
 /**
  * 单一判定函数 —— request / check 两个 handler 都只调它，
@@ -113,8 +121,85 @@ function installPermissionHandlers(targetSession) {
   return true;
 }
 
+/**
+ * 从下载链接里只取 host 用于日志。
+ * 刻意不记完整 URL：下载直链的 query 里常带一次性 token / 签名（S3 presigned、网盘直链），
+ * 落进日志就是把凭据写到磁盘。host + 文件名足够回答「这个下载是哪来的」。
+ * @param {unknown} url
+ * @returns {string} 永远返回可打印字符串，绝不抛
+ */
+function describeDownloadHost(url) {
+  if (typeof url !== "string" || url === "") return "unknown";
+  try {
+    return new URL(url).host || "unknown";
+  } catch (e) {
+    // 解析失败（非常规 scheme 等）不该影响下载本身；把这个事实记进日志而不是静默吞掉
+    return "unparsable";
+  }
+}
+
+/**
+ * 给「远程页面专用 session」（urlWindow 的 persist: 分区）装上它该有的两件事。
+ *
+ * 背景：urlWindow 的远程子窗从 defaultSession 分离到独立 partition 之后，
+ * main.js 里那次 installPermissionHandlers(session.defaultSession) **不再覆盖它**。
+ * 不补装 = 摄像头 / 麦克风 / 定位回到 Electron 默认放行且没有权限气泡 UI ——
+ * 「存储隔离」反而把权限门禁绕过去了，是负收益。所以这个函数把两件事收成一处，
+ * 谁建远程 session 谁必须调它。
+ *
+ *   1. 权限门禁：直接复用 installPermissionHandlers，与 defaultSession **同一套判定**
+ *      （不复制一份权限逻辑 —— 两份判定迟早会漂移成「隔离窗反而更宽松」）。
+ *   2. will-download 观测：**只记日志，不 preventDefault**。Electron 的默认行为本就是
+ *      弹系统保存对话框（用户点了才落盘），不是静默下载，不构成漏洞；直接拦掉等于把这个
+ *      窗口的下载能力整个砍了，是功能回退。这里缺的只是可观测性 —— 远程站点触发下载时
+ *      至少要在日志里留下 host 与文件名。
+ *
+ * 必须在创建远程子窗**之前**调用：顺序错了等于窗口先于门禁存在。
+ *
+ * @param {{on:Function, setPermissionRequestHandler:Function, setPermissionCheckHandler:Function}} targetSession
+ *        通常是 electron 的 session.fromPartition("persist:remote-url")（本模块刻意不 require electron）
+ * @returns {boolean} 是否安装成功（false 必定伴随 warn，不静默）
+ */
+function installRemoteSessionGuards(targetSession) {
+  if (!targetSession || typeof targetSession.on !== "function") {
+    // 与 installPermissionHandlers 同理：装不上必须可见，否则远程窗会在无门禁状态下开起来
+    console.warn(LOG_TAG, "session 不支持事件监听，远程会话守卫未生效:", typeof targetSession);
+    return false;
+  }
+
+  if (!installPermissionHandlers(targetSession)) return false;
+
+  // 幂等：远程窗可被反复开关，_mkSub 每次都会调本函数
+  if (REMOTE_DOWNLOAD_WATCHED.has(targetSession)) return true;
+
+  targetSession.on("will-download", (event, item) => {
+    let host = "unknown";
+    let filename = "unknown";
+    try {
+      host = describeDownloadHost(item?.getURL?.());
+      filename = item?.getFilename?.() || "unknown";
+    } catch (e) {
+      // 取元信息失败不能影响下载，也不能静默：降级记录，下面那条日志照发
+      console.warn(LOG_TAG, "读取下载项信息失败（不影响下载）:", e?.message || e);
+    }
+    // 刻意不调 event.preventDefault()：放行 Electron 默认的系统保存对话框
+    console.warn(
+      LOG_TAG,
+      "远程会话触发下载（已放行，走系统保存对话框）:",
+      "host:",
+      host,
+      "file:",
+      filename
+    );
+  });
+  REMOTE_DOWNLOAD_WATCHED.add(targetSession);
+
+  return true;
+}
+
 module.exports = {
   PERMISSION_ALLOW_LIST,
   isPermissionAllowed,
   installPermissionHandlers,
+  installRemoteSessionGuards,
 };

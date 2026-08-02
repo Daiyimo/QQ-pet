@@ -717,6 +717,89 @@ test("urlWindow 远程子窗：sandbox 开 / webSecurity 不关 / 隔离开 / �
   );
 });
 
+test("urlWindow 远程子窗：必须用独立 persist 分区，且**先给该 session 装守卫再建窗**", () => {
+  /* 为什么是静态锚：这个 main.js 是 webpack 压缩单行产物、且强依赖 Electron 运行时
+     （eval("require")("electron")），纯 node 里 require 不进来，只能做源码文本断言。
+     被钉住的是三件缺一即负收益的事：
+       1. partition 存在 —— 否则任意站点的 cookie / localStorage / SW / HTTP 缓存
+          继续落进 defaultSession，与所有本地窗共用存储；
+       2. partition 值是 persist: 前缀 —— 用内存 session 会让用户每次重开都掉登录态，
+          那是没必要付的功能回退（目标是「与本地窗隔离」，不是「不留痕」）；
+       3. installRemoteSessionGuards 的调用位置在 new BrowserWindow 之前 —— 新 session
+          不在 main.js 那次 installPermissionHandlers(defaultSession) 的覆盖范围内，
+          不补装门禁则摄像头/麦克风/定位回到 Electron 默认放行且无权限气泡 UI，
+          「隔离」反而绕过了门禁；顺序错了等于窗口先于门禁存在。 */
+  const src = stripComments(readSource(URL_WINDOW));
+  const anchor = src.indexOf("REMOTE_URL_WEB_PREFERENCES={");
+  assert.notEqual(anchor, -1, `${URL_WINDOW}: 找不到 REMOTE_URL_WEB_PREFERENCES`);
+  const wp = extractBraceBlock(
+    src,
+    src.indexOf("{", anchor),
+    `${URL_WINDOW} REMOTE_URL_WEB_PREFERENCES`
+  );
+
+  /* 1) partition 键在，且取值是一个常量名（不是内联字符串——常量名要能和 fromPartition 对上）。 */
+  const partitionHit = wp.match(/[{,]\s*partition\s*:\s*([A-Za-z_$][\w$]*)\s*(?=[,}])/);
+  assert.ok(
+    partitionHit,
+    `${URL_WINDOW} REMOTE_URL_WEB_PREFERENCES: 缺少 partition:<常量名>。\n` +
+      `没有 partition，用户在这个窗口打开的任意网站的 cookie / localStorage / IndexedDB /` +
+      ` Service Worker / HTTP 缓存全部落进应用的 defaultSession，与所有本地窗共用；` +
+      `恶意站点因此能读写与本体页面同一个存储域。实测字面量：\n${wp}`
+  );
+  const partitionConst = partitionHit[1];
+
+  /* 2) 该常量必须是 persist: 前缀的持久化分区。 */
+  assert.match(
+    src,
+    new RegExp(`${partitionConst}\\s*=\\s*["']persist:[^"']+["']`),
+    `${URL_WINDOW}: ${partitionConst} 必须赋一个 "persist:" 前缀的分区名。` +
+      `去掉 persist: 会变成内存 session——每次重开窗口都掉登录态，是功能回退；` +
+      `本次隔离的目标是「与本地窗分开存储」，不是「不留痕」。`
+  );
+
+  /* 3) 同一个常量名被交给 session.fromPartition（不许两处各写一个字符串，写歪了就悄悄不隔离）。 */
+  const fromPartitionIdx = src.indexOf(`session.fromPartition(${partitionConst})`);
+  assert.notEqual(
+    fromPartitionIdx,
+    -1,
+    `${URL_WINDOW}: 找不到 session.fromPartition(${partitionConst})。` +
+      `webPreferences 里的 partition 与拿来装门禁的 session 必须是**同一个**分区常量，` +
+      `否则门禁装在了一个没人用的 session 上。`
+  );
+  assert.match(
+    src,
+    /\{[^}]*\bsession\b[^}]*\}\s*=\s*_require\("electron"\)/,
+    `${URL_WINDOW}: 必须从 electron 解构 session（fromPartition 的来源）。`
+  );
+
+  /* 4) 守卫调用存在，且**文本位置在 new BrowserWindow 之前**。 */
+  const guardIdx = src.indexOf("installRemoteSessionGuards(");
+  assert.notEqual(
+    guardIdx,
+    -1,
+    `${URL_WINDOW}: 找不到 installRemoteSessionGuards( 调用。加了 partition 却不给新 session 补装` +
+      `权限门禁，摄像头/麦克风/定位会回到 Electron 默认放行且没有权限气泡 UI——隔离反而放宽了权限。` +
+      `实现见 src/ini/security.js（行为测试在 test/permissionHandler.test.js）。`
+  );
+  assert.match(
+    src,
+    /_require\("\.\.\/\.\.\/\.\.\/ini\/security\.js"\)/,
+    `${URL_WINDOW}: 守卫必须来自 src/ini/security.js（复用同一套权限判定，不许本地另抄一份）。`
+  );
+  const bwIdx = src.indexOf("new BrowserWindow(");
+  assert.notEqual(bwIdx, -1, `${URL_WINDOW}: 找不到 new BrowserWindow(`);
+  assert.ok(
+    guardIdx < bwIdx,
+    `${URL_WINDOW}: installRemoteSessionGuards( 出现在 new BrowserWindow( 之后（${guardIdx} > ${bwIdx}）。` +
+      `窗口一旦先建起来，它的 session 在装上门禁前就已经能被远程页面使用了——顺序本身就是这条防护的一部分。`
+  );
+  assert.ok(
+    fromPartitionIdx < bwIdx,
+    `${URL_WINDOW}: session.fromPartition 必须在 new BrowserWindow 之前完成（当前 ${fromPartitionIdx} > ${bwIdx}）。`
+  );
+});
+
 test("弹幕覆盖层（不走工厂的 BrowserWindow）同样保持 nodeIntegration 关 / contextIsolation 开", () => {
   const src = stripComments(readSource(BARRAGE));
   const anchor = src.indexOf("webPreferences:");

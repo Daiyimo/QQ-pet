@@ -46,6 +46,8 @@ class FocusGuard {
     // 刻意**不**在 start() 里清空：用户关掉再打开专注守护、或换个开关折腾一圈，
     // 都不该换来第二次劝睡。
     this._lateNightNightId = "";
+    // setSys 缺失（未初始化/被裁剪的宿主）只警告一次（每进程一次，避免 30s 一条刷满日志）
+    this._noSetSysWarned = false;
   }
 
   start() {
@@ -112,7 +114,18 @@ class FocusGuard {
   _markLateNightDone(nightId) {
     // 先写内存镜像：落盘失败时至少本进程内不会反复唠叨
     this._lateNightNightId = nightId;
-    if (typeof setSys !== "function") return;
+    if (typeof setSys !== "function") {
+      // 静默 return 等于"跨重启不复发"这个 feature 无声失效（每次重启都会重新劝一遍），
+      // 却查不到任何线索。每进程只警告一次：本函数每晚都会走到，逐次告警本身就是刷屏。
+      if (!this._noSetSysWarned) {
+        this._noSetSysWarned = true;
+        console.warn(
+          "[service/focusGuard] setSys 不可用，深夜劝睡去重标记无法落盘，" +
+            "本晚去重降级为仅本进程内存生效（重启后会再劝一次）"
+        );
+      }
+      return;
+    }
     try {
       setSys({ name: LATE_NIGHT_SYS_KEY, value: nightId });
     } catch (e) {
@@ -190,8 +203,15 @@ class FocusGuard {
         // ——熬到 4 点被劝 6 次是原实现的真实行为，冷却只能控制间隔、控不了总次数。
         const nightId = this._nightId(now);
         if (!this._lateNightDone(nightId)) {
-          this._markLateNightDone(nightId);
+          // 顺序不可颠倒：先标记再发送，一旦 _fireReminder 同步抛错（离线兜底路径直接
+          // 调 openSpeak，主窗销毁 / 气泡队列异常时会抛），这一晚就被判为"已劝过"且已
+          // 跨重启落盘 —— 用户整晚含次日凌晨再也不会被提醒，重启也不恢复（旧实现的
+          // 60 分钟冷却至少还会重试，新去重把这条退路也堵死了）。
+          // 反向的极端同样要防住：提醒发出去了却漏标记 → 每 30s 重弹一次。所以判定
+          // "发出去了"的标准取 _fireReminder **同步返回**：离线路径同步返回即气泡已入队；
+          // AI 路径同步返回时请求已发出，其在途失败自带离线兜底，重发只会重复劝。
           this._fireReminder("lateNight", { hour });
+          this._markLateNightDone(nightId);
         }
       }
     } else {

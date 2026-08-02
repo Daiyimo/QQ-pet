@@ -66,6 +66,7 @@ function makeEnv(opts = {}) {
     speaks: [],
     llmCalls: [],
     errors: [],
+    warns: [],
     sysWrites: [],
     sysWriteError: null,
     clock: { now: opts.now === undefined ? DAYTIME : opts.now },
@@ -106,6 +107,7 @@ function makeEnv(opts = {}) {
     llmService: global.llmService,
     getPetInfo: global.getPetInfo,
     error: console.error,
+    warn: console.warn,
   };
   global.getSys = (k) => env.sys[k];
   // 与 src/ini/pet.js 的真 setSys 同签名（{name, value}）且同语义：写内存 sys 再落盘。
@@ -118,11 +120,13 @@ function makeEnv(opts = {}) {
   global.openSpeak = (payload) => env.speaks.push(payload);
   global.getPetInfo = () => ({ info: { name: "小狗" } });
   console.error = (...args) => env.errors.push(args.join(" "));
+  console.warn = (...args) => env.warns.push(args.join(" "));
   const restoreClock = installClock(env.clock);
 
   env.restore = () => {
     restoreClock();
     console.error = saved.error;
+    console.warn = saved.warn;
     global.getSys = saved.getSys;
     if (saved.setSys === undefined) delete global.setSys;
     else global.setSys = saved.setSys;
@@ -456,6 +460,107 @@ test("深夜劝睡去重标记落盘失败时仍只劝一次，并记带堆栈�
     env.guard.start(); // 落盘失败后又关开一次守护：内存镜像必须活过 start()
     env.tick(0, 1);
     assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+  });
+});
+
+// 提醒发送失败（openSpeak 抛）不得吃掉当晚唯一一次提醒：去重标记只在提醒真的发出去
+// 之后才落。这三条钉住的是"标记与发送的先后关系"，先标记再发送必然变红。
+//
+// 走 guard.timer._onTimeout() 而不是 env.tick()：openSpeak 抛错时异常要由生产代码里
+// 定时器那层 try/catch 兜住（与 test「巡检内部抛错」同一驱动方式），env.tick 直调
+// _tick 会把异常漏给测试自己。
+function lateNightRounds(env) {
+  env.guard.start();
+  return () => env.guard.timer._onTimeout();
+}
+
+/** 首轮 openSpeak 抛错、其后恢复正常；返回"跑一轮巡检"的函数 */
+function failFirstSpeak(env) {
+  let failNext = true;
+  global.openSpeak = (payload) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("气泡队列异常");
+    }
+    env.speaks.push(payload);
+  };
+  return lateNightRounds(env);
+}
+
+test("深夜劝睡发送失败时不落去重标记，下一轮仍会重试提醒", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    let attempts = 0;
+    global.openSpeak = () => {
+      attempts += 1;
+      throw new Error("主窗正在销毁");
+    };
+    const tick = lateNightRounds(env);
+
+    tick();
+    assert.equal(attempts, 1);
+    assert.deepEqual(env.sysWrites, []); // 没发出去就不许标记
+    assert.equal(env.errors.length, 1);
+    assert.match(env.errors[0], /\[focusGuard\].*跳过本轮/);
+    assert.match(env.errors[0], /主窗正在销毁/);
+
+    // 真正的价值在这一句：这一晚没被判定为"已劝过"，下一轮巡检还会再试
+    env.clock.now = at(22, 30);
+    tick();
+    assert.equal(attempts, 2);
+    assert.deepEqual(env.sysWrites, []);
+  });
+});
+
+test("深夜劝睡重试成功后才落去重标记", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    const tick = failFirstSpeak(env);
+
+    tick(); // 第一轮失败
+    assert.deepEqual(env.texts(), []);
+    assert.deepEqual(env.sysWrites, []);
+
+    env.clock.now = at(22, 30);
+    tick(); // 第二轮成功：这次必须落标记
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    assert.deepEqual(env.sysWrites, [
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-01" },
+    ]);
+  });
+});
+
+test("深夜劝睡重试成功后当晚不再重复劝：第三轮起静默", () => {
+  // 反向极端：成功了却漏标记会变成每 30s 重弹一次，比吃掉提醒更糟
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    const tick = failFirstSpeak(env);
+    tick(); // 失败
+    env.clock.now = at(22, 30);
+    tick(); // 成功
+    env.clock.now = at(23, 0);
+    tick(); // 第三轮：必须静默
+    env.clock.now = at(3, 59, 2);
+    tick(); // 同一晚凌晨侧：仍静默
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    assert.deepEqual(env.sysWrites, [
+      { name: LATE_NIGHT_SYS_KEY, value: "2026-08-01" },
+    ]);
+  });
+});
+
+test("setSys 不可用时警告一次说明去重降级，且不会每次都刷屏", () => {
+  withEnv({ ...ONLY_LATE_NIGHT, now: at(22, 0) }, (env) => {
+    delete global.setSys; // 宿主未注入 setSys：标记写不进去，"跨重启不复发"整体失效
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight]);
+    assert.equal(env.warns.length, 1);
+    assert.match(env.warns[0], /^\[service\/focusGuard\] /);
+    assert.match(env.warns[0], /setSys 不可用.*重启后会再劝一次/);
+    assert.deepEqual(env.errors, []);
+
+    // 第二晚会再次尝试写标记：warn 每进程只出一条，不随夜数增长
+    env.clock.now = at(22, 0, 2);
+    env.tick(0, 1);
+    assert.deepEqual(env.texts(), [FALLBACK.lateNight, FALLBACK.lateNight]);
+    assert.equal(env.warns.length, 1);
   });
 });
 

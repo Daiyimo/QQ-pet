@@ -28,7 +28,7 @@ QQ宠物怀旧服 1.2.4（官方）
 
 ### 继承的原版玩法
 
-喂养 / 清洗 / 吃药 / 玩具、打工赚元宝、上学提升学识、双栏商城（背包 + 购物 + 购物车）、背景装备切换（永久拥有）、粉钻特权（8 折 / 专属商品 / 成长加成）、19 款小游戏、钓鱼、后花园、宠物资料与属性面板、贴边隐藏、鼠标穿透。右键菜单、悬浮控制条、商城、小游戏大厅等界面均已对齐官方 1.2.5 的素材与交互（详见 CHANGELOG）。
+喂养 / 清洗 / 吃药 / 玩具、打工赚元宝、上学提升学识、双栏商城（背包 + 购物 + 购物车）、背景装备切换（永久拥有）、粉钻特权（8 折 / 专属商品 / 成长加成）、35 款小游戏（21 个一级入口 + 「冒险岛合集」9 个 + 「其他换皮小游戏合集」5 个，见 `src/windows/popups/smallGame/index.js` 的 `gameList`）、钓鱼、后花园、宠物资料与属性面板、贴边隐藏、鼠标穿透。右键菜单、悬浮控制条、商城、小游戏大厅等界面均已对齐官方 1.2.5 的素材与交互（详见 CHANGELOG）。
 
 宠物属性（饥饿 / 清洁 / 心情 / 健康 / 成长 / 学识 / 魅力 / 体力）按 60 秒心跳衰减与成长，等级上限 400 级。
 
@@ -42,7 +42,7 @@ QQ宠物怀旧服 1.2.4（官方）
 | **游戏弹幕** | 感知到游戏画面时，在全屏透明覆盖层发弹幕吐槽 |
 | **记忆与日记** | 把感知事件沉淀为 `events.jsonl`，每日聚合成时间轴日记，可再生成配图 |
 | **课程录制** | 识别到上课场景后录制关键帧与转写，结束时生成总结并导出到桌面 |
-| **专注守护** | 基于系统空闲时间的护眼（25 分钟）、久坐（50 分钟）、深夜劝睡（22 点后）、久别问候提醒，文案全部现编 |
+| **专注守护** | 基于系统空闲时间的护眼（25 分钟）、久坐（50 分钟）、深夜劝睡（22:00–03:59）、久别问候提醒，文案全部现编。深夜劝睡**每晚只提醒一次**，去重键按「夜晚」而非日历天（00:00–03:59 归前一天），并落盘 sys，重启不会重新唠叨 |
 | **成就 / 签到 / 旅游** | 成就体系、每日签到、放宠物出门旅行收集省份 |
 | **换肤** | 除经典 Flash 皮肤外，支持 `assets/ActionNew` 下的 PNG 序列帧皮肤 |
 
@@ -99,7 +99,7 @@ npm run build:win:portable   # 仅免安装版
 5. 点**测试连接**确认可用，再**保存并启用该服务商**
 6. 勾选**启用 AI 对话**
 
-屏幕感知需要**多模态（视觉）模型**。若未单独配置视觉服务商，会回退到对话服务商 —— 此时若该模型不支持图片，感知会失败。
+屏幕感知需要**多模态（视觉）模型**。设置页**没有独立的视觉服务商入口**（历史上的 `sys.visionProvider` 是个只读不写的死键，已删除），感知一律复用「自定义」标签页里配好的对话服务商 —— 所以那一栏必须填一个会看图的模型。开启感知时会先做一次零请求预检并气泡告知实际用于看图的模型；若该模型不支持图片，连续 3 次「配置性失败」（400 不支持图片 / 401 Key 无效 / 402、403 欠费 / 404 地址错，以及 HTTP 200 但 body 报图片能力错误）后会**自动停用本进程的感知循环并销毁弹幕窗**，气泡里带真实原因，不再无限重试烧截屏和请求。瞬时失败（408 / 425 / 429 / 5xx / 超时 / 解析失败）仍走退避重试。
 
 图像生成（日记配图）在「记忆与课程」标签页单独配置，走 images/edits 接口。
 
@@ -117,12 +117,16 @@ npm run build:win:portable   # 仅免安装版
 
 ### 默认快捷键
 
-| 快捷键 | 功能 |
-|---|---|
-| `Alt+D` | 打开设置 |
-| `Alt+.` | 上帝模式（调试用，可改元宝 / 成长 / 发道具） |
-| `Ctrl+M` | 打开 AI 对话 |
-| `Alt+Q` | 截图 — **当前在 Windows 上无功能**，见「已知问题」 |
+「快捷键设置」标签页只能改前三项（`screenshot` / `openStting` / `god`）；后三项是代码里写死注册的，设置页看不到也改不了。
+
+| 快捷键 | 功能 | 可在设置页修改 |
+|---|---|---|
+| `Alt+D` | 打开设置 | 是 |
+| `Alt+.` | 上帝模式（调试用，可改元宝 / 成长 / 发道具） | 是 |
+| `Alt+Q` | 截图 — **当前在 Windows 上无功能**，见「已知问题」 | 是 |
+| `Ctrl+M` | 打开 / 关闭 AI 对话 | 否，由 `src/service/aiWiring.js:102` 动态注册 |
+| `Alt+Esc` | 关闭桌面悬浮特效窗并把该开关置为关 | 否，`src/windows/main/main.js` 的 `upShotycut("controlTool", ["ALT","ESC"], …)` |
+| `Alt+Shift+Ctrl+R` | 重载：关掉全部子窗口后重新加载主窗口 | 否，同上文件的第二处 `upShotycut("controlTool", …)` |
 
 ---
 
@@ -138,6 +142,7 @@ npm run build:win:portable   # 仅免安装版
 | 记忆事件与日记 | `%APPDATA%\qq-local\memory\` |
 | 课程录制 | `%APPDATA%\qq-local\courses\` |
 | 课程导出 | `桌面\QQ-Courses\` |
+| 远程网址窗的 cookie / localStorage / 缓存 | `%APPDATA%\qq-local\Partitions\remote-url\`（独立 session 分区 `persist:remote-url`，与桌宠本体各窗不共用） |
 
 存档是明文 JSON（API Key 除外，加密存储）。想备份宠物就复制 `config-qq-local.json`。
 
@@ -155,7 +160,20 @@ npm run build:win:portable   # 仅免安装版
 
 关掉「剪切板内容发送给 AI」后，剪贴板播报仍可用，只是不出网。
 
-磁盘占用有上界：记忆事件文件轮转上限约 12 MiB；课程保留最近 20 个会话，单会话帧总量上限 24 MiB、转写文本上限 2 MiB，因此课程本地副本的整体上界约 20 × 26 MiB ≈ 520 MiB。桌面导出目录不会被自动删除。
+磁盘占用**大部分**有上界，逐项都能在代码里找到常量：
+
+| 内容 | 上界 | 常量位置 |
+|---|---|---|
+| 记忆事件 `events.jsonl` | 现役 4 MiB + 2 份归档 = 12 MiB | `src/service/memory/store.js:16,20` |
+| 日记配图 `daily-images/` | 每天最多留 3 张，全库 200 MiB（含元数据 json） | `src/service/memory/store.js:29,33` |
+| 课程录制 | 保留最近 20 个会话；单会话关键帧 40 张 / 24 MiB、转写 2 MiB → 本地副本约 20 × 26 MiB ≈ 520 MiB | `src/service/courses/repo.js:14,16,19,22` |
+| 课程的块级总结缓存 `summary-chunks.json` | 每会话 80 块 × 4000 字符，随会话数裁剪 → 全局约 6 MiB | `src/service/courses/repo.js:41,42` |
+
+**没有上界的**（如实列出）：
+
+- **宠物存档 `config-qq-local.json`** — `fishing.fishes` / 背包 / `achievements` 三个数组只增不裁。这是**有意未做**：裁剪要先回答「哪些鱼该留」「删掉的鱼算不算钓过」（影响成就与图鉴语义），属产品决策而非护栏，不代用户删数据。现有的护栏只到「涨大了让用户看见」：落盘成功后每 20 次抽检一次体积，超过 2 MiB 会 warn + 弹一次用户可见气泡（`src/ini/storeCache.js:74,82`）。
+- **`memory/daily/` 下的每日 markdown 与 `facts.json`** — 每天一份，增长慢但无裁剪。
+- **桌面导出目录 `桌面\QQ-Courses\`** — 不会被自动删除（桌面文件是用户可见资产，删除不可逆）。超过 30 个课程目录时每进程弹一次气泡提醒你自己清理（`src/service/courses/manager.js:34,668`）。
 
 ---
 
@@ -165,9 +183,9 @@ npm run build:win:portable   # 仅免安装版
 npm test        # node --test test/*.test.js
 ```
 
-当前 **690 个测试 / 57 个测试文件**（实测 `npm test` 的 `tests` 计数）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
+当前 **986 个测试 / 69 个测试文件**（实测 `npm test` 的 `tests` 计数）。除 `test/newSkinRouter.test.js` 需要运行时依赖 `iconv-lite`（即先 `npm install`）外，其余全部纯 Node 运行、不依赖 Electron，通过依赖注入（时钟 / 随机数 / 存储 / 服务商 / `fs` / `electron-store` / `express` / `realpath`）隔离外部依赖。
 
-**「不依赖 Electron」不等于「不碰磁盘和网络」**（此前的表述容易被误读）：`coursesManager` / `coursesRepo` / `memory` / `memoryStore` / `pathGuardRealpath` / `storeCorrupt` / `storeGetItemThrow` 七个文件用 `os.tmpdir()` + `mkdtempSync` 建真实临时目录（用后 `rmSync` 清理）；`imageGenAbort` / `providersTransport` 两个文件用 `server.listen(0, "127.0.0.1")` 起真实 HTTP 服务（临时端口、仅回环，无冲突风险）。
+**「不依赖 Electron」不等于「不碰磁盘和网络」**（此前的表述容易被误读）：`coursesManager` / `coursesRepo` / `memory` / `memoryDedupe` / `memoryStore` / `pathGuardRealpath` / `storeCorrupt` / `storeGetItemThrow` 八个文件用 `os.tmpdir()` + `mkdtempSync` 建真实临时目录（用后 `rmSync` 清理）；`imageGenAbort` / `imageGenEndpoint` / `providersTransport` 三个文件用 `server.listen(0, "127.0.0.1")` 起真实 HTTP 服务（临时端口、仅回环，无冲突风险）。
 
 `test/ruffleSmoke/` 是需要 Electron 与真实素材的手动冒烟脚本（`node test/ruffleSmoke/run.js` 等），**刻意不被 `npm test` 的 glob 收录**，改 Ruffle 相关代码时手动跑。
 
@@ -217,52 +235,47 @@ console.warn("[前缀] 人话描述，含降级后的行为:", e?.message || e);
 
 ## 已知问题
 
-- **`Alt+Q` 截图无功能** — 当前是**不分平台的空实现**：只记一条 warn 说明它依赖 macOS 的 `screencapture`、当前平台不支持，然后跳过。全仓已无 `child_process`。仅占用快捷键，未实现。（此条此前描述为"调用 macOS 命令、回调 `this` 丢失、成败判断反了"，那段代码已不存在，本轮审查订正。）
+- **`Alt+Q` 截图无功能** — 当前是**不分平台的空实现**（`src/windows/main/shortcuts.js` 的 `methods.screenshot`）：记一条 warn 说明它依赖 macOS 的 `screencapture`、当前平台不支持，**并弹一条用户可见气泡**「[host]，截图功能暂不支持当前系统哦~~~」，然后跳过。全仓已无 `child_process`。仅占用快捷键，未实现。（此条此前描述为"调用 macOS 命令、回调 `this` 丢失、成败判断反了"，那段代码已不存在，第三轮审查订正；"只记 warn"的说法同样不全，本轮补上气泡。）
+- **`shortcuts.js` 的日志前缀 `[快捷键]` 与本文档的日志约定直接矛盾** — 下面「日志与异常约定」把 `[快捷键]` 逐字当作反面例子（"不要用中文功能标签，无法 grep 反查文件"），而 `src/windows/main/shortcuts.js` 现存 3 处 `[快捷键]`（模块加载失败 error、快捷键注册失败 warn、截图不支持 warn），是全仓仅存的中文前缀。按约定应为 `[main/shortcuts]`。**本轮只如实记录，不改代码**：该文件是 webpack 压缩单行产物，改前缀属"顺手改到的地方"以外的独立改动。附带的元问题（6ab27c5 已列为待办）：前缀规范没有任何自动化守卫 —— 上一轮 `src/windows/main/main.js` 与仓库根 `main.js` 的 `[main]` 撞名是靠人发现的，本该由一条扫 `src/` 下 error/warn 前缀的元测试自动抓到。
 - **贴边动画不停在指定帧** — Ruffle 未暴露任何跳帧能力（无 `GotoFrame` 等价 API），贴边动画会整片播放。需改素材或等 Ruffle 支持。
-- **本地窗口默认 `webSecurity: true`，仅 4 窗显式 opt-out** — 主宠窗 / smallGame / 钓鱼 / 密室因 Ruffle fetch 本地 SWF 或跨源 iframe 需要保留 `webSecurity: false`，其余窗口已全部收紧；统一的导航 / 新窗守卫（默认 deny）覆盖全部窗口。可输入任意网址的窗口隔离到 `webSecurity: true + sandbox: true + 无 preload`。
+- **本地窗口默认 `webSecurity: true`，仅 4 窗显式 opt-out，且其中 2 窗的 opt-out 理由已不成立** — 主宠窗 / smallGame 靠 Ruffle fetch 本地 SWF（`file://` 页面 + `webSecurity: true` 会拦子资源请求），这两个理由仍成立；钓鱼 / 密室的理由写的是「`file://` 壳要跨源直写 `http://127.0.0.1` iframe 的 `contentWindow`」，**这条已经站不住**：`webSecurity: false` 关的是同源策略，关不掉进程级站点隔离；历史上放行靠的是 `disable-site-isolation-trials`，该开关已在第二轮加固中移除，并被 `test/electronSecurityInvariants.test.js:105` 的 `FORBIDDEN_TOKENS` 零命中断言钉死、不计划恢复。项目自己的冒烟脚本 `test/ruffleSmoke/runCspGuard.js:193-204` 已把「该直写会被 Chromium 拦截」写成既定事实，并把 C3 探针降级为**不计入通过数的观测项**；`986ec80` 又专门给钓鱼补了「等待宿主注入 `selfeLoad` 超时」的 warn（`src/windows/popups/fishing/indexOnLine.js:760-772`），正是被拦死后的表现。**结论：钓鱼 / 密室的 `webSecurity: false` 应当被移除而非保留，彻底修复需把那两处改为 `postMessage`。**
+  待办（按顺序）：① 跑一次 `node test/ruffleSmoke/runCspGuard.js`，把 C3 探针的实测输出记进 `report.md`，用实测替掉本条的推理；② 若确认被拦，把钓鱼 / 密室的宿主注入改成 `postMessage`；③ 改完把 `webSecurity` opt-out 清单从 4 个收到 2 个，并同步 `electronSecurityInvariants` 里那条「恰好 4 个」的集合等值断言。
+  统一的导航 / 新窗守卫（默认 deny）覆盖全部窗口。可输入任意网址的窗口隔离到 `webSecurity: true + sandbox: true + 无 preload + 独立 session 分区`。
 - **CSP meta 只覆盖 2 个文档，iframe 载入的三个页面完全无 CSP** — 全仓 27 个 html 里只有 `app.html`（壳窗）与 `barrage/index.html`（全仓唯一零 `unsafe-` 的严格 CSP）带 CSP meta。而经 `http://127.0.0.1` 载入 iframe 的 `main/indexOnline.html`、`popups/fishing/indexOnLine.html`、`popups/backRoom/indexOnLine.html` 一个都没有 —— 它们恰好就在上面那 4 个 `webSecurity: false` 的窗口里。`app.html` 自己的注释已承认其 CSP 不约束子框架文档。
-- **钓鱼 / 密室的跨源 `contentWindow` 直写在 Electron 28 下很可能已失效** — 实测 `webSecurity: false` 下 file:// 壳写 http://127.0.0.1 iframe 的 window 仍被 "Blocked a frame ... cross-origin" 拦截，需 `disable-site-isolation-trials` 才放行（该开关已在安全加固中移除，不计划恢复）。彻底修复需把那两处改为 `postMessage`。
-- **多显示器下贴边判定可能错位** — 贴边逻辑用累加后的屏幕尺寸，而窗口钳制是多屏感知的，两套坐标体系不一致。
-- 屏幕感知默认每 2 秒截屏一次，长时间开启有一定 CPU 开销。
+- **多显示器下贴边判定可能错位** — `src/windows/main/edgeHide.js` 的 `getScreenSize()` 来自 `src/ini/screen.js` 的 `global.getScreenSize`，返回的是**全部显示器边界并集**的宽高；而窗口钳制（`src/windows/window.js` 的 `clampPosition`）用的是 `screen.getDisplayNearestPoint(...).workArea`，两套坐标体系不一致。
+- 屏幕感知默认每 2 秒截屏一次（`src/service/perception/loop.js:290`，下限 500ms），长时间开启有一定 CPU 开销。**已比此前轻**：PNG 编码改成了记忆化惰性 getter（`src/service/perception/capture.js:194`），"画面未变 / 在途中 / 不到心跳"被丢弃的 tick 上完全不编码，省掉每次 10–30ms。仍存的固定开销是每 tick 一次 `toBitmap()`（3.69 MB 分配，用于变化检测的 576 个采样点）—— 要减掉得先 resize 再取 bitmap，但那是插值平均而非点采样，会改变 `FrameChangeDetector` 的语义，阈值要连带重标，属独立议题。
 - **新版钓鱼无"免费饲料"按钮** — 官方 1.2.5 素材本身没有该入口，cmd:10 分支不触发，属预期；鱼苗商店沿用本项目调过价的内置表，官方 `fish_fry_table.json` 未接入。
 
-### 第三轮审查确认、但尚未修复的问题
+### 已确认、但尚未修复的问题
 
-第三轮深度审查（七个维度：Electron 攻击面 / 状态机与并发 / LLM 与网络层 / 代码质量 / 测试真实质量 / 未提交改动 / 性能与资源）修掉了 4 类 P0，以下 P1 已确认但本轮未动，按优先级排：
+第三轮深度审查（七个维度：Electron 攻击面 / 状态机与并发 / LLM 与网络层 / 代码质量 / 测试真实质量 / 未提交改动 / 性能与资源）曾在此列出约 30 条 P1。**其中绝大多数已在其后的 30 个提交里修完**（详见 CHANGELOG 的「第三轮 P1 清账」小节）。本节只保留**当前仍然成立**的条目。
 
-**安全**
+**磁盘（有意未做）**
 
-- **`sandbox:false` 是窗口工厂的全局默认** — 逐个统计 preload 的 require，走工厂的 19 窗里只有主宠窗真正需要 Node 能力（`fs` / `path` / `iconv-lite`），其余 18 窗的 opt-out 无必要。`contextIsolation` 挡不住渲染进程层面的漏洞利用。注意不走工厂的 `barrage` 窗（第 20 个）已经是 `sandbox: true`，不在此列。
-- **远程窗与本地窗共用默认 session** — `urlWindow` 未设 `partition`（全仓 `partition` 零命中），任意站点的 cookie / localStorage / SW 落进应用默认 session，且无 `will-download` 处理。**注意连带关系**：若要做 partition 隔离，必须对该 partition 的 session 也调一次 `src/ini/security.js` 的 `installPermissionHandlers`（它目前只保护 `defaultSession`），否则隔离反而会绕过权限门禁。
-- **`downloadBuffer` 无回环门禁** — `memory/imageGen.js` 的图片下载只校验 protocol ∈ {http, https}，而那个 URL 是**服务端返回的**，可指向 `http://` 内网地址，且重定向每跳都不复查。它不发 `Authorization` 所以低一档，但 https → http 的降级重定向至少该禁掉。
-- **约 70 条 IPC 通道无一校验 `event.senderFrame`** — 属纵深防御缺口而非当前可利用漏洞（子框架无 preload、`nodeIntegrationInSubFrames` 在唯一出现处显式为 `false`）。通道已天然带窗口名前缀，在工厂注册处包一层校验成本很低。
+- **存档 `config-qq-local.json` 的数组仍无上界** — `fishing.fishes` / 背包 / `achievements` 三处只增不裁。**这是有意的产品决策而非疏漏**：裁剪必须先回答「哪些鱼该留」以及「删掉的鱼算不算钓过」（直接影响成就与图鉴语义），代用户删数据的风险高于它要防的膨胀。已做的部分：写放大已修（`src/ini/storeCache.js` 的内存镜像 + `pet` 键写防抖，每小时全文件读 360 → 180、写 120 → 60），体积检查已从「启动期一次 + 只 `console.warn`」改为「落盘成功后每 20 次抽检一次，超 2 MiB 弹一次用户可见气泡」（`src/ini/storeCache.js:74,82,327`）。即现状是「涨大了让用户看见」，不是「不会涨大」。
+- **`memory/daily/` 的每日 markdown 与 `facts.json` 无上界** — 每天一份，增长极慢但确实无裁剪。同目录的 `daily-images/` 已在 `651d519` 补上「每天 3 张 / 全库 200 MiB」。
 
-**防回归**
+**防回归的覆盖边界**
 
-- **已补上锚，但覆盖面有边界** — `test/electronSecurityInvariants.test.js` 是纯 node、平台无关的静态断言（14 条），钉住窗口工厂默认值、`webSecurity` opt-out 文件集合恰好 4 个、CSP 指令与 `unsafe-*` 配对集合、导航与新窗守卫、7 个危险开关零命中、`urlWindow` 隔离、`new BrowserWindow` 出现位置恰好 3 处、`eval` 只许 `eval("require")` 静态形式。建立时做了 24 个变异验证（全部按预期变红）+ 6 个良性对照（含"注释里写 `nodeIntegration:!0` 散文"不误伤）。
-  **仍未覆盖的**：第三方 bundle（`lib/`、`js/ruffle/`）被整体排除，故不含供应链风险；`sandbox:false` 全局默认**刻意未断言**（那是 preload 用 Node 的既定设计，断言它等于给未来收紧上锁）；`spawn` / `execSync` 未扫描（"spawn"在刷怪 / 刷鱼语境下会自然出现，纯误伤）。运行期行为（CSP 是否真拦住、Ruffle 是否仍能播）仍只有手动冒烟 `test/ruffleSmoke/runCspGuard.js` 覆盖。
+- `test/electronSecurityInvariants.test.js` 是纯 node、平台无关的静态断言（当前 **18 条**），钉住：窗口工厂默认值（含 `sandbox` 默认必须为 `true`）、`webSecurity` opt-out 文件集合恰好 4 个、`sandbox` opt-out 恰好主宠窗 1 个、CSP 指令与 `unsafe-*` 配对集合、`barrage` 的严格 CSP、导航与新窗守卫、`_guardIpc` 三层校验各自存在且拒绝时留日志、`ipcMain.on` 注册点唯一且无 `setPreload`、7 个危险开关零命中、`nodeIntegrationInSubFrames` 不许为真、`urlWindow` 隔离与 `persist` 分区（含"先装 session 守卫再建窗"的顺序）、`new BrowserWindow` 出现位置恰好 3 处、`eval` 只许 `eval("require")` 静态形式、第一方代码零 `new Function`。
+  **仍未覆盖的**：第三方 bundle（`lib/`、`js/ruffle/`）被整体排除，故不含供应链风险；`spawn` / `execSync` 未扫描（"spawn"在刷怪 / 刷鱼语境下会自然出现，纯误伤）；日志前缀规范无自动化守卫（见上文「已知问题」）。运行期行为（CSP 是否真拦住、Ruffle 是否仍能播、跨源直写是否真被拦）仍只有手动冒烟 `test/ruffleSmoke/runCspGuard.js` 覆盖。
+  > 订正：此前本节写「`sandbox:false` 全局默认**刻意未断言**」——`67d5a93` 把工厂默认翻转为 `sandbox:!0` 之后，该断言已正面存在（`test/electronSecurityInvariants.test.js:305,362`），这句话不再成立。
 
-**正确性**
+**正确性（本轮新发现、未修）**
 
-- **屏幕感知失败的根因未消除** — 本轮只让它可诊断（分级日志 + 连续失败一次性气泡告知）。视觉模型未单独配置时仍会静默回退到对话服务商，对不支持图片的模型必然每轮 400。应在设置页保存时或感知入口做一次能力预检，而不是每轮烧一次截屏再失败。
-- **`recoverable()` 无调用者** — 启动时不做 finalize 恢复，崩溃遗留的 `finalizing` 会话与总结缺失的会话都需要用户手动触发才会重跑。
-- **多块课程总结无部分成功保留** — 串行 N 次 LLM 调用，第 N 块失败会丢掉前 N-1 块的提取结果，重试要从头再花钱。
-- **`achievement.js` 等 3 处非启动期 `$Store.getItem` 现在会上抛** — `getItem` 语义本轮从"吞错返 `{}`"改为上抛，这三个调用方未加 try，运行期读失败会冒泡到各自上下文，值得单独排查一轮。
-- **`main.js` 的 `uncaughtException` 处理器刻意不退出进程** — 对运行期孤立异常是对的（桌宠是长驻进程），但启动期同步 throw 会留下无窗口却占着单实例锁的僵尸进程。本轮只堵了 `toSex` 一个抛出点，建议给该处理器加"窗口从未创建成功则 exit(1)"的兜底。
-
-**磁盘与性能**
-
-- **`memory/daily-images/` 无上界** — 上面「数据与隐私」列的磁盘上界（events 12 MiB、课程 ≈520 MiB）逐条都真在代码里，但**漏了日记配图**：每次生成成功都新增一个文件，全库无裁剪，点 20 次最坏 500 MiB。
-- **存档 `config-qq-local.json` 无上界** — 且 `electron-store` 的 `get`/`set` 每次都是全文件同步读写，稳态每小时约 240 次全量读 + 60 次全量写（其中一半是 dataWatcher 回声造成的多余写）。
-- **感知每 tick 都做一次注定被丢弃的 PNG 编码** — `captureScreen` 无条件 `toPNG()` + `toBitmap()`，而"画面未变 / 在途中 / 不到心跳"的判定在截屏之后。12 小时约 21,600 次，每次 PNG 编码 10–30ms CPU；`toBitmap()` 分配 3.69 MB 只为读 576 个采样点。
-- **剪贴板轮询 200ms** — 5 次/秒。除 CPU 外有实际副作用：Windows 剪贴板是独占资源，高频 `OpenClipboard` 会让其他程序的复制粘贴间歇失败。
-- **录课期间每感知 tick ≥3 次 fsync** — `appendTranscript` 每次全量重读重写 `state.json`，而唯一作用是把 `updated_at` 往前推。一节 1 小时网课 720–3600 次全量重写，同步执行在主进程，动画会周期性卡顿。
-- **桌面导出目录的上界只落在日志里** — `MAX_EXPORTED_COURSES` 超限只 `console.warn`，用户看不到，实际等于无护栏。
+- **`setup` 的"重生为另一性别"不是事务** — 异常路径已在 `7a37a93` 补好（读 `pet.info.sex` 失败时中止而非兜底，避免清档后写错性别），但正常路径里 `$Store.clear()` 之后紧跟的 `setItem("toSex")` 仍是裸调：它若抛错就是「已清档、未写 toSex」，重启后按默认性别建新宠物。这两步应作为一个事务处理。
+- **`State.doActive` 开工 / 上学时既不清 `trip` 也不校验互斥** — `af2b50c` 只是给后果兜了底（把 `cancelTravel` 从 if-else 链里移出为无条件执行）。根因是互斥校验只存在于 `travel.startTravel` 一侧，应把前置校验收敛进 `doActive`。
+- **`fishing/indexOnLine.js` 还有一处 `player.PETEventOnReceived` 是裸调** — 影片未就绪时抛未捕获 `TypeError`。同文件的 `setPETEVENT` 已在 `af2b50c` 改成闭包内独立计数 + 放弃时留 warn，这一处漏了。
+- **崩溃留下 `recording` 状态的课程会话仍会永久滞留** — `0feddf3` 给 `recoverable()` 接上了启动恢复的调用者，但它按设计不含 `recording`，只有下次课程感知触发"收养"才会结稿。扩展其语义会与 `updated_at` 的落盘精度耦合，影响面更大。
+- **`focusGuard._tick` 的三个前置守卫会静默 `return`** — 其中 `powerMonitor` 缺失与 `openSpeak` 未就绪属环境问题，长期不满足会让专注守护整体哑火且零日志。
+- **`src/windows/main/main.js` 还有约 12 条无前缀的 `console.log` 调试残留** — 前缀已在 `6ab27c5` 全部改对（`[main]` → `[main/main]`，去掉与仓库根 `main.js` 的撞名），但这批裸 `console.log` 未动。
 
 **文档与注释准确性**
 
-- 本轮发现至少四处**注释断言了代码并不做的事**，且其中三处是缺陷的承重墙（`aiWiring` 的就绪探针、`ruffleBridge` 的 30s 兜底、`dataWatcher` 的"只传原始类型"）。由于本仓库一半源码是无 sourcemap 的 webpack 压缩产物、注释是唯一导航工具，注释准确性在这里等同于代码正确性。已知仍存的一处：`swfPet.js` 的 `TAIL_FORCE_FRAMES` 注释称"配置中最大为 5（bury）"，而 Kid 的 `sickOption` 配了 `lastTimeCut:600`；`test/ruffleSmoke/probeBridge.js` 里的 30000 也仍是旧口径。
-- 上面「已知问题」中 `webSecurity` 那两条互相矛盾：一条说钓鱼 / 密室因跨源 `contentWindow` 直写需要保留 opt-out，另一条又说该直写在 Electron 28 下已被站点隔离拦死。两条合起来的结论是**该 opt-out 应当被移除而非保留**，需先用冒烟脚本实测确认。
+- 前几轮共发现**五处**「注释断言了代码并不做的事」，其中三处是缺陷的承重墙（`aiWiring` 的就绪探针、`ruffleBridge` 的 30s 兜底、`dataWatcher` 的"只传原始类型"），第四处是 `achievement.js` 的头注释（称 `achievements` 会被 `setPetInfo` 丢弃，实际现在双写两路都是真存储），第五处是 `swfPet.js` 的 `TAIL_FORCE_FRAMES` 注释（称"配置中最大为 5（bury）"）。由于本仓库一半源码是无 sourcemap 的 webpack 压缩产物、注释是唯一导航工具，注释准确性在这里等同于代码正确性。
+  **已修**：五处注释均已订正；`e9fe1e1` 实测出配置里的真实取值是 1 / 5 / 7 / 600（`8` 恰好覆盖 7、零余量），并给 `lastTimeCut` 加了与素材无关的硬上界 + 跨引用断言让注释与配置互校；`test/ruffleSmoke/probeBridge.js` 的 30000 旧口径已改为 `require` 生产的 `EXIT_FALLBACK_MS`（并加"读不到常量就抛"的守卫，防止常量改名时静默退化成 `undefined` 超时）。
+  **`fe51467` 又对 `src/service` 做了全量复核，另订正 26 处**（`achievement` 头注释虚构的触发点、`aiWiring` 写错的感知事件名、`travel` 的五处、`llm.js` 的三处数字口径等）。这类注释债目前**没有自动化守卫**——注释与代码的一致性只能靠人复核，唯一的例外是 `e9fe1e1` / `0631994` 那种「把注释里的数字改成 `require` 生产常量 + 跨引用断言」的写法，值得作为新注释的默认体例。
+- **本文档的日志前缀约定只覆盖 `src/` 下的模块，未规定仓库根 `main.js` 的前缀** —— 应补一句固化 `6ab27c5` / `0631994` 定下的口径（`[main]` 基准 + `[main/startup]` 启动子作用域，拆两级是因为启动兜底与运行期兜底行为相反：退出 vs 只记日志）。
 
 ---
 

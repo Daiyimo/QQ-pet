@@ -4,6 +4,140 @@
 
 版本号说明：跟随 QQ 宠物怀旧服的上游版本线命名。本项目 fork 自 [qqpet_automation](https://github.com/xuemian168/qqpet_automation)，来源与许可见 `NOTICE.md`。
 
+## [未发布]（第三轮 P1 清账）
+
+README「第三轮审查确认、但尚未修复的问题」里约 30 条 P1 的集中清偿，共 **31 个提交**。测试 690 → **986**，全绿。
+
+清账过程中新发现并修掉 **4 条 P0**，都不是审查列表里的条目，而是修前面几条时顺藤摸出来的：`setPetInfo` 传子集会抹掉未传的键（打工 / 上学 / 旅行状态每 60 秒被静默丢一次）、`floatStyle` 读档失败后的回写会用内置默认覆盖用户已存样式、IPC 帧校验的两个 fail-open 缺口、课程总结途中崩溃后恢复会导出无总结稿并把重试入口永久焊死。四条的共同形态是**上一批修复自己引入或没堵干净的洞**，这也是本节把「修复带来的新缺口」单独当作一类来记的原因。
+
+### 破坏性变更
+
+- **移除「小富翁」成就（`1ab186c`）—— 已解锁该成就的存档会看到成就从面板上消失**。本项目定位是离线 + AI 版不设资源门槛：新档默认 `yb: 999999999`、背包预置 878 件道具，这是由三处文档与一条既有测试共同确立的有意设计（审查中曾误判它是调试值遗留，`git log -S` 考证后确认不是）。而「小富翁」的判据是 `yb >= 10000`，在 9.99 亿开局下**开局即达成**，是 8 条成就里唯一被该定位废掉的（其余 7 条——孵化、等级 20、等级上限、养鱼 1000、环游中国、签到、在线 100 分钟——均完好）。
+  选择移除而非改判据：查过存档结构，`info` 只有存量字段、`cache` 只有商城缓存而非消费流水，没有任何累计消费信号可复用；改判据要新增计数器 + 落盘 + 老档迁移 + 改压缩产物 `Goods.js` 的扣款路径，成本远超一条装饰性成就。
+  **老存档不掉数据**：已解锁的 `achievements.rich` 记录不删、原样写回（保留历史痕迹），`check` 与 `getAll` 只遍历定义表，故面板不会出现未知成就、不报错、其它成就记录不丢。两条变异验证证明这不是恒真断言。渲染层是 `{{ unlockedCount }} / {{ list.length }}`，无硬编码总数，移除后自动显示 x/7。
+- **远程网址窗隔离到独立 session（`be5a66e`）—— 升级后首次打开该窗，此前在其中登录过的站点会掉一次登录态**（旧 cookie 留在 `defaultSession`，新分区 `persist:remote-url` 是空的），之后照常持久保存。分区取 `persist:` 前缀而非内存 session 是刻意的：目标是与本地窗隔离，不是不留痕，内存 session 会让用户**每次**重开都掉登录态。
+- **删除 `sys.visionProvider` 死键（`998aa2a`）**。全仓只有一处读、零写入点——设置页只 `saveProviders` + `llmActiveProvider`，从没有过视觉模型表单。于是 `resolveVisionProvider` 永远走 fallback 分支，每个开感知的用户都会吃到一条「记得在设置里配一个会看图的模型」的气泡，而那个设置**不存在**。选择删死键而非补 UI：为一个「和对话模型共用即可」的配置引入第二套配置面不划算。`reason` 收敛为 `chat` / `no-provider` / `no-key`，文案改为指向真实入口。
+- **删除 `setPreload` IPC 入口（`60013c5`）**。它直接 `ipcMain.on` 裸注册、不过 `_guardIpc`，且天生拿不到 window entry、结构上无法被守卫。当前零调用，但任何人调一次就整体退回「70 条通道无发送方校验」，故删除而非包装。`removePreload` 用的是 `option.preloads`，不受影响。
+- **删除 `createMain` 的 express 分支与 `.tools` 下两个一次性改价脚本（`7fe5098` / `0631994`）**。前者在生产中永不执行（唯一调用方 `doMain.js` 传 `none=true` 命中提前返回），只被一条测试撑着——改端口或挂载目录时改了活的那份、漏了死的那份，测试照样全绿。后者删前做了实证而非只看引用数：确认两者的数值全部能从在仓的 `goods_all_categories.json` 现算、效果已固化（`shop.toy` 8 条与官方一致、20 个粉钻商品价格逐一相符），留着会被误当作可重跑的工具，**重跑会二次改价**。
+
+### 行为变更
+
+- **深夜劝睡改为每晚只提醒一次，且跨重启不复发（`431b08a`）**。此前判定是 22 点后或 4 点前、冷却 60 分钟且无任何「每晚一次」上限与跨天重置——熬夜到 4 点会被劝 6 次，第二天照旧。
+  去重键不能直接用日期：深夜窗口跨午夜，8 月 1 日 23:00 与 8 月 2 日 01:00 属于同一晚，用 `toDateString` 当键的话跨天后又会劝一次，**等于没修**。现构造「夜晚标识」——22:00–23:59 用当天日期，00:00–03:59 前移一天，跨月跨年由 `setDate(-1)` 自然处理（有 8-31 → 9-01 的用例钉住）。
+  选择持久化而非纯内存：桌宠虽长驻，但更新、崩溃、手动重开都可能发生在深夜，「重启就再唠叨一次」是真实的烦人场景。单键覆盖写、不累积，无需清理逻辑；落盘失败降级为仅本进程去重并记堆栈。其他三类提醒（护眼、久坐、久别）的冷却与清零规则完全未动。
+- **感知连续 3 次「配置性失败」会自动停用本进程的感知循环并销毁弹幕窗（`bf7cc45` / `998aa2a`）**。配置性 = 4xx 除 408/425/429（400 不支持图片、401 Key 无效、402/403 欠费、404 地址错）、未配置、缺 Key、地址错，以及 **HTTP 200 但 body 报图片能力错误**（不少 OpenAI 兼容网关正是这么报「模型不支持图片」的，此前被判成瞬时失败 → 无限退避重试、永不触发停用）。瞬时失败（408/425/429、5xx、socket hang up、timeout、JSON 解析失败）行为完全不变。
+  停用时气泡带真实原因。**刻意不写 `sys.perceptionEnabled`**：那个开关值代表用户意图，且设置页缓存旧值会导致「点开启反而又关一次」。销毁弹幕窗是配套的：`loop.stop()` 只 hide，那个 `backgroundThrottling:false` 的全屏透明窗连同渲染进程会活到进程结束，而用户此时已无途径回收（设置页开关已被跳过）。
+- **悬浮特效读档失败后，本次会话不再保存任何样式改动（`1e385d1`）**，并在 warn 文案里写明这层后果（用户需要知道这次的调整不会保存）。
+- **剪贴板轮询从 200ms 回到 1000ms，并按 `clip` 开关启停（`5b0e04b`）**。200ms 即 5 次/秒、12 小时 216,000 次主进程同步 OS 读取。除 CPU 外有实际副作用：**Windows 剪贴板是独占资源**，高频 `OpenClipboard` 会让其他程序的复制粘贴间歇失败（Office 与远程桌面的经典症状）。`clipToCloud` 只是 `clip` 的子开关，`clip` 关掉时回调永不触发、两个消费者都死、定时器纯白跑，现按 `getSys` 的 `clip` 值实时启停。
+- **台词链超时从 8s 提到 30s（`974d1a6`）**。8s 与它自己的 512 max_tokens 预算自相矛盾——注释明写「推理模型的 thinking 会消耗输出额度，需留足预算」，但 8 秒内推理模型出不完 thinking + 正文（对照：对话 60s、课程 120s、感知 30s，只有台词是 8s）。结果每次台词都：发请求 → 掐断 → **服务端已生成并计费** → 降级离线台词 + 一条全栈 error；且无失败退避，Key 失效时每个触发点都重打一次并刷一条堆栈。30000 等于 `providers.DEFAULT_TIMEOUT_MS` 与感知链，不引入第三个量级；未下调 512（砍掉会换成「只有思考内容」的另一种失败）。新增连续失败计数 + 5 分钟冷却 + 日志按次节流。
+- **动画 finish 判定加了与素材无关的硬上界（`e9fe1e1`）**，超长动画的尾段会被提前截断。见下文「修复」里的 MM 幼年期生病动画。
+
+### 修复
+
+**P0 — 数据丢失（本轮新发现）**
+
+- **`setPetInfo` 传子集时会抹掉未传的 `activeOption` / `activeValue` 键（`0197c53`）—— 打工 / 上学 / 旅行状态每 60 秒被静默丢一次**。这两个分支遍历的是内存键集合，却缺少兄弟分支（`info` / `maxInfo` / `otherOptions`）都有的「键缺失」守卫：调用方只传子集时未传的键 `r[t]` 为 `undefined`，而 `undefined != {对象}` 恒真，该键被赋成 `undefined` 并广播落盘，`JSON.stringify` 直接丢键。
+  唯一传子集的调用方是 `dataWatcher`——它的 `pickChangedKeys` 会丢掉深度相等的引用类型键。于是宠物打工期间每 60 秒心跳都走一遍：心跳写盘 → watch 事件 → `work` 因深度相等被过滤 → `activeOption.work` 被抹成 `undefined`，进行中的打工 / 上学 / 旅行会话与 `ill` 状态静默丢失。
+  判据取 `void 0 !== r[t]` 而非 `null != r[t]`：`activeOption` 的默认值就是全 `null`，`null` 是「已清空」的合法真值，挡掉它是新 bug。回归测试加载**真实** `pet.js`——既有的 `dataWatcher` 用例用的是桩 `setPetInfo`、从未与真实实现对接，正是它让这个缺陷假绿。
+- **悬浮特效读档失败后，内置默认值会悄悄覆盖用户已存的全套样式（`1e385d1`）**。上一轮给运行期 `$Store.getItem` 失败加兜底时，判据取的是「读失败后紧接着要做的事是否具破坏性」。**这条判据只看紧邻语句，在 `floatStyle` 上判错了**：读失败后内存对象停在内置默认字面量、窗口照常打开（紧邻语句确实无害），但同一个 `created` 闭包里的**防抖回写**会把整个对象写回磁盘。用户随后按一次 `ALT+↑` 或点保存，2 秒后磁盘上原有的全套样式就被内置默认值覆盖，全程零提示。
+  **修复前反而是安全的**：`getItem` 抛出会中断 `created`，`preloads` 从未注册，防抖函数永远调不到。等于把「窗口坏掉但数据安全」换成了「窗口能用但数据被悄悄吃掉」。现改为读失败置 `_readFailed` 标志、回写入口首行拒绝，判据注释订正为「该内存对象后续会不会被**整体回写**」。既有用例同样是假绿——桩 `setItem` 是空函数、从不记录写入，也没触发保存路径和 2 秒定时器。
+- **课程总结途中崩溃的会话，恢复时会导出无总结稿并把重试入口永久焊死（`bf71b6a`）**。恢复路径的判据是「有没有 `summary_error`」，注释据此称 `finalizing` 且无 error 就是导出环节失败、沿用已有 summary 重导即可。**这个前提被结稿路径自己的顺序推翻**：status 是在 `await _generateFinalSummary` **之前**就置成 `finalizing` 落盘的。
+  于是总结途中崩溃会留下 `finalizing` + 空 summary + `summary_error: null` 这个三件套，恢复时判成「不需要总结」→ 直接导出一份没有总结、也不写失败说明的 `README.md` 并置 `complete` → 此后 `recoverable()` **再也不会列出它**。用户那节课的总结永久丢失且不可重试，而 state 显示一切正常。判据改为「有没有真的产出过 summary」，收进模块级 `needsSummaryRerun` 单一真值。转写为空的会话不打 LLM（未配置服务商时不该被它拦住）。「summary 完好只重导出、不打 LLM」是防修过头的护栏用例。
+- **记忆节流的单槽设计会让 12 MiB 归档从约 42 天塌缩到几天（`70973b8`）**。`activity` 的 120s 节流与 900s 去重都带「与上一条同场景」的前置条件，而 `last` **只有一个槽**。场景在 `game` / `other` 之间交替时（`sceneStabilizer` 连续 2 帧就翻面，看游戏实况视频是典型场景），每次 record 的场景都不等于上一次，两道闸门同时被跳过，每次都走一遍主进程同步 fsync。
+  真正的代价不是 CPU：`events` 的轮转窗口是按「约 720 事件/天」标定的，实际可达 10 倍以上，于是 `generateDaily` 回补历史天时源数据已被轮转掉——**用户的记忆静默丢失**。改为按场景分槽的 Map，并给槽位加 LRU 上界（scene 来自 IPC / 感知结果，理论上可为任意串）。顺带修时钟回拨：`elapsed` 只做 `<` 比较，时钟往回调 N 秒后同场景事件被全部静默丢弃，现改为负值视为窗口已过期放行 + 一条 warn。
+
+**P0 — 安全（本轮新发现）**
+
+- **IPC 帧校验有两个 fail-open 缺口（`60013c5`）**。`_guardIpc` 上一轮落地时留了两处：① `try` 只包住 `event.senderFrame` 的**取值**，而 `WebFrameMain` 在帧已 dispose 时是**属性访问**才抛，后面 `frame.parent` / `frame.url` 三处访问都在 `try` 之外，异常会从 `ipcMain.on` 监听器逃到 `main.js` 的 `uncaughtException`（运行期只记日志不退出），该条 IPC 被静默丢弃，用户看到「某个操作没反应」；② `senderFrame` 返回 `null` 时 `if (frame)` 整块被跳过，**子框架校验与 app.html 校验双双失效直接放行，且一行日志都没有**——对承载 `http://127.0.0.1` iframe 的钓鱼 / 密室两窗，那两层是唯一防线（子框架与顶层帧共用同一 WebContents，第一层的 `event.sender` 比对拦不住）。
+  两条合并收口：`senderFrame` 与 `parent`/`url` 在同一个 `try` 内一次性取完，抛异常与返回 `null` 都拒绝并 warn（带 channel 与窗口名）。误伤面已评估：存活的顶层帧恒可取，Electron 28.3.3 的类型声明里 `senderFrame` 非空、该分支实质不可达。
+  **既有的不变量用例是纯源码文本断言、从不执行 `_guardIpc`——这正是三条缺陷漏掉的原因**。新增 6 条行为测试真实驱动守卫（含「正常顶层帧必须放行」，防止收紧过头），另加一条静态锚钉死 `ipcMain.on` 注册点唯一。
+
+**安全纵深（清账）**
+
+- **窗口工厂默认 `sandbox` 翻转为 `true`（`67d5a93`）**。此前 `sandbox:false` 是全局默认，19 个走工厂的窗口全部继承，渲染进程不受 OS 层沙箱约束——一个 Chromium 或 Ruffle-WASM 漏洞就是用户权限代码执行，`contextIsolation` 挡不住这一层。受影响面包括加载第三方皮肤 SWF 的主宠窗与承载 http iframe 的钓鱼、密室。
+  先前担心「沙箱下 preload 会全坏」（本仓 preload 用 `eval("require")` 这种双模加载探针写法），核实结论是**不会**：从 `electron.exe` 28.3.3 二进制里挖出 `runPreloadScript` 的实现，它把 preload 源码包进 `(function(require, process, Buffer, …){…})`，`require` 是函数形参，而 `eval("require")` 是直接 eval、沿词法作用域链能解析到那个受限的 `preloadRequire`（白名单 electron/events/timers/url）。真 Electron 探针实测确认。
+  逐个扫描 19 个 preload：只有 `main/preload.js` 用 `__dirname`/`Buffer` 并 require `fs`/`path`/`iconv-lite`/`pathGuard`（换肤素材路径解析），其余 18 个只 `require("electron")` 且只用 `contextBridge` + `ipcRenderer`。故默认改 `true`，主宠窗显式 opt-out。真机验证：既有 `runCspGuard` 冒烟 12/12 通过（其中 B2 走真实工厂 + 真实 preload 且未覆写 sandbox，即新默认下 preload 正常工作的实机证明）；另单独实测 Ruffle WASM 在 sandbox true/false 下渲染一致（stddev 32.82、changed 0.57%）。
+- **约 70 条 IPC 通道补上发送方身份校验（`67d5a93`）**。不是当前可利用漏洞（子框架无 preload、`nodeIntegrationInSubFrames` 已移除），但单个渲染器一旦获得脚本执行，无需绕过 `contextIsolation` 即可用本窗 preload 的全部通道。
+  三层校验，**刻意不做完整 URL 比对**——本应用 productName 含中文与加号，安装路径的 percent-encoding、盘符大小写、斜杠方向差异会让 URL 相等比对在真机上全线失败，而测试里用干净路径根本发现不了。改用：① `event.sender !== win.webContents` 的对象比对（注册在 created 闭包内，直接持有本窗对象，零字符串、天然免疫编码问题）；② 顶层帧校验（钓鱼/密室的 http iframe 与顶层共用 WebContents，第 1 层拦不住）；③ 只对 pathname 取末段再 `decodeURIComponent` 与 `app.html` 比，解析失败则跳过该层不误杀。三条拒绝分支各留一条带通道名与窗口名的 warn——校验一旦写错，表现会是「某个功能突然没反应」，没有日志就是不可诊断故障。
+  顺带修一个真实的坑：`removePreload` 靠 `option.preloads` 去 `removeListener`，若存的是原始函数就摘不掉包装后的监听器，**窗口关了通道还活着**。
+- **远程网址窗补装 session 权限门禁（`be5a66e`）**。隔离必须与门禁同时做：`installPermissionHandlers` 此前只对 `defaultSession` 调过一次，远程窗**今天恰好因为还在 `defaultSession` 里才被覆盖**。只加 `partition` 不补 handler，摄像头 / 麦克风 / 定位会回到 Electron 的默认放行，而且没有 Chrome 那样的权限气泡 UI——**隔离反而成了负收益**。故新增 `installRemoteSessionGuards` 把「权限门禁 + 下载观测」收成一处，并在造窗**之前**调用（顺序错了等于窗口先于门禁存在）；守卫装不上时回落 `defaultSession`（那里已有门禁），这是唯一的 fail-closed 出口。
+  `will-download` 只落一条 warn 后放行系统保存框——默认行为本就是用户确认的对话框、不构成静默下载，直接 `preventDefault` 是把这个窗口的下载能力整个砍掉。日志只记 host 与文件名、不记完整 URL，避免直链 query 里的 token 落盘。「远程 session 与 defaultSession 逐项同策略」是防止隔离顺手放宽权限的核心断言。
+- **日记配图 `daily-images/` 补磁盘上界，`downloadBuffer` 补回环门禁（`651d519`）**。README 承诺磁盘有上界并逐项列了 events 12 MiB 与课程约 520 MiB，唯独漏了日记配图：每次生成成功都新增一个文件，全库无裁剪，点 20 次最坏 500 MiB。现定为每天最多 3 张 + 全库 200 MiB 硬上界（同天重复生成属于对首图不满意的重试，留 3 张够挑）。
+  `downloadBuffer` 无回环门禁而那个 URL 是**服务端返回的**，可指向内网 http 地址且重定向每跳不复查——SSRF 面。现复用 `providers.isLoopbackHost`（无第三份实现），**逐跳复查**（重定向是递归调用自身，门禁放在执行体开头），并把本跳协议作为下一跳的上游协议传下去，故 https 服务商返回 http 图片地址一律拒绝。本地服务商返回回环地址的图片仍可下载。
+  同批还修了两条：`writeDailyImage` 先写图后写元数据、元数据失败留下孤儿（现失败即回滚删图并把原错误抛给调用方——选这个方向而非先写元数据，因为反向失败时若元数据删不掉会留下**指向不存在图片的悬空记录**，UI 会读到不可用条目，而孤儿图片只占字节、下次裁剪即回收）；`generateDaily` 与 `generateDailyImage` 无 in-flight 去重，调用方只有 300ms 防抖，用户右键点两次（间隔超过 300ms 人手可及）就是两次 120s 超时的 LLM 调用并发 + 后写覆盖先写 + 重复计费（现按 day 维护 in-flight Promise Map，成功与失败都清理，否则一次失败后当天永远无法重试）。
+
+**正确性**
+
+- **生病中止旅行仍照发奖励，且可循环刷元宝与省份（`453e94e`）**。`State.js` 的 `ill`/`dead` 分支无条件把档案 `activeOption.trip` 置 `null` 并弹「我不能旅游了」，但 `travel.js` 的 `_trip()` 是**内存优先**且 `finishTimer` 没被清。于是：旅游中因饥饿/清洁跌破阈值**自动**生病（无需用户操作）→ 到点仍 `finishTravel()` → 照发 mood+50 / yb+15 / 收集省份，取消被撤销。加重版：病好后立刻再点去旅游，`startTravel` 不先 `_clearTimers()` 就覆盖 `finishTimer`，旧计时器会结算新行程 = 秒完成，可循环。
+  两件都做，因为修的是不同后果：只做「档案为权威」能堵住刷奖励，但**宠物会永久隐藏**——`State.js` 清 trip 后没人调 `_showMain()`，主窗口一直 hide 到重启。所以 `State.js` 必须真的通知 `cancelTravel({silent:true})`；而 `_trip()` 改为以档案为唯一权威是兜底，覆盖其他清 trip 的路径（右键停止状态、存档被改）。新增 `_petInfoReadable` 标志区分「档案里没 trip」与「档案读失败」，避免一次瞬时读失败吞掉进行中的旅行。
+  同批另两条：`remainingMs` 无上界钳制，`init()` 只判 `>0` 就 `setTimeout` 而 `startTime` 来自不可信的历史存档——系统时间回拨一天 → 宠物隐藏 24 小时不结束（用户只会以为程序坏了）；回拨超 24.8 天 → 超过 2^31-1，Node 把延迟坍缩成 1ms → **立即结算白拿奖励，可反复**（现钳到 `min(duration, MAX_TIMEOUT_MS)`，`startTime > now` 视为存档异常并立即结算）。以及主窗口可见性有两个主人且状态位分叉：感知的 `_restoreFromGame()` 经 `aiWiring` 直接 `window.show()` 且不更新 `petMain.show` 标志，于是旅游期间关掉屏幕感知会让宠物出现在桌面、而 show 标志仍是 `false`（isStop/托盘/贴边逻辑按「隐藏」处理一个可见窗口）。现收敛到 `setMainWindowVisible` 单一入口，仲裁顺序：旅游态最高（期间任何来源的显示请求一律拒绝并留 warn）→ 感知次之 → 贴边最低且自动服从。
+- **`cancelTravel` 移出 `if-else` 链（`af2b50c`）**。上一条把 `cancelTravel` 插在 `State.js` 的 `ill`/`dead` 分支里，但那个分支是 `if-else` 链，调用被放在 `trip` 那一支。于是档案里同时存在 `work` 与 `trip` 时只走 `work` 分支，`cancelTravel` 不被调用，**主窗口保持隐藏、宠物凭空消失**，要等 `finishTimer` 到点才发现档案已空。理论上两者互斥，但互斥校验只在 `travel.startTravel` 一侧，而 `State.doActive` 开工时并不清 `trip`——所以这个组合可达。
+  现把调用移出为逗号表达式无条件执行，且**仍在 `setPetInfo` 之前**。顺序很关键：`_trip()` 以档案为权威，写档后再调只会拿到 `not_traveling`，隐藏的主窗口与 `finishTimer` 就没人收了——为此专门加了一条顺序回归。只搬了一个括号的位置，字节数不变。
+- **`openai` 分支不做 API 版本段兼容，用户填不带 `/v1` 的地址永久 404（`974d1a6` / `712da3f`）**。DeepSeek / Kimi / 硅基流动等官网首页给的地址半数不带 `/v1`，用户填 `https://api.deepseek.com` 会打到 `/chat/completions` → 404 + HTML 错误页，表现为「测试连接失败」却查不出原因。`anthropic` 分支做了这个判断、还留了注释说明这个坑，`openai` 侧漏了。**而 9 个相关测试的 `baseUrl` 全部以 `/v1` 结尾，完整地绕过了这个 bug**——和 `ruffleBridge` 那条假绿是同一类：测试覆盖了不会出问题的形态。
+  顺带修 `anthropic` 自己的潜在 bug：它原先写死 `endsWith("/v1")`，用户填 `/v2` 会拼成 `/v2/v1/messages`。`712da3f` 又补上第三种形态：用户把**完整 endpoint** 粘进 `baseUrl`（`https://x/v1/chat/completions`）时会拼成 `…/chat/completions/v1/chat/completions`。最终收敛为 `resolveEndpoint(baseUrl, type)` 三段优先级——末段已是本协议 endpoint 则原样返回、有 `/v{n}` 则拼 endpoint、否则补 `/v1`，两分支都只调它，**物理上不可能再出现两套口径**。新用例在传输层用本地 http 服务记录服务端实收路径，比拼装断言更强。
+- **台词 JSON 无字段类型校验（`974d1a6` / `712da3f`）**。`extractJsonObject` 只保证「是 plain object」，`llm.js` 仅判 `tolk` 真值，调用方直接把它塞进气泡。模型把 `tolk` 写成 `{"text":"…"}` 或 `["…"]` 时（temperature 0.9 + 15 字约束下会发生），气泡正文与按钮文案变成 `[object Object]`。现加归一 + 限长，非字符串或空即视为解析失败走离线兜底。`712da3f` 还上了同批留的债：`normSpeakField`（llm.js）与 `str`（perception/loop.js）是逐字符同口径的两份实现，合并为 `jsonParse.js` 的 `normField`，`loop.js` 的 12 处调用点全部替换。
+- **成就巡检读档失败不再误判为全部未解锁（`a618683`）**。`$Store.getItem` 的语义前几轮从「吞错返空对象」改成上抛（为堵住瞬时读失败被当成新宠物、用空存档覆盖的数据丢失），但非启动期的调用方没跟着改。`achievement.js` 的 60 秒巡检读失败会向上冒到 `aiWiring` 的 error 分支，本轮巡检丢失且**日志归因错**（看起来像 `aiWiring` 的问题）。更糟的是若有人「顺手」把它兜底成空表，成就就会被判为全部未解锁并重复发庆祝气泡，既刷屏又污染存档。现 `check` 读失败时明确跳过本轮（不判定、不庆祝、不落盘，下一轮读成功自动补上）；`getAll` 读失败时降级为单路渲染 `petInfo.info.achievements`——抛出去会让成就面板永远空白，因为上层只有 catch + warn。
+- **运行期存档读取失败不再裸抛，按破坏性区分兜底与中止（`7a37a93`）**。处 1「重生为另一性别」：读 `pet.info.sex` 的 IPC handler 无 try，读失败直接抛，用户点了按钮没反应且无解释。关键风险是紧随其后的 `$Store.clear()`——**所以绝不能「读失败就按某个性别兜底继续」，那会清档后写错性别、把宠物永久变成另一个性别**。现加 try：记堆栈 + 气泡告知一次 + 短路掉 clear/setItem/relaunch/exit 四步；防重入锁在异常路径下仍会经末尾的 `setTimeout` 复位（用行为测试验证：失败后立即再点不重复执行、400ms 后再点能正常走通），否则按钮会永久失灵。处 2 `floatStyle` 读悬浮特效样式：异常被外层 catch 兜成一行 `console.log`，窗口创建失败且无提示，现回落内置默认 + 记 warn。
+  两处处理方式相反，判断依据写进了各自注释并互相点名对方路径：**读失败后紧接着要做的事是否具有破坏性**。（这条判据随后被 `1e385d1` 证明不完整，见上文 P0。）
+- **深夜劝睡先发送后标记，发送失败不再吃掉整晚唯一一次提醒（`0f10aff`）**。`431b08a` 的实现把 `_markLateNightDone` 放在 `_fireReminder` **之前**。离线兜底路径是同步调 `openSpeak` 的，主窗正在销毁 / 气泡队列异常时会抛——此时这一晚已被标记为「已劝过」**且已跨重启落盘**，用户整晚含次日凌晨再也不会被提醒，重启也不恢复。旧实现的 60 分钟冷却至少还会重试，新去重把这条退路一并堵死了。
+  判定「发出去了」的标准取 `_fireReminder` 同步返回：离线路径同步返回即气泡已入队；AI 路径同步返回时请求已发出，其在途失败自带离线兜底，重发只会重复劝。**不用 `try/finally`——无论抛没抛都标记等于没修**。另补 `_markLateNightDone` 里 `setSys` 缺失的静默 return：真跑到这里意味着「跨重启不复发」整个失效（每次重启重新劝一遍）却查无线索。
+- **`focusGuard` 的 30 秒 `setInterval` 补 `unref`，`stop()` 后在途台词不再弹气泡（`b06d0db`）**。同项目其他定时器（`aiWiring` 的引导轮询与成就巡检、courses 看门狗、dataWatcher 重建链、perception tick 链）都 unref 了，这条是遗漏。`_epoch` 代际校验与 `perception/loop.js` 已修过的同类缺陷一模一样：start/stop 各自自增，`_fireReminder` 捕获代际，then/catch 里过期则不弹；catch 的日志保留在校验之前，不静默。
+- **MM 幼年期生病动画的 finish 回调永不触发（`e9fe1e1`）**。finish 判定式是 `a == e + (lastTimeCut||1) + 1`，而 MM 的 Kid 档配了 `sickOption:{opt:{lastTimeCut:600}}`。实测 `MM/Kid/Sick.swf` 是 101 帧 @12fps，该等式要求 `currentFrame = -500`，**任何帧序列都不可能命中**。同一个 600 也让「切下一动作」的兄弟判定不可达，幼年期生病后只能靠 power 抢占才换动作。核实过 `notNum` 不是豁免开关（它唯一的消费点只决定文件名带不带随机序号）。
+  修法取与素材无关的硬上界（同 `EXIT_FALLBACK_MS` 的「不信任配置、直接给死线」写法），只在配置值不可达时钳制、单帧素材原样返回。**只把常量从 8 调大不算修——那只是把不可达点往后挪。**
+- **钓鱼等待宿主注入超时不再静默（`986ec80`）**。`getUpLoad` 轮询 1000 次后静默退出（配 10ms 间隔即约 10 秒），`window.getPetInfoFromMain` 永不调用，界面停在无数据状态——用户只看到一个不动的界面，**日志里连一行放弃都没有**。两个数字都是裸字面量。现两个常量命名并派生出超时总时长（日志直接用它，改常量日志自动跟随），注释写明「两个常数相乘才是总时长」；放弃分支留 warn 并写清降级后的行为。核实过没有可复用的用户可见通道：宿主只往 iframe 注入了四个函数，本文件唯一的 UI 出口 `setPETEVENT` 是往 Flash 推 cmd 响应（需要游戏已握手，正是这里失败的前提），`window.alert` 在本文件被改写成只打日志。
+- **`setPETEVENT` 的静默放弃用了模块级共享计数器（`af2b50c`）**：多次数据推送共用 30 次预算，前面用光后面全部直接丢弃、连重试都没有，且无日志。现改为闭包内独立计数，放弃时留 warn 写清哪次推送、什么字段被丢、旧值是什么。顺带把 `player.` 改成 `player?.`——`player` 尚未被 load 回调赋值时原来会在定时器回调里抛 `TypeError` 且连日志都没有，现在走重试。
+- **启动期异常不再留僵尸进程（`5b0e04b`）**。`uncaughtException` 处理器刻意不退出进程，这对运行期孤立异常是对的（桌宠是长驻进程，不该因一次异常让用户的宠物消失），**但对启动期是错的**：此时既无窗口也无托盘，进程却活着并占用单实例锁，用户再点图标也起不来，只能去任务管理器杀且毫无提示。`createWindow` 的 try/catch 只挡同步抛出，异步路径（whenReady 之后的 microtask、service 异步 init）会绕过它。
+  现用 `browser-window-created` 事件置一次性闭锁作为「窗口是否曾创建成功」的信号——这是 Electron 自身的事实，与 `doMain` 和窗口工厂的实现无关，且闭锁单向置位，退出流程关掉子窗后不会误判回启动期；另豁免抢不到单实例锁的第二实例。`unhandledRejection` 同样纳入。`showErrorBox` 同步阻塞且内部跑嵌套消息循环，弹窗期间定时器仍 tick——这个性质曾是 `aiWiring` 那个 P0 的触发路径，故弹窗返回后只有 `exit(1)`。EPIPE 仍完全静默。
+
+### 性能
+
+- **存档加内存镜像与写防抖（`b1ffce1`）**。`electron-store`（conf 10.2.0）的 `get` 每次都 `readFileSync` + `JSON.parse`，`set` 是读+合并+原子写，**全部同步执行在主进程**。稳态每小时约 240 次全文件读 + 60 次全文件写，12 小时约 2900 读 / 720 写。
+  而 `dataWatcher` 的文件头注释声称「只传 `info`/`maxInfo`/`activeOption`，基本都是原始类型或 null」以避免引用比较造成回写——**这个假设是错的**：`pet.js` 的默认 `info` 里 `travel_china` 是数组、`achievements` 是对象，`setPetInfo` 用引用比较，`JSON.parse` 出来的新数组恒不相等，于是每次 reload 都被判为变更并再写一次，把每小时 60 次心跳写**放大成 120 次**。（这是本轮第三次遇到「注释断言了代码不做的事」，前两次都是 P0 的承重墙。）
+  新建 `src/ini/storeCache.js`（压缩产物 `store.js` 里只留一行接入点，沿用 `pathGuard`/`ipcInputGuard`/`security` 的既定模式）。核实过「本进程是唯一写者」：全仓只有 `store.js` 引用 `electron-store`，无任何代码直写该 json。与 `dataWatcher` 的协调用 `reconcile` **逐键比对而非整表 invalidate**——能走到那里的变化绝大多数是本进程每 60s 的落盘回声，整表清空会把镜像收益全还回去；判定方向安全：判「不一致」最坏多读一次盘。只有 `pet` 键走防抖（设置页的性别重置是 `clear()` + `setItem` + `app.exit(0)`，而 `app.exit` 不触发任何 quit 事件）。**每小时全文件读 360 → 180、写 120 → 60**；崩溃语义：强杀或断电最多丢 5 秒内的属性衰减，绝不丢更早数据。
+- **录课热路径去掉每 tick 重写 state（`0feddf3`）**。`appendTranscript` 每次都 `getState`（`readFileSync` + `JSON.parse`，含最多 40 条 keyframes）再 `statSync`，追加后 fsync，最后 `saveState` 原子写。**一节 1 小时网课 720–3600 次全量 `state.json` 重写、1440–7200 次 fsync，全部同步执行在主进程，录课期间桌宠动画周期性卡顿**。而 `saveState` 在这条路径上唯一作用只是把 `updated_at` 往前推。
+  现给 recording 会话的 state 加内存缓存，按 20 次或 30 秒落一次：state 重写降到 120–180 次（降 83%–95%），fsync 降到 840–3780，并省掉每次的 `readFileSync`、`JSON.parse` 与 `statSync`。取舍能成立的关键事实：**`updated_at` 全仓只写不读**——裁剪排序用 `created_at`，看门狗用 manager 内存里的 `_lastCourseSignalAt`。所以崩溃最多丢最后 30 秒的 `updated_at`，而转写正文仍逐次 fsync，一个字都不丢。另加一条 repo 侧防线：缓存绝不会把 `recording` 写回覆盖 `finalizing`。
+- **多块课程总结支持部分成功（`0feddf3`）**。此前串行 N 次 LLM 调用，任一块失败就丢掉前面所有块的提取结果，**重试从头再花钱**。现把块级结果存 `summary-chunks.json`（走既有 `atomicJson`，**刻意不放进 `state.json`**——那个文件在录课热路径与 `listSessions`、`recoverable` 里反复读写，掺进上千字符会把这些路径一起拖慢），按块自身内容做 sha1 指纹，所以转写增长或被裁剪后不会错拼旧段落。老会话无该文件时按 ENOENT 降级为全量重跑。
+- **`recoverable()` 接上启动恢复的调用者（`0feddf3`）**。此前无调用者，崩溃遗留的 `finalizing` 会话永久滞留。现在构造函数挂一个 20 秒后的 unref 定时器，上界 3 个每次，串行执行，异常全被 catch 并记 error，**不可能阻断启动**。未配置服务商时需重跑总结的整批跳过且只留一条 warn，只差导出的照常恢复。
+- **感知的 PNG 编码改惰性（`bf7cc45`）**。`captureScreen` 无条件 `toPNG()`，而「画面未变 / 在途中 / 不到心跳」这三个判定都在截屏**之后**。12 小时约 21,600 次，每次 10–30ms CPU。现改为记忆化惰性 getter，被丢弃的 tick 上完全不编码。未动 `toBitmap` 那 3.69 MB：唯一能减到 2.3 KB 的办法是先 resize 到 32x18 再取 bitmap，但那是插值平均而非点采样，会改变 `FrameChangeDetector` 的语义——阈值 18/0.03/3.0 是按点采样标定的，真要做得连带重标阈值与更新指纹测试，属独立议题。
+- **存档体积检查与桌面导出上界改为用户可见（`70973b8` / `0feddf3`）**。`storeCache` 的 2 MB 体积检查只在启动期跑一次且只 `console.warn`——长会话内涨过阈值当场无感，且用户看不到，与刚修掉的「桌面导出目录上界只落日志」是同一个反模式。现改为 flush 成功后**每 20 次抽检一次**（不是每次都 `statSync`——那正是本模块要治的病），超阈值时按既有的每进程一次模式弹一次气泡。启动期那次检查跑在 `openSpeak` 挂上全局之前，故气泡标志位只在真的送达时置位，由下一次抽检补发。桌面导出侧复用课程互动已在用的气泡通道提示一次（进程内去重），**不删任何桌面文件**。
+
+### 测试
+
+- **测试数 690 → 984**。较大的几批：`focusGuard` 29 条（此前零覆盖）、`swfPet` 动画时序 32 条、感知失败分类 7 条、深夜劝睡与其失败路径、IPC 守卫行为测试 6 条、远程 session 6 条、课程恢复 4 条、打工上学以档案为权威 9 条。
+- **`test/clipPrivacy.test.js` 是一条活的假绿（`986ec80`）**：用 `lastIndexOf` 加「距离小于 500」判断两个字符串在源码里的相对位置，**既不校验极性也不校验分支归属**——门禁写成相反的判断也会通过。这是隐私相关的断言，而 README 明确承诺「关掉后剪贴板播报仍可用，只是不出网」。
+  现改为真实的行为测试：从压缩产物里按结构锚点切出剪贴板文本回调，核实它对外只有五个自由标识符、全部作为 `new Function` 形参注入即可真实执行，不需要 Electron。断言开关关闭时 LLM 调用 0 次、本地播报恰好 1 次且原文完整；开启时恰好 1 次上云且首参正确；`llmEnabled` 或 provider 缺一不出网；`clipToCloud` 为 `undefined`（老配置）按关闭处理。**极性变异实测对比：旧断言 pass 1 fail 0（这正是它假绿的证据），新断言 fail 3**；另有一条变异是在别处补一条没有门禁的上云调用——新断言红、旧断言仍绿。
+- **`test/rootListen.test.js` 只做相对断言（`6ab27c5`）**：只断言尝试次数等于常量本身，把 `LISTEN_MAX_ATTEMPTS` 从 5 改成 6 测试照样全绿（实测复现）。现补一条值锁，两条并存——相对断言保护「确实按常量试满了」这个行为，值锁保护这个数字不被无意改动（它决定端口被占用时最多试几个端口，直接决定用户可感知的启动失败等待时长）。
+- **`test/electronSecurityInvariants.test.js` 从 14 条增到 18 条**：新增「工厂默认 `sandbox` 必须为 true」「`sandbox` opt-out 清单恰好主宠窗 1 个」「`_guardIpc` 三层校验各自存在且拒绝时留日志」「反向断言：不许出现拼 URL 整串比对、必须 `decodeURIComponent`」「`ipcMain.on` 注册点唯一且无 `setPreload`」「`urlWindow` 的 `persist` 分区与『先装 session 守卫再建窗』的顺序」「第一方代码零 `new Function`」。
+- **补测钉死「打工与上学以档案为权威」（`6d16df6`）—— 结论是不改代码**。排查 trip 缺陷时怀疑 work/study 同构，核实后确认不存在该缺陷：全仓 work/study 的唯一结算点是 `GrowUp.js` 的 `countdownActiveTime`，由 60 秒 tick 驱动、入参是当轮现读的档案；`GrowUp` 不持有任何内存副本，也没有绑定到打工上学的定时器；槽位为 `null` 时选活动的三元链得空串直接返回、不结算。第二道防线是生病期间整段倒计时被 `ill` 守卫跳过。也无离线补算。
+  **与 trip 的根本差别**：travel 有进程内 `finishTimer` 加内存 `currentTrip` 缓存，档案被清了定时器照样到点结算——那才是 trip 缺陷的根因。所以保持口径一致的正确做法**恰恰是不加第二套取消机制**。这段推理写进了测试文件头注释，防止后人再同构地造一个 `cancelWork` 出来。变异验证里有一条特意复刻旧 travel 缺陷的形态（给 `GrowUp` 加「档案空则回落内存缓存」），确认对应断言会红而其余 8 条仍绿。
+- 本节大部分修复都配了变异验证而非口头声称。有代表性的几条：深夜劝睡的 7 个变异全部被杀（含把夜晚标识退化成当天日期 → 5 条变红）；`focusGuard` 30 个变异 29 个变红，唯一存活的经论证是等价变异（`if (!wasActive)` 改成 `if (true)` 无可观测差异，块内三个条件全基于 `awaySec`，重复进入时必然处于活跃态，块退化为空操作）——**未按等价变异含糊处理，首轮暴露的两个真实覆盖缺口已补测并复测变红**；感知的「关键词不得误伤瞬时失败」判定表是配套护栏，正则改宽成 `/image|vision|图片/i` 时它必须变红，否则修完会变成误停用。
+
+### 文档与注释
+
+- **`src/service` 全量复核，订正 26 处「注释断言了代码并不做的事」（`fe51467`）**。本仓库一半源码是无 sourcemap 的 webpack 压缩产物，注释是唯一的导航工具，**注释准确性因此等同于代码正确性**——前几轮已有三处错误注释成了缺陷的承重墙（让人相信代码做了它没做的事，缺陷因此长期存活）。
+  较有代表性的几处：`achievement` 的头注释列了「喂食/钓鱼/签到/旅游/升级」五个触发点，实际全仓只有 `aiWiring` 的 `check("timer")` 与 `travel` 的 `check("travel")` 两个，**签到那条纯属虚构**；`aiWiring` 写的感知事件名 `keyframe-requested` 全仓不存在，真名是 `keyframe-capture` 且由 `courseManager` 发出；`travel` 有五处（步骤顺序、别名主次、dirty 标志用途、「唯一权威」、`State.js` 归因）与实现不符，其中「显隐一律经此入口」在本服务自己就有四处绕过；`llm.js` 的三处数字口径（超时同值、字数余量、兜底文案）全部对不上。
+  订正原则是**说清代码实际做什么以及为什么，不是删掉了事**。已知缺口如实写成缺口——`courses/manager` 的「当前实现不区分导出失败与总结崩溃」这类，写出来比一句漂亮的假话有价值。`imageGen` 的「配置缺失静默返回」判为改注释而非补日志：记忆配图是 opt-in，「未配置」是常态不是错误，为它打日志等于给从没用过该功能的用户刷噪音；真正需要可观测的「配了但不合法」「配了但读不出」两条本来就有日志。
+- **`achievement.js` 与 `swfPet.js` 的两处过期头注释订正（`a618683` / `e9fe1e1`）**。前者原注释称 `achievements` 会被 `setPetInfo` 静默丢弃、只有 `$Store` 才是真正落盘，但 `pet.js` 的默认 `info` 表现在已含该键、`setPetInfo` 对对象走引用比较，赋值是生效的，**双写两路现在都是真存储**（变异验证钉住：把 `pet.js` 默认表里的 `achievements` 删掉，对应断言就红）。后者称「素材配置中最大为 5（bury）」「取 8 覆盖 cut ≤ 6 并留余量」都是错的，实测取值是 1 / 5 / 7（etoj、jtoc）/ 600，**8 实际是恰好覆盖 7、零余量**；新增的跨引用断言让注释与配置互校，不设第二份基准。
+- **主进程日志前缀合规（`0631994` / `6ab27c5`）**。仓库根 `main.js` 的 `[启动]` 是中文标签（无法 grep 反查文件）、`[FATAL]` 不是模块路径，现定为 `[main]` 基准 + `[main/startup]` 启动子作用域——**拆两级的理由是启动兜底与运行期兜底行为相反（退出 vs 只记日志）**，分前缀可直接 grep 区分。随后发现 `src/windows/main/main.js` 的 8 处 `[main]` 与仓库根撞名，两个不同文件用同一前缀则 grep 反查失效——而「能 grep 反查到文件」正是 README 禁止中文标签的同一个理由，故改为 `[main/main]`。字节数 21594 → 21634（正好 8 个 `/main`），diff 只有含前缀的两行变动、零重排；`clipPrivacy` 的两个切片锚点未受影响，并用一个破坏锚点的变异证明那些断言不是恒真。
+- **端口 33385 此前写了 4 份，其中一份硬编码进错误消息文案（`7fe5098`）**——改端口漏掉那处会输出与实际行为矛盾的日志，**把排查者带向错误方向**。现收敛为 `DEFAULT_PORT` 常量并加两道锁：文件内逐行扫源码（凡出现该数值的行必须是注释或那唯一一处 const 声明），跨文件读 `doMain.js` 的调用尾部正则捕获端口值与常量比对。实测把错误消息重新写死字面量会精确红 1 条。
+- **`probeBridge.js` 的 30000 是陈旧口径（`0631994`）**（注释还说「30s 是硬兜底」，而生产兜底是 15000）。现改为 `require` 生产的 `EXIT_FALLBACK_MS` 而非再写一份字面量，并加「读不到常量就抛」的守卫——否则常量哪天改名会静默退化成 `undefined` 超时，**那就是一个新的假绿**。
+- `app.exit(true)` 改 `app.exit(0)`（抢不到单实例锁是正常退出，布尔当退出码语义不明）；`indexOnline.html` 清掉残留的内网 IP 字面量（核实过它位于注释内、且 `root.js:21` 明文记载该远程加载分支已是死代码）；删掉从未使用的 `require("path")`。
+
+### 已知未修（已同步 README）
+
+- 存档 `config-qq-local.json` 的 `fishing.fishes` / 背包 / `achievements` 三个数组仍无上界——**有意未做**，裁剪要先回答「哪些鱼该留」以及「删掉的鱼算不算钓过」（影响成就与图鉴语义），是产品决策不是护栏。本轮只做到「涨大了让用户看见」。
+- `memory/daily/` 的每日 markdown 与 `facts.json` 无上界（每天一份，增长极慢）。
+- `setup` 的「重生为另一性别」正常路径里 `$Store.clear()` 之后紧跟的 `setItem("toSex")` 仍是裸调，抛错就是「已清档、未写 toSex」——这两步应作为一个事务处理。
+- `State.doActive` 开工 / 上学时既不清 `trip` 也不校验互斥，`af2b50c` 只是给后果兜了底；应把互斥前置校验收敛进 `doActive`。
+- `fishing/indexOnLine.js` 还有一处 `player.PETEventOnReceived` 是裸调（影片未就绪时抛未捕获 `TypeError`）。
+- 崩溃留下 `recording` 状态的课程会话仍会永久滞留——`recoverable()` 按设计不含 `recording`，扩展其语义会与本轮 `updated_at` 的落盘精度耦合。
+- `focusGuard._tick` 的三个前置守卫会静默 `return`，其中 `powerMonitor` 缺失与 `openSpeak` 未就绪属环境问题，长期不满足会让专注守护整体哑火且零日志。
+- `src/windows/main/main.js` 还有约 12 条无前缀的 `console.log` 调试残留。
+- **日志前缀规范没有任何自动化守卫**——`[main]` 撞名是靠人发现的，本该由一条扫 `src/` 下 error/warn 前缀的元测试自动抓到。相关地，`src/windows/main/shortcuts.js` 现存 3 处 `[快捷键]` 前缀，正是 README 逐字当作反面例子的那一个，是全仓仅存的中文前缀。
+- 钓鱼 / 密室的 `webSecurity:false` opt-out 理由（跨源 `contentWindow` 直写）在 Electron 28 的进程级站点隔离下已不成立，**应当被移除而非保留**；彻底修复需改为 `postMessage`。待办：先跑一次 `node test/ruffleSmoke/runCspGuard.js` 把 C3 探针的实测输出记进 `report.md`，用实测替掉推理。
+
+
+
 ## [未发布]（第三轮后续：安全纵深与防回归）
 
 补上第三轮审查列出的三条 P1。测试 656 → **690**，全绿。

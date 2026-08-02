@@ -47,6 +47,9 @@ const APP_HTML = "src/windows/app.html";
 /** 加载「用户输入的任意网址」的远程子窗，隔离要求最高。 */
 const URL_WINDOW = "src/windows/tool/urlWindow/main.js";
 
+/** 远程子窗所在目录。整个目录里不许再出现「对远程页面执行脚本」的汇点，见对应用例。 */
+const URL_WINDOW_DIR = "src/windows/tool/urlWindow";
+
 /** 不走工厂、直接 new BrowserWindow 的弹幕覆盖层（需要 screen-saver 置顶层级）。 */
 const BARRAGE = "src/windows/barrage/main.js";
 
@@ -797,6 +800,56 @@ test("urlWindow 远程子窗：必须用独立 persist 分区，且**先给该 s
   assert.ok(
     fromPartitionIdx < bwIdx,
     `${URL_WINDOW}: session.fromPartition 必须在 new BrowserWindow 之前完成（当前 ${fromPartitionIdx} > ${bwIdx}）。`
+  );
+});
+
+test("urlWindow 目录：不许再出现 executeJavaScript / 注入脚本表（对任意远程页面执行脚本的汇点已删除）", () => {
+  /* 被删掉的东西：main.js 的 toGetSunDatas(win) —— 它按 this.doType 查 doTypes.js 里的
+     页面改写脚本（去图 / 重建 DOM），对刚 loadURL 的**任意远程页面** executeJavaScript。
+     删除理由不是「它有已知漏洞」，而是全仓对 this.doType 只有 4 处读取、零赋值：
+     这个汇点当时靠「恰好没人给它赋值」保持不执行，而不是靠任何机制。一旦将来有人为了
+     加个「阅读模式」按钮把 doType 接到渲染层 IPC 上，就等于把「远程页面 + 拼接脚本」
+     这条组合摆回桌面上——而这是全仓唯一一个能加载任意网址的窗口。
+
+     为什么锚在整个目录而不是单个文件：恢复它最省事的方式就是新建一个同目录的
+     inject.js / doTypes.js，只钉 main.js 会漏。
+     为什么不锚全仓：barrage 与 window.js 的 executeJavaScript 是**本地页面**的正常注入
+     （壳窗片段渲染、弹幕内容），与远程页面无关，也是 app.html 保留 'unsafe-eval' 的理由。 */
+  const files = listSources(URL_WINDOW_DIR, [".js", ".html"]);
+  assert.ok(
+    files.includes(URL_WINDOW),
+    `${URL_WINDOW_DIR}: 目录扫描没扫到 ${URL_WINDOW}，本用例等于空跑。目录若已搬迁请同步 URL_WINDOW_DIR。`
+  );
+
+  const injectors = files.filter((rel) =>
+    stripComments(readSource(rel)).includes("executeJavaScript")
+  );
+  assert.deepEqual(
+    injectors,
+    [],
+    `${URL_WINDOW_DIR}/ 下出现了 executeJavaScript：\n${injectors.join("\n")}\n` +
+      `这个目录里的 WebContents 装的是**用户输入的任意网址**，往里注脚本意味着：` +
+      `脚本文本一旦可由配置/IPC 影响就是任意站点上下文的代码执行，且注入内容能读到目标站点的` +
+      `登录态与页面数据。确需页面改写请说明脚本来源如何被约束（常量表？谁能选？能否改成` +
+      `insertCSS 这类无脚本能力的手段），再连同理由更新本断言——不要只删断言。`
+  );
+
+  const scriptTables = files.filter((rel) => /\/doTypes?\.js$/.test(rel));
+  assert.deepEqual(
+    scriptTables,
+    [],
+    `${URL_WINDOW_DIR}/ 下出现了 doTypes.js 注入脚本表：\n${scriptTables.join("\n")}\n` +
+      `它是上一条断言里那个汇点的脚本来源（已随 toGetSunDatas 一并删除）。`
+  );
+
+  const revived = files.filter((rel) =>
+    /\btoGetSunDatas\b|\bthis\.doType\b/.test(stripComments(readSource(rel)))
+  );
+  assert.deepEqual(
+    revived,
+    [],
+    `${URL_WINDOW_DIR}/ 下 toGetSunDatas / this.doType 又回来了：\n${revived.join("\n")}\n` +
+      `该字段全仓零赋值、恒不执行，已连同注入路径删除；恢复它请先回答「谁给它赋值、赋什么」。`
   );
 });
 
